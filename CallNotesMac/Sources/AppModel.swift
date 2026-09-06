@@ -21,7 +21,6 @@ final class AppModel {
     private let memoryStore = MemoryStore()
     private var liveSession: (any STTSession)?
     private var liveResultsTask: Task<Void, Never>?
-    private var fixturePlaybackTask: Task<Void, Never>?
 
     var selectedCall: Call? {
         calls.first { $0.id == selectedCallID }
@@ -101,12 +100,8 @@ final class AppModel {
 
         do {
             let fixture = try SampleCallFixture.materialize()
-            do {
-                try await startLiveSession()
-                startFixturePlayback(cafURL: fixture.cafURL)
-            } catch {
-                live.lastLine = "Processing sample call..."
-            }
+            try await startLiveSession()
+            try await playFixture(cafURL: fixture.cafURL)
             var profiles = try await store.fetchSpeakerProfiles()
             if !profiles.contains(where: \.isOwner) {
                 let owner = SpeakerIdentity.enroll(
@@ -142,22 +137,11 @@ final class AppModel {
                 status: .transcribing
             )
 
-            let processed: ProcessedCall
-            if let hardware = await processWithLocalEngine(cafURL: fixture.cafURL, call: call, profiles: profiles) {
-                processed = hardware
-            } else {
-                let spine = LocalTranscriptionSpine(
-                    speech: SampleCallFixture.scriptedSpeech,
-                    diarizer: SampleCallFixture.scriptedDiarizer,
-                    store: store
-                )
-                processed = try await spine.process(
-                    cafURL: fixture.cafURL,
-                    call: call,
-                    profiles: profiles,
-                    referenceTurns: fixture.referenceTurns
-                )
-            }
+            let processed = try await processWithLocalEngine(
+                cafURL: fixture.cafURL,
+                call: call,
+                profiles: profiles
+            )
 
             turnsByCall[processed.call.id] = processed.turns
             lastDER = processed.der
@@ -226,57 +210,45 @@ final class AppModel {
     }
 
     func stopLiveSession() async {
-        fixturePlaybackTask?.cancel()
-        fixturePlaybackTask = nil
         await finishLiveSession()
     }
 
-    private func startFixturePlayback(cafURL: URL) {
-        fixturePlaybackTask?.cancel()
-        fixturePlaybackTask = Task { [weak self] in
-            guard let self else { return }
-            do {
-                let split = try ChannelAudio.splitStereoCAF(url: cafURL)
-                let chunkSize = 8_000
-                for offset in stride(from: 0, to: split.near.count, by: chunkSize) {
-                    guard !Task.isCancelled else { return }
-                    let end = min(offset + chunkSize, split.near.count)
-                    try await appendLivePCM(split.near.subdata(in: offset..<end))
-                    try await Task.sleep(for: .milliseconds(100))
-                }
-                await finishLiveSession()
-            } catch {
-                guard !Task.isCancelled else { return }
-                statusMessage = error.localizedDescription
-                await finishLiveSession()
+    private func playFixture(cafURL: URL) async throws {
+        do {
+            let split = try ChannelAudio.splitStereoCAF(url: cafURL)
+            let chunkSize = 8_000
+            for offset in stride(from: 0, to: split.near.count, by: chunkSize) {
+                let end = min(offset + chunkSize, split.near.count)
+                try await appendLivePCM(split.near.subdata(in: offset..<end))
+                try await Task.sleep(for: .milliseconds(100))
             }
+        } catch {
+            await finishLiveSession()
+            throw error
         }
+        await finishLiveSession()
     }
 
     private func processWithLocalEngine(
         cafURL: URL,
         call: Call,
         profiles: [SpeakerProfile]
-    ) async -> ProcessedCall? {
-        do {
-            let spine = LocalTranscriptionSpine(
-                speech: speech,
-                diarizer: FluidDiarizer(),
-                store: store
-            )
-            let processed = try await spine.process(
-                cafURL: cafURL,
-                call: call,
-                profiles: profiles,
-                referenceTurns: SampleCallFixture.referenceTurns
-            )
-            if processed.turns.contains(where: { !$0.text.isEmpty }) {
-                return processed
-            }
-            return nil
-        } catch {
-            return nil
+    ) async throws -> ProcessedCall {
+        let spine = LocalTranscriptionSpine(
+            speech: speech,
+            diarizer: FluidDiarizer(),
+            store: store
+        )
+        let processed = try await spine.process(
+            cafURL: cafURL,
+            call: call,
+            profiles: profiles,
+            referenceTurns: SampleCallFixture.referenceTurns
+        )
+        guard processed.turns.contains(where: { !$0.text.isEmpty }) else {
+            throw SampleCallError.emptyTranscription
         }
+        return processed
     }
 
     private func loadTurns(callID: UUID) async throws -> [AttributedTurn] {
@@ -292,39 +264,6 @@ enum SampleCallFixture {
     static let referenceTurns = [
         DiarizationTurn(speaker: "A", start: 2.4, end: 5.0),
     ]
-
-    static var scriptedSpeech: ScriptedPCMTranscriber {
-        ScriptedPCMTranscriber(
-            near: [
-                RawSegment(
-                    start: 0.0,
-                    end: 2.2,
-                    text: "Hello Priya, this is the near channel confirming the meeting time.",
-                    channel: .near
-                )
-            ],
-            far: [
-                RawSegment(
-                    start: 2.4,
-                    end: 5.0,
-                    text: "Hi, this is Priya on the far channel. Let's ship the pilot next week.",
-                    channel: .far
-                )
-            ]
-        )
-    }
-
-    static var scriptedDiarizer: ScriptedDiarizer {
-        ScriptedDiarizer(
-            clusters: [
-                DiarizedCluster(
-                    key: "A",
-                    ranges: [2.4...5.0],
-                    embedding: embedding([0, 1, 0])
-                )
-            ]
-        )
-    }
 
     static func embedding(_ values: [Float]) -> [Float] {
         values + Array(repeating: 0, count: max(EmbeddingModel.dimension - values.count, 0))
@@ -363,5 +302,13 @@ enum SampleCallFixture {
             samples[index] = Int16((value * 0.2) * Double(Int16.max))
         }
         return samples.withUnsafeBytes { Data($0) }
+    }
+}
+
+private enum SampleCallError: LocalizedError {
+    case emptyTranscription
+
+    var errorDescription: String? {
+        "Apple SpeechAnalyzer or FluidAudio returned no sample results."
     }
 }

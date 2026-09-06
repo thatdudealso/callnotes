@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Provision the local services CallNotes will use on a development Mac.
 # Run with --check to inspect every operation without changing the machine.
+# Phase 2's original PostgreSQL 16 decision was superseded by dedicated PostgreSQL 18.
 
 set -euo pipefail
 
@@ -155,7 +156,7 @@ if ! command -v brew >/dev/null 2>&1; then
   exit 1
 fi
 
-say "Installing or updating Homebrew dependencies"
+say "Installing or updating dedicated PostgreSQL 18 dependencies"
 run brew install postgresql@18 pgvector
 
 if "$CHECK_ONLY"; then
