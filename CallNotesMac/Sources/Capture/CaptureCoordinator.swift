@@ -17,6 +17,7 @@ final class CaptureCoordinator {
     private let logger = Logger(subsystem: "com.thatdudealso.callnotes", category: "CaptureCoordinator")
     private var activeCallID: UUID?
     private var previousPhase: CallDetectionPhase = .idle
+    private var captureTransition: Task<Void, Never>?
 
     init() {
         Task { @MainActor in
@@ -43,12 +44,11 @@ final class CaptureCoordinator {
         let phase = status.snapshot.phase
         switch (previousPhase, phase) {
         case (.idle, .pendingStart), (.idle, .recording):
-            Task { await startCapture(status: status, committed: phase == .recording) }
+            enqueueCaptureReconciliation()
         case (.pendingStart, .recording):
-            capture.beginCommittedWrite()
-            recordingState = .recording
+            enqueueCaptureReconciliation()
         case (_, .idle) where previousPhase != .idle:
-            Task { await stopCapture() }
+            enqueueCaptureReconciliation()
         default:
             break
         }
@@ -62,7 +62,33 @@ final class CaptureCoordinator {
         previousPhase = phase
     }
 
-    private func startCapture(status: CallDetector.Status, committed: Bool) async {
+    private func enqueueCaptureReconciliation() {
+        let previousTransition = captureTransition
+        captureTransition = Task { @MainActor [weak self] in
+            await previousTransition?.value
+            guard let self else { return }
+            await reconcileCapture()
+        }
+    }
+
+    private func reconcileCapture() async {
+        let status = detector.latest
+        guard status.snapshot.isCapturing else {
+            if capture.isRunning {
+                await stopCapture()
+            }
+            return
+        }
+
+        if !capture.isRunning {
+            await startCapture(status: status)
+        }
+        if capture.isRunning, detector.latest.snapshot.isCommittedRecording {
+            capture.beginCommittedWrite()
+        }
+    }
+
+    private func startCapture(status: CallDetector.Status) async {
         do {
             let callID = UUID()
             activeCallID = callID
@@ -76,12 +102,6 @@ final class CaptureCoordinator {
                     enableVoiceProcessing: true
                 )
             )
-            if committed {
-                capture.beginCommittedWrite()
-                recordingState = .recording
-            } else {
-                recordingState = .armed
-            }
             lastFarSource = capture.farSource
             lastError = nil
             logger.info("capture started \(url.path, privacy: .public) far=\(self.capture.farSource.rawValue, privacy: .public)")

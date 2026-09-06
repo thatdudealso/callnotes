@@ -41,6 +41,13 @@ final class AudioCapture: @unchecked Sendable {
 
     private let mixer = Mutex(MixerState())
 
+    private struct ResamplerState: Sendable {
+        var near: StreamingPCMResampler?
+        var far: StreamingPCMResampler?
+    }
+
+    private let resamplers = Mutex(ResamplerState())
+
     private var writer: StereoCAFWriter?
     private var writing = false
     private(set) var isRunning = false
@@ -53,6 +60,7 @@ final class AudioCapture: @unchecked Sendable {
         guard !isRunning else { throw CaptureError.alreadyRunning }
         ring.reset()
         mixer.withLock { $0 = MixerState() }
+        resamplers.withLock { $0 = ResamplerState() }
         outputURL = configuration.outputURL
         writer = try StereoCAFWriter(url: configuration.outputURL)
         writing = false
@@ -93,8 +101,18 @@ final class AudioCapture: @unchecked Sendable {
             }
         }
 
-        if configuration.enableMicrophone {
-            try microphone.start(enableVoiceProcessing: configuration.enableVoiceProcessing)
+        do {
+            if configuration.enableMicrophone {
+                try microphone.start(enableVoiceProcessing: configuration.enableVoiceProcessing)
+            }
+        } catch {
+            processTap.stop()
+            await screenFallback.stop()
+            writer?.close()
+            writer = nil
+            outputURL = nil
+            farSource = .none
+            throw error
         }
         isRunning = true
     }
@@ -130,7 +148,20 @@ final class AudioCapture: @unchecked Sendable {
     private enum Channel { case near, far }
 
     private func ingest(channel: Channel, sample: [Float], sampleRate: Double, hostTime: UInt64) {
-        let int16 = PCMResampler.resampleMonoToInt16(input: sample, inputSampleRate: sampleRate)
+        let int16 = resamplers.withLock { state in
+            switch channel {
+            case .near:
+                if state.near?.inputSampleRate != sampleRate {
+                    state.near = StreamingPCMResampler(inputSampleRate: sampleRate)
+                }
+                return state.near?.resampleMonoToInt16(sample) ?? []
+            case .far:
+                if state.far?.inputSampleRate != sampleRate {
+                    state.far = StreamingPCMResampler(inputSampleRate: sampleRate)
+                }
+                return state.far?.resampleMonoToInt16(sample) ?? []
+            }
+        }
         mixerQueue.async { [weak self] in
             self?.mix(channel: channel, samples: int16, hostTime: hostTime, sampleRate: Double(AudioConstants.localSampleRate))
         }

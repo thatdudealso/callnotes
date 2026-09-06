@@ -75,6 +75,7 @@ public struct CallDetectionDebounce: Sendable {
     private var phase: CallDetectionPhase = .idle
     private var isManual = false
     private var phaseEnteredAt: TimeInterval = 0
+    private var autoStartSuppressedUntilSignalsDrop = false
 
     public init(
         startDebounce: TimeInterval = AudioConstants.startDebounceSeconds,
@@ -89,11 +90,20 @@ public struct CallDetectionDebounce: Sendable {
     public mutating func tick(_ sample: CallDetectionSample) -> CallDetectionSnapshot {
         if sample.manualStop {
             enter(.idle, at: sample.now, manual: false)
+            autoStartSuppressedUntilSignalsDrop = true
             return snapshot()
         }
 
         if sample.manualStart {
+            autoStartSuppressedUntilSignalsDrop = false
             enter(.recording, at: sample.now, manual: true)
+            return snapshot()
+        }
+
+        if autoStartSuppressedUntilSignalsDrop {
+            if !sample.bothAutoSignals {
+                autoStartSuppressedUntilSignalsDrop = false
+            }
             return snapshot()
         }
 

@@ -32,6 +32,18 @@ import Testing
         #expect(rms > 5_000)
     }
 
+    @Test func streamingResamplerPreservesDurationAcrossCallbacks() {
+        var resampler = StreamingPCMResampler(inputSampleRate: 48_000, outputSampleRate: 16_000)
+        let buffers = (0..<1_000).map { buffer in
+            (0..<512).map { frame in Float(buffer * 512 + frame) }
+        }
+
+        let output = buffers.flatMap { resampler.resampleMono($0) }
+
+        #expect(output.count == 170_667)
+        #expect(abs(output.last! - 511_998) < 0.01)
+    }
+
     @Test func mixdownAveragesChannels() {
         let interleaved: [Float] = [1, 3, 5, 7]
         let mono = PCMResampler.mixdownMono(interleaved: interleaved, channels: 2)

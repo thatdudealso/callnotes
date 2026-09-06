@@ -71,3 +71,45 @@ public enum PCMResampler: Sendable {
         return Int16((clipped * Float(Int16.max)).rounded())
     }
 }
+
+public struct StreamingPCMResampler: Sendable {
+    public let inputSampleRate: Double
+    public let outputSampleRate: Double
+
+    private let ratio: Double
+    private var nextSourcePosition: Double = 0
+    private var sourceFramesProcessed: Int = 0
+
+    public init(inputSampleRate: Double, outputSampleRate: Double = Double(AudioConstants.localSampleRate)) {
+        self.inputSampleRate = inputSampleRate
+        self.outputSampleRate = outputSampleRate
+        ratio = inputSampleRate / outputSampleRate
+    }
+
+    public mutating func resampleMono(_ input: [Float]) -> [Float] {
+        guard !input.isEmpty, inputSampleRate > 0, outputSampleRate > 0 else { return [] }
+
+        let firstSourcePosition = Double(sourceFramesProcessed)
+        let lastSourcePosition = firstSourcePosition + Double(input.count - 1)
+        var output: [Float] = []
+
+        while nextSourcePosition <= lastSourcePosition {
+            let localPosition = nextSourcePosition - firstSourcePosition
+            let index = Int(localPosition)
+            let fraction = Float(localPosition - Double(index))
+            if index >= input.count - 1 {
+                output.append(input[input.count - 1])
+            } else {
+                output.append(input[index] * (1 - fraction) + input[index + 1] * fraction)
+            }
+            nextSourcePosition += ratio
+        }
+
+        sourceFramesProcessed += input.count
+        return output
+    }
+
+    public mutating func resampleMonoToInt16(_ input: [Float]) -> [Int16] {
+        PCMResampler.floatToInt16(resampleMono(input))
+    }
+}

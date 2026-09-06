@@ -90,4 +90,20 @@ import Testing
         )
         #expect(snapshot.phase == .idle)
     }
+
+    @Test func manualStopSuppressesAutoStartUntilSignalsDrop() {
+        var debounce = CallDetectionDebounce()
+        _ = debounce.tick(.init(now: 0, micActive: true, callProcessAlive: true))
+        _ = debounce.tick(.init(now: 5, micActive: true, callProcessAlive: true))
+        _ = debounce.tick(.init(now: 6, micActive: true, callProcessAlive: true, manualStop: true))
+
+        var snapshot = debounce.tick(.init(now: 12, micActive: true, callProcessAlive: true))
+        #expect(snapshot.phase == .idle)
+
+        snapshot = debounce.tick(.init(now: 13, micActive: false, callProcessAlive: true))
+        #expect(snapshot.phase == .idle)
+
+        snapshot = debounce.tick(.init(now: 14, micActive: true, callProcessAlive: true))
+        #expect(snapshot.phase == .pendingStart)
+    }
 }
