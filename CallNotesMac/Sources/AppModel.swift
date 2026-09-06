@@ -91,12 +91,12 @@ final class AppModel {
                 let owner = SpeakerIdentity.enroll(
                     displayName: "Me",
                     isOwner: true,
-                    embedding: [1, 0, 0],
+                    embedding: SampleCallFixture.embedding([1, 0, 0]),
                     embeddingModel: EmbeddingModel.weSpeakerV2
                 )
                 let priya = SpeakerIdentity.enroll(
                     displayName: "Priya",
-                    embedding: [0, 1, 0],
+                    embedding: SampleCallFixture.embedding([0, 1, 0]),
                     embeddingModel: EmbeddingModel.weSpeakerV2
                 )
                 try await store.upsertSpeakerProfile(owner)
@@ -288,9 +288,17 @@ enum SampleCallFixture {
     static var scriptedDiarizer: ScriptedDiarizer {
         ScriptedDiarizer(
             clusters: [
-                DiarizedCluster(key: "A", ranges: [2.4...5.0], embedding: [0, 1, 0])
+                DiarizedCluster(
+                    key: "A",
+                    ranges: [2.4...5.0],
+                    embedding: embedding([0, 1, 0])
+                )
             ]
         )
+    }
+
+    static func embedding(_ values: [Float]) -> [Float] {
+        values + Array(repeating: 0, count: max(EmbeddingModel.dimension - values.count, 0))
     }
 
     static func materialize() throws -> (cafURL: URL, referenceTurns: [DiarizationTurn]) {

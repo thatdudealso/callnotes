@@ -5,12 +5,17 @@
 set -euo pipefail
 
 CHECK_ONLY=false
-if [[ "${1:-}" == "--check" ]]; then
-  CHECK_ONLY=true
-elif [[ $# -ne 0 ]]; then
-  echo "usage: $0 [--check]" >&2
-  exit 64
-fi
+INSTALL_OLLAMA=false
+for argument in "$@"; do
+  case "$argument" in
+    --check) CHECK_ONLY=true ;;
+    --with-ollama) INSTALL_OLLAMA=true ;;
+    *)
+      echo "usage: $0 [--check] [--with-ollama]" >&2
+      exit 64
+      ;;
+  esac
+done
 
 CALLNOTES_ROLE="callnotes"
 CALLNOTES_DATABASE="callnotes"
@@ -151,14 +156,18 @@ if ! command -v brew >/dev/null 2>&1; then
 fi
 
 say "Installing or updating Homebrew dependencies"
-run brew install postgresql@18 pgvector ollama tailscale
+run brew install postgresql@18 pgvector
 
 if "$CHECK_ONLY"; then
   say "would locate Homebrew's dedicated postgresql@18 and pgvector installation"
   say "would create PostgreSQL role '$CALLNOTES_ROLE', database '$CALLNOTES_DATABASE', and extensions vector + pg_trgm"
-  say "would pull model: $GLIMMER_MODEL and verify manifest $GLIMMER_MANIFEST_DIGEST"
-  say "would pull fallback: $FALLBACK_MODEL and verify manifest $FALLBACK_MANIFEST_DIGEST"
-  say "would write launchd agents for dedicated postgresql@18 and ollama"
+  say "would write a launchd agent for dedicated postgresql@18"
+  if "$INSTALL_OLLAMA"; then
+    say "would install ollama"
+    say "would pull model: $GLIMMER_MODEL and verify manifest $GLIMMER_MANIFEST_DIGEST"
+    say "would pull fallback: $FALLBACK_MODEL and verify manifest $FALLBACK_MANIFEST_DIGEST"
+    say "would write a launchd agent for ollama"
+  fi
   exit 0
 fi
 
@@ -178,9 +187,7 @@ fi
 mkdir -p "$POSTGRES_SOCKET_DIR"
 
 write_postgres_plist
-write_ollama_plist
 bootstrap_launch_agent "$POSTGRES_PLIST"
-bootstrap_launch_agent "$OLLAMA_PLIST"
 wait_for_postgres
 
 if ! "$PSQL" --host="$POSTGRES_SOCKET_DIR" --port="$CALLNOTES_POSTGRES_PORT" --dbname=postgres --tuples-only --no-align \
@@ -202,8 +209,13 @@ fi
 # Keep its prefix visible in the script output for troubleshooting mixed-prefix installs.
 say "Using pgvector from $PGVECTOR_PREFIX"
 
-wait_for_ollama
-pull_and_verify_model "$GLIMMER_MODEL" "$GLIMMER_MANIFEST_DIGEST"
-pull_and_verify_model "$FALLBACK_MODEL" "$FALLBACK_MANIFEST_DIGEST"
+if "$INSTALL_OLLAMA"; then
+  run brew install ollama
+  write_ollama_plist
+  bootstrap_launch_agent "$OLLAMA_PLIST"
+  wait_for_ollama
+  pull_and_verify_model "$GLIMMER_MODEL" "$GLIMMER_MANIFEST_DIGEST"
+  pull_and_verify_model "$FALLBACK_MODEL" "$FALLBACK_MANIFEST_DIGEST"
+fi
 
-say "CallNotes bootstrap complete. Models are pinned in docs/models.md."
+say "CallNotes bootstrap complete."
