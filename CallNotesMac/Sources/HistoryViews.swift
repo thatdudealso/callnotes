@@ -122,7 +122,7 @@ struct CallDetailView: View {
             LivePillView(
                 state: model.live,
                 recordingState: model.recordingState,
-                onStop: {}
+                onStop: { Task { await model.stopLiveSession() } }
             )
             .frame(maxWidth: .infinity)
         }

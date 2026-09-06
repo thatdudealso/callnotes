@@ -4,7 +4,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 - Add durable project-specific notes here as they are discovered through real work.
 - `project.yml` is the XcodeGen source of truth. Use the build commands in `README.md`; generated `CallNotes.xcodeproj` is ignored.
-- `Scripts/bootstrap.sh` owns local service provisioning and immutable Ollama model references. Use `Scripts/bootstrap.sh --check` before making machine-level changes.
+- `Scripts/bootstrap.sh` owns local service provisioning. Use `Scripts/bootstrap.sh --check` before making machine-level changes. It must not pull Ollama models in this phase; the pinned notes-model references live in `docs/models.md` and the pulls return in the notes phase.
 - Phase 2 store: the captain superseded the original `postgresql@16` requirement with dedicated `postgresql@18`. `PostgresStore` targets the bootstrap `callnotes` DB (role `callnotes`, extensions `vector` + `pg_trgm`), with `MemoryStore` fallback when the dedicated Postgres instance is unreachable (CI). `StoreConfiguration.localCandidates()` uses only the dedicated socket and never `/tmp/.s.PGSQL.5432` or port 5432.
 - Hardware SpeechAnalyzer and FluidAudio tests are gated on `CALLNOTES_HARNESS=1`. Live Postgres tests run when a candidate socket/server accepts the `callnotes` role.
 - Dual SpeechAnalyzer instances must be held alive together in `DualInstanceProbe`; sequential start-and-stop cannot observe ANE contention. Fallback is `nearLiveFarBatch`.

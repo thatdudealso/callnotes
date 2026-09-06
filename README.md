@@ -50,10 +50,11 @@ xcodebuild -project CallNotes.xcodeproj -scheme CallNotesMac \
 `project.yml` is the source of truth for the Xcode project. Run `xcodegen
 generate` whenever it changes; the generated project is deliberately ignored.
 
-For local Postgres, Ollama, Tailscale, and the pinned notes models, review then
-run `Scripts/bootstrap.sh`. Use `Scripts/bootstrap.sh --check` to see the
-operations without making changes. See [docs/models.md](docs/models.md) for the
-immutable model references.
+For the dedicated local Postgres instance, review then run
+`Scripts/bootstrap.sh`. Use `Scripts/bootstrap.sh --check` to see the
+operations without making changes. Ollama and the pinned notes models are not
+downloaded in this phase; see [docs/models.md](docs/models.md) for the
+immutable model references that the notes phase will install.
 
 ## License and attribution
 
