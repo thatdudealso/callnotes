@@ -17,6 +17,7 @@ public struct DiarizedCluster: Sendable, Equatable {
 /// arrives in Phase 2. The batch pass is the source of truth for identity;
 /// streaming (LS-EEND / Sortformer) labels are provisional.
 public protocol DiarizationService: Sendable {
+    var providerID: String { get }
     func diarize(fileURL: URL) async throws -> [DiarizedCluster]
 }
 

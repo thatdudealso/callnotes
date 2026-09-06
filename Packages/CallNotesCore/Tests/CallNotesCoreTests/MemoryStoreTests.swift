@@ -121,6 +121,7 @@ import Testing
         )
 
         #expect(processed.call.status == .transcribed)
+        #expect(processed.call.diarizationProvider == "scripted")
         #expect(processed.turns.map(\.speakerName) == ["Me", "Priya"])
         #expect(processed.turns.map(\.text) == ["hello priya", "hi lets ship the pilot"])
         #expect(processed.der?.der == 0)
@@ -179,6 +180,8 @@ import Testing
 }
 
 private struct FailingDiarizer: DiarizationService {
+    let providerID = "failing"
+
     func diarize(fileURL: URL) async throws -> [DiarizedCluster] {
         throw Failure.diarization
     }

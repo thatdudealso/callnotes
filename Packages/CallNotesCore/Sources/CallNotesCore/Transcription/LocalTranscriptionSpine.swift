@@ -96,7 +96,7 @@ public struct LocalTranscriptionSpine: Sendable {
         var working = call
         working.status = .transcribing
         working.sttProvider = speech.id
-        working.diarizationProvider = FluidDiarizer.providerID
+        working.diarizationProvider = diarizer.providerID
         working.audioPath = cafURL.path
         try await store.upsertCall(working)
 

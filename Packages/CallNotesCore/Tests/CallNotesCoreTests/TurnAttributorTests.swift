@@ -132,6 +132,23 @@ import Testing
         #expect(turns.map(\.speakerName) == ["Me", "Priya", "Me"])
     }
 
+    @Test func simultaneousChannelsWithSameProfileRemainSeparateTurns() {
+        let near = [RawSegment(start: 0, end: 1, text: "near", channel: .near)]
+        let far = [RawSegment(start: 0.5, end: 0.9, text: "far", channel: .far)]
+        let clusters = [
+            DiarizedCluster(key: "A", ranges: [0.5...0.9], embedding: [1, 0, 0])
+        ]
+        let turns = TurnAttributor.attribute(
+            near: near,
+            far: far,
+            clusters: clusters,
+            profiles: [owner]
+        )
+        #expect(turns.map(\.text) == ["near", "far"])
+        #expect(turns.map(\.channel) == [.near, .far])
+        #expect(turns.map(\.clusterKey) == ["me", "A"])
+    }
+
     @Test func snapsBoundariesToWordTimestamps() {
         let words = [
             Word(text: "hello", start: 0.12, end: 0.40),

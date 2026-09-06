@@ -8,6 +8,8 @@ import Foundation
 public struct FluidDiarizer: DiarizationService {
     public static let providerID = "fluid_audio"
 
+    public var providerID: String { Self.providerID }
+
     public init() {}
 
     public func diarize(fileURL: URL) async throws -> [DiarizedCluster] {

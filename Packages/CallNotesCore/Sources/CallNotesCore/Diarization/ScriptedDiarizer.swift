@@ -3,10 +3,12 @@ import Foundation
 /// Test/harness diarizer that returns scripted clusters, used when FluidAudio
 /// models are not present (CI) and as a seam for identity tests.
 public struct ScriptedDiarizer: DiarizationService {
+    public let providerID: String
     public var clusters: [DiarizedCluster]
 
-    public init(clusters: [DiarizedCluster]) {
+    public init(clusters: [DiarizedCluster], providerID: String = "scripted") {
         self.clusters = clusters
+        self.providerID = providerID
     }
 
     public func diarize(fileURL: URL) async throws -> [DiarizedCluster] {

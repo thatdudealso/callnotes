@@ -40,9 +40,14 @@ public enum SpeakerIdentity {
     public static func learn(
         profile: SpeakerProfile,
         embedding: [Float],
+        embeddingModel: String,
         positive: Bool
     ) -> SpeakerProfile {
-        guard positive, profile.centroid.count == embedding.count, profile.sampleCount > 0 else {
+        guard positive,
+            profile.embeddingModel == embeddingModel,
+            profile.centroid.count == embedding.count,
+            profile.sampleCount > 0
+        else {
             return profile
         }
         var updated = profile

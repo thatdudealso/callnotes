@@ -23,7 +23,12 @@ import Testing
             embedding: [1, 0, 0],
             embeddingModel: EmbeddingModel.weSpeakerV2
         )
-        profile = SpeakerIdentity.learn(profile: profile, embedding: [0, 1, 0], positive: true)
+        profile = SpeakerIdentity.learn(
+            profile: profile,
+            embedding: [0, 1, 0],
+            embeddingModel: EmbeddingModel.weSpeakerV2,
+            positive: true
+        )
         #expect(profile.sampleCount == 2)
         #expect(profile.centroid == [0.5, 0.5, 0])
     }
@@ -34,9 +39,29 @@ import Testing
             embedding: [1, 0, 0],
             embeddingModel: EmbeddingModel.weSpeakerV2
         )
-        profile = SpeakerIdentity.learn(profile: profile, embedding: [0, 1, 0], positive: false)
+        profile = SpeakerIdentity.learn(
+            profile: profile,
+            embedding: [0, 1, 0],
+            embeddingModel: EmbeddingModel.weSpeakerV2,
+            positive: false
+        )
         #expect(profile.sampleCount == 1)
         #expect(profile.centroid == [1, 0, 0])
+    }
+
+    @Test func mismatchedModelDoesNotUpdateCentroid() {
+        let profile = SpeakerIdentity.enroll(
+            displayName: "Priya",
+            embedding: [1, 0, 0],
+            embeddingModel: EmbeddingModel.weSpeakerV2
+        )
+        let learned = SpeakerIdentity.learn(
+            profile: profile,
+            embedding: [0, 1, 0],
+            embeddingModel: "other-model",
+            positive: true
+        )
+        #expect(learned == profile)
     }
 
     @Test func matchSkipsDifferentEmbeddingModels() {
