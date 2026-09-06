@@ -81,6 +81,13 @@ final class ProcessTapCapture: @unchecked Sendable {
     }
 
     private func startTap(description: CATapDescription) throws {
+        var started = false
+        defer {
+            if !started {
+                stopInternal()
+            }
+        }
+
         var createdTap = AudioObjectID(kAudioObjectUnknown)
         let tapStatus = AudioHardwareCreateProcessTap(description, &createdTap)
         guard tapStatus == noErr, createdTap != kAudioObjectUnknown else {
@@ -137,6 +144,7 @@ final class ProcessTapCapture: @unchecked Sendable {
         }
         ioProcID = createdProc
         try CoreAudioProperty.check(AudioDeviceStart(aggregateID, createdProc))
+        started = true
     }
 
     private func handleIO(inInputData: UnsafePointer<AudioBufferList>?, inInputTime: UnsafePointer<AudioTimeStamp>?) {

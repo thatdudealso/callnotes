@@ -2,6 +2,7 @@ import AVFoundation
 import CallNotesCore
 import Darwin
 import Foundation
+import Synchronization
 
 /// Phase 1 capture harness (plan section 16.3).
 ///
@@ -73,19 +74,60 @@ struct CaptureHarnessResult: Sendable {
 
 func withTimeout<T: Sendable>(
     seconds: TimeInterval,
-    operation: @escaping @Sendable () async throws -> T
+    operation: @escaping @Sendable () async throws -> T,
+    cleanup: @escaping @Sendable () async -> Void = {}
 ) async throws -> T {
-    try await withThrowingTaskGroup(of: T.self) { group in
-        group.addTask { try await operation() }
-        group.addTask {
-            try await Task.sleep(for: .seconds(seconds))
-            throw CaptureHarnessError.captureFailed("timed out after \(seconds)s")
+    try await withCheckedThrowingContinuation { continuation in
+        let completion = TimeoutCompletion(continuation: continuation)
+        let operationTask = Task {
+            do {
+                let result = try await operation()
+                if Task.isCancelled {
+                    await cleanup()
+                    throw CancellationError()
+                }
+                completion.resume(.success(result))
+            } catch {
+                if Task.isCancelled {
+                    await cleanup()
+                }
+                completion.resume(.failure(error))
+            }
         }
-        guard let result = try await group.next() else {
-            throw CaptureHarnessError.captureFailed("timed out")
+
+        Task {
+            do {
+                try await Task.sleep(for: .seconds(seconds))
+            } catch {
+                return
+            }
+            operationTask.cancel()
+            completion.resume(.failure(CaptureHarnessError.captureFailed("timed out after \(seconds)s")))
         }
-        group.cancelAll()
-        return result
+    }
+}
+
+private final class TimeoutCompletion<Value: Sendable>: @unchecked Sendable {
+    private struct State {
+        var resumed = false
+    }
+
+    private let continuation: CheckedContinuation<Value, Error>
+    private let state = Mutex(State())
+
+    init(continuation: CheckedContinuation<Value, Error>) {
+        self.continuation = continuation
+    }
+
+    func resume(_ result: Result<Value, Error>) {
+        let shouldResume = state.withLock { state in
+            guard !state.resumed else { return false }
+            state.resumed = true
+            return true
+        }
+        if shouldResume {
+            continuation.resume(with: result)
+        }
     }
 }
 
@@ -116,6 +158,8 @@ struct CaptureHarness {
                         enableScreenCaptureFallback: false
                     )
                 )
+            } cleanup: {
+                _ = try? await capture.stop()
             }
         } catch {
             player.stop()
