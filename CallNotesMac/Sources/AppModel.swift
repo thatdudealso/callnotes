@@ -11,7 +11,8 @@ final class AppModel {
     var selectedCallID: UUID?
     var turnsByCall: [UUID: [AttributedTurn]] = [:]
     var live: LiveTranscriptState = LiveTranscriptState()
-    var storeBackendName = "memory"
+    var storeBackendName = "initializing"
+    var isStoreInitialized = false
     var lastDER: DiarizationErrorRate.Result?
     var statusMessage: String?
 
@@ -31,23 +32,37 @@ final class AppModel {
         return turnsByCall[selectedCallID] ?? []
     }
 
+    var canProcessSampleCall: Bool {
+        isStoreInitialized && storeBackendName == "postgres"
+    }
+
     init() {
         self.store = memoryStore
+        statusMessage = "Checking dedicated CallNotes Postgres..."
         Task { await bootstrap() }
     }
 
     func bootstrap() async {
-        if let postgres = await PostgresStore.makeIfAvailable() {
-            store = postgres
-            storeBackendName = "postgres"
-        } else {
-            store = memoryStore
-            storeBackendName = "memory"
+        guard let postgres = await PostgresStore.makeIfAvailable() else {
+            storeBackendName = "unavailable"
+            statusMessage = "Dedicated CallNotes Postgres is unavailable. Load sample call is disabled."
+            return
         }
         do {
-            try await store.migrate()
-            speech = await AppleSpeechProvider.validated()
-            live.dualInstanceMode = speech.dualInstanceMode
+            try await postgres.migrate()
+            store = postgres
+            storeBackendName = "postgres"
+            isStoreInitialized = true
+        } catch {
+            store = memoryStore
+            storeBackendName = "unavailable"
+            isStoreInitialized = false
+            statusMessage = "Dedicated CallNotes Postgres is unavailable: \(error.localizedDescription). Load sample call is disabled."
+            return
+        }
+        speech = await AppleSpeechProvider.validated()
+        live.dualInstanceMode = speech.dualInstanceMode
+        do {
             try await refresh()
         } catch {
             statusMessage = error.localizedDescription
@@ -74,6 +89,12 @@ final class AppModel {
     }
 
     func processSampleCall() async {
+        guard canProcessSampleCall else {
+            statusMessage = isStoreInitialized
+                ? "Dedicated CallNotes Postgres is unavailable. Load sample call is disabled."
+                : "Checking dedicated CallNotes Postgres before loading the sample call..."
+            return
+        }
         recordingState = .processing
         statusMessage = "Processing sample call..."
         live.lastLine = "Processing sample call..."

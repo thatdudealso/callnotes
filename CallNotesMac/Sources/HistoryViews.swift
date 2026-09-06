@@ -53,6 +53,7 @@ struct HistorySplitView: View {
             Button("Load sample call") {
                 Task { await model.processSampleCall() }
             }
+            .disabled(!model.canProcessSampleCall)
             .buttonStyle(.borderedProminent)
             .tint(CallNotesStyle.primary)
         }

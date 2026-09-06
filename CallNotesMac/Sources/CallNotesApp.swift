@@ -67,6 +67,7 @@ struct MenuBarContentView: View {
                 openWindow(id: "pill")
                 Task { await model.processSampleCall() }
             }
+            .disabled(!model.canProcessSampleCall)
             Button("Open CallNotes") {
                 openWindow(id: "main")
                 NSApp.activate()

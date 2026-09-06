@@ -239,14 +239,13 @@ public actor PostgresStore: CallStore {
         return profiles
     }
 
-    public func replaceCallSpeakers(_ speakers: [CallSpeaker]) async throws {
-        guard let callID = speakers.first?.callID else { return }
+    public func replaceCallSpeakers(callID: UUID, speakers: [CallSpeaker]) async throws {
         try await client.query("DELETE FROM call_speakers WHERE call_id = \(callID)", logger: logger)
         for speaker in speakers {
             try await client.query(
                 """
                 INSERT INTO call_speakers (call_id, cluster_key, profile_id, confidence, label_override)
-                VALUES (\(speaker.callID), \(speaker.clusterKey), \(speaker.profileID), \(speaker.confidence), \(speaker.labelOverride))
+                VALUES (\(callID), \(speaker.clusterKey), \(speaker.profileID), \(speaker.confidence), \(speaker.labelOverride))
                 """,
                 logger: logger
             )

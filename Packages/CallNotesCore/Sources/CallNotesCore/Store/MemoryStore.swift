@@ -47,9 +47,12 @@ public actor MemoryStore: CallStore {
         Array(profiles.values)
     }
 
-    public func replaceCallSpeakers(_ speakers: [CallSpeaker]) async throws {
-        guard let callID = speakers.first?.callID else { return }
-        callSpeakers[callID] = speakers
+    public func replaceCallSpeakers(callID: UUID, speakers: [CallSpeaker]) async throws {
+        callSpeakers[callID] = speakers.map { speaker in
+            var speaker = speaker
+            speaker.callID = callID
+            return speaker
+        }
     }
 
     public func fetchCallSpeakers(callID: UUID) async throws -> [CallSpeaker] {

@@ -145,7 +145,7 @@ public struct LocalTranscriptionSpine: Sendable {
                     labelOverride: match?.speakerName
                 )
             }
-            try await store.replaceCallSpeakers(mappings)
+            try await store.replaceCallSpeakers(callID: working.id, speakers: mappings)
 
             working.status = .transcribed
             working.endedAt = working.endedAt ?? Date()

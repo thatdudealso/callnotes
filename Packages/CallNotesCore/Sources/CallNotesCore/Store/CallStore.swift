@@ -10,7 +10,7 @@ public protocol CallStore: Sendable {
     func fetchSegments(callID: UUID, provider: STTProviderID?) async throws -> [Segment]
     func upsertSpeakerProfile(_ profile: SpeakerProfile) async throws
     func fetchSpeakerProfiles() async throws -> [SpeakerProfile]
-    func replaceCallSpeakers(_ speakers: [CallSpeaker]) async throws
+    func replaceCallSpeakers(callID: UUID, speakers: [CallSpeaker]) async throws
     func fetchCallSpeakers(callID: UUID) async throws -> [CallSpeaker]
     func insertSpeakerSample(
         profileID: UUID,

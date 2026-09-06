@@ -35,15 +35,29 @@ import Testing
             provider: .appleSpeech
         )
         try await store.replaceSegments(callID: call.id, provider: .appleSpeech, [segment])
-        try await store.replaceCallSpeakers([
-            CallSpeaker(callID: call.id, clusterKey: "me", profileID: owner.id, confidence: 1)
-        ])
+        try await store.replaceCallSpeakers(
+            callID: call.id,
+            speakers: [CallSpeaker(callID: call.id, clusterKey: "me", profileID: owner.id, confidence: 1)]
+        )
 
         let fetched = try await store.fetchCall(id: call.id)
         #expect(fetched?.id == call.id)
         #expect(try await store.fetchSegments(callID: call.id, provider: .appleSpeech).map(\.text) == ["hello"])
         #expect(try await store.fetchSpeakerProfiles().contains { $0.id == owner.id })
         #expect(try await store.fetchCallSpeakers(callID: call.id).first?.profileID == owner.id)
+    }
+
+    @Test func emptySpeakerReplacementClearsExistingMappings() async throws {
+        let store = MemoryStore()
+        let callID = UUID()
+        try await store.replaceCallSpeakers(
+            callID: callID,
+            speakers: [CallSpeaker(callID: callID, clusterKey: "A", labelOverride: "Speaker 2")]
+        )
+
+        try await store.replaceCallSpeakers(callID: callID, speakers: [])
+
+        #expect(try await store.fetchCallSpeakers(callID: callID).isEmpty)
     }
 }
 
