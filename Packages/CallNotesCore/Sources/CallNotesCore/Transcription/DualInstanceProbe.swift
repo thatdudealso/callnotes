@@ -57,14 +57,12 @@ public enum DualInstanceProbe {
         // Hold both analyzers alive at once so ANE contention actually shows up.
         // Sequential start-and-stop would never observe the dual-instance path.
         let attempts = await withTaskGroup(of: ProbeAttempt.self) { group in
-            group.addTask { await startProbeAnalyzer() }
-            group.addTask { await startProbeAnalyzer() }
+            group.addTask { await startProbeAnalyzer(timeout: timeout) }
+            group.addTask { await startProbeAnalyzer(timeout: timeout) }
             var collected: [ProbeAttempt] = []
-            let deadline = ContinuousClock.now + .seconds(timeout)
             for await attempt in group {
                 collected.append(attempt)
                 if collected.count == 2 { break }
-                if ContinuousClock.now >= deadline { break }
             }
             group.cancelAll()
             return collected
@@ -103,22 +101,33 @@ public enum DualInstanceProbe {
         var analyzer: SpeechAnalyzer?
     }
 
-    private static func startProbeAnalyzer() async -> ProbeAttempt {
-        do {
-            let locale = try await SpeechLocaleResolver.resolve(preference: "en_US")
-            let transcriber = SpeechTranscriber(
-                locale: locale,
-                preset: .timeIndexedProgressiveTranscription
-            )
-            try await SpeechAnalyzerService.ensureAssets(for: transcriber, locale: locale)
-            let analyzer = SpeechAnalyzer(modules: [transcriber])
-            let (input, continuation) = AsyncStream<AnalyzerInput>.makeStream()
-            try await analyzer.start(inputSequence: input)
-            // Keep the continuation alive until the caller tears the analyzer down.
-            _ = continuation
-            return ProbeAttempt(started: true, error: nil, analyzer: analyzer)
-        } catch {
-            return ProbeAttempt(started: false, error: error.localizedDescription, analyzer: nil)
+    private static func startProbeAnalyzer(timeout: TimeInterval) async -> ProbeAttempt {
+        await withTaskGroup(of: ProbeAttempt.self) { group in
+            group.addTask {
+                do {
+                    let locale = try await SpeechLocaleResolver.resolve(preference: "en_US")
+                    let transcriber = SpeechTranscriber(
+                        locale: locale,
+                        preset: .timeIndexedProgressiveTranscription
+                    )
+                    try await SpeechAnalyzerService.ensureAssets(for: transcriber, locale: locale)
+                    let analyzer = SpeechAnalyzer(modules: [transcriber])
+                    let (input, continuation) = AsyncStream<AnalyzerInput>.makeStream()
+                    try await analyzer.start(inputSequence: input)
+                    _ = continuation
+                    return ProbeAttempt(started: true, error: nil, analyzer: analyzer)
+                } catch {
+                    return ProbeAttempt(started: false, error: error.localizedDescription, analyzer: nil)
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(timeout))
+                return ProbeAttempt(started: false, error: "probe timed out", analyzer: nil)
+            }
+            let first = await group.next()
+                ?? ProbeAttempt(started: false, error: "probe timed out", analyzer: nil)
+            group.cancelAll()
+            return first
         }
     }
 

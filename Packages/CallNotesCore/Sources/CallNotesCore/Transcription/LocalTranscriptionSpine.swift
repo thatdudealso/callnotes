@@ -115,8 +115,9 @@ public struct LocalTranscriptionSpine: Sendable {
             far = try await speech.transcribePCM(split.far, channel: .far, config: config)
         }
 
-        let farURL = cafURL.deletingLastPathComponent()
+        let farURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(working.id.uuidString)-far.caf")
+        defer { try? FileManager.default.removeItem(at: farURL) }
         try ChannelAudio.writeMonoCAF(pcm16: split.far, sampleRate: split.sampleRate, to: farURL)
         let clusters = try await diarizer.diarize(fileURL: farURL)
 

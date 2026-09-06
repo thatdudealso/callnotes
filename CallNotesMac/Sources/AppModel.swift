@@ -57,21 +57,14 @@ final class AppModel {
             selectedCallID = calls.first?.id
         }
         if let selectedCallID {
-            let segments = try await store.fetchSegments(
-                callID: selectedCallID,
-                provider: selectedCall?.sttProvider
-            )
-            let profiles = try await store.fetchSpeakerProfiles()
-            turnsByCall[selectedCallID] = turns(from: segments, profiles: profiles)
+            turnsByCall[selectedCallID] = try await loadTurns(callID: selectedCallID)
         }
     }
 
     func select(_ call: Call) async {
         selectedCallID = call.id
         do {
-            let segments = try await store.fetchSegments(callID: call.id, provider: call.sttProvider)
-            let profiles = try await store.fetchSpeakerProfiles()
-            turnsByCall[call.id] = turns(from: segments, profiles: profiles)
+            turnsByCall[call.id] = try await loadTurns(callID: call.id)
         } catch {
             statusMessage = error.localizedDescription
         }
@@ -179,31 +172,12 @@ final class AppModel {
         }
     }
 
-    private func turns(from segments: [Segment], profiles: [SpeakerProfile]) -> [AttributedTurn] {
-        let owner = profiles.first(where: \.isOwner)
-        return segments.map { segment in
-            let profile = profiles.first { $0.id.uuidString == segment.clusterKey }
-                ?? (segment.channel == .near ? owner : nil)
-            let name: String
-            if let profile {
-                name = profile.displayName
-            } else if segment.channel == .near {
-                name = "Me"
-            } else {
-                name = segment.clusterKey.map { "Speaker \($0)" } ?? "Speaker 2"
-            }
-            return AttributedTurn(
-                start: segment.startSec,
-                end: segment.endSec,
-                channel: segment.channel,
-                clusterKey: segment.clusterKey,
-                speakerID: profile?.id,
-                speakerName: name,
-                isProvisional: false,
-                text: segment.text,
-                words: segment.words
-            )
-        }
+    private func loadTurns(callID: UUID) async throws -> [AttributedTurn] {
+        let provider = calls.first { $0.id == callID }?.sttProvider
+        let segments = try await store.fetchSegments(callID: callID, provider: provider)
+        let speakers = try await store.fetchCallSpeakers(callID: callID)
+        let profiles = try await store.fetchSpeakerProfiles()
+        return TurnAttributor.fromStored(segments: segments, speakers: speakers, profiles: profiles)
     }
 }
 
@@ -242,11 +216,15 @@ enum SampleCallFixture {
     }
 
     static func materialize() throws -> (cafURL: URL, referenceTurns: [DiarizationTurn]) {
-        if let bundled = Bundle.main.url(
-            forResource: "two-speaker",
-            withExtension: "caf",
-            subdirectory: "diarization"
-        ) ?? Bundle.main.url(forResource: "two-speaker", withExtension: "caf") {
+        let bundled =
+            Bundle.main.url(forResource: "two-speaker", withExtension: "caf", subdirectory: "diarization")
+            ?? Bundle.main.url(
+                forResource: "two-speaker",
+                withExtension: "caf",
+                subdirectory: "Fixtures/diarization"
+            )
+            ?? Bundle.main.url(forResource: "two-speaker", withExtension: "caf")
+        if let bundled {
             return (bundled, referenceTurns)
         }
         let url = FileManager.default.temporaryDirectory

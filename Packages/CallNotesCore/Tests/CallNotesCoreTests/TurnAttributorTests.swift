@@ -105,6 +105,34 @@ import Testing
         #expect(turns[0].end == 0.80)
     }
 
+    @Test func fromStoredUsesCallSpeakerMappingNotClusterKeyAsUUID() {
+        let far = Segment(
+            callID: UUID(),
+            seq: 0,
+            startSec: 1,
+            endSec: 2.5,
+            channel: .far,
+            clusterKey: "A",
+            text: "hi lets ship the pilot",
+            provider: .appleSpeech
+        )
+        let mapping = CallSpeaker(
+            callID: far.callID,
+            clusterKey: "A",
+            profileID: priya.id,
+            confidence: 1,
+            labelOverride: "Priya"
+        )
+        let turns = TurnAttributor.fromStored(
+            segments: [far],
+            speakers: [mapping],
+            profiles: [owner, priya]
+        )
+        #expect(turns.map(\.speakerName) == ["Priya"])
+        #expect(turns.map(\.speakerID) == [priya.id])
+        #expect(turns.map(\.clusterKey) == ["A"])
+    }
+
     @Test func liveFarLabelsAreProvisional() {
         let far = [RawSegment(start: 0, end: 1, text: "live", channel: .far)]
         let clusters = [

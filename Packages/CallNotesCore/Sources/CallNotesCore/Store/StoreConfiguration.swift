@@ -72,7 +72,11 @@ public struct StoreConfiguration: Sendable {
                 )
             )
         }
-        configs.append(StoreConfiguration(username: username, database: database))
+        // Skip TCP :5432 when a dedicated unix socket exists so a foreign
+        // Postgres already bound there is never migrated into.
+        if configs.isEmpty {
+            configs.append(StoreConfiguration(username: username, database: database))
+        }
         return configs
     }
 }

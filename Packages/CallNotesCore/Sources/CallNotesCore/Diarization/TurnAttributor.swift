@@ -85,6 +85,53 @@ public enum TurnAttributor {
         }
     }
 
+    /// Rebuilds attributed turns from persisted segments and the per-call
+    /// cluster -> profile mapping. Far-channel `cluster_key` is the diarizer
+    /// id (e.g. "A"), not a profile UUID.
+    public static func fromStored(
+        segments: [Segment],
+        speakers: [CallSpeaker],
+        profiles: [SpeakerProfile]
+    ) -> [AttributedTurn] {
+        let owner = profiles.first(where: \.isOwner)
+        let byCluster = Dictionary(uniqueKeysWithValues: speakers.map { ($0.clusterKey, $0) })
+        let byID = Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0) })
+        return segments.map { segment in
+            let mapping = segment.clusterKey.flatMap { byCluster[$0] }
+            let profile: SpeakerProfile?
+            if let profileID = mapping?.profileID {
+                profile = byID[profileID]
+            } else if segment.channel == .near {
+                profile = owner
+            } else if let key = segment.clusterKey, let uuid = UUID(uuidString: key) {
+                profile = byID[uuid]
+            } else {
+                profile = nil
+            }
+            let name: String
+            if let override = mapping?.labelOverride, !override.isEmpty {
+                name = override
+            } else if let profile {
+                name = profile.displayName
+            } else if segment.channel == .near {
+                name = "Me"
+            } else {
+                name = segment.clusterKey.map { "Speaker \($0)" } ?? "Speaker 2"
+            }
+            return AttributedTurn(
+                start: segment.startSec,
+                end: segment.endSec,
+                channel: segment.channel,
+                clusterKey: segment.clusterKey,
+                speakerID: profile?.id,
+                speakerName: name,
+                isProvisional: false,
+                text: segment.text,
+                words: segment.words
+            )
+        }
+    }
+
     public static func toSegments(
         _ turns: [AttributedTurn],
         callID: UUID,

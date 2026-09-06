@@ -14,11 +14,13 @@ enum GenerateDiarizationFixture {
             text: "Hello Priya, this is the near channel confirming the meeting time.",
             voices: ["Samantha", "Karen"]
         )
-        let far = try synthesize(
+        let farSpeech = try synthesize(
             text: "Hi, this is Priya on the far channel. Let's ship the pilot next week.",
             voices: ["Daniel", "Karen"]
         )
-        try writeStereoCAF(near: near, far: far, sampleRate: 16_000, to: out)
+        // RTTM: near 0-3.0s, far 2.4-5.0s. Offset the far channel to match.
+        let farDelay = Data(count: Int(2.4 * 16_000) * MemoryLayout<Int16>.size)
+        try writeStereoCAF(near: near, far: farDelay + farSpeech, sampleRate: 16_000, to: out)
         FileHandle.standardError.write(
             Data("wrote \(out.path)\n".utf8)
         )
@@ -56,21 +58,37 @@ enum GenerateDiarizationFixture {
         }
         let file = try AVAudioFile(forReading: aiff)
         let frames = AVAudioFrameCount(file.length)
-        let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: frames)!
-        try file.read(into: buffer)
-        buffer.frameLength = frames
-        var samples = [Int16](repeating: 0, count: Int(frames))
-        if file.processingFormat.commonFormat == .pcmFormatInt16,
-            let src = buffer.int16ChannelData
-        {
-            memcpy(&samples, src[0], Int(frames) * MemoryLayout<Int16>.size)
-        } else if let src = buffer.floatChannelData {
-            for index in 0..<Int(frames) {
-                samples[index] = Int16(max(-1, min(1, src[0][index])) * Float(Int16.max))
+        let sourceBuffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: frames)!
+        try file.read(into: sourceBuffer)
+        sourceBuffer.frameLength = frames
+        let targetFormat = AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: true
+        )!
+        let ratio = 16_000 / file.processingFormat.sampleRate
+        let capacity = AVAudioFrameCount(max((Double(frames) * ratio).rounded(.up), 1))
+        let converted = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity)!
+        let converter = AVAudioConverter(from: file.processingFormat, to: targetFormat)!
+        converter.primeMethod = .none
+        var consumed = false
+        var conversionError: NSError?
+        converter.convert(to: converted, error: &conversionError) { _, status in
+            if consumed {
+                status.pointee = .noDataNow
+                return nil
             }
+            consumed = true
+            status.pointee = .haveData
+            return sourceBuffer
         }
         try? FileManager.default.removeItem(at: aiff)
-        return samples.withUnsafeBytes { Data($0) }
+        let outFrames = Int(converted.frameLength)
+        guard outFrames > 0, let channel = converted.int16ChannelData?[0] else {
+            throw NSError(domain: "GenerateDiarizationFixture", code: 2)
+        }
+        return Data(bytes: channel, count: outFrames * MemoryLayout<Int16>.size)
     }
 
     static func writeStereoCAF(near: Data, far: Data, sampleRate: Double, to url: URL) throws {
