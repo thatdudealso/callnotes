@@ -88,6 +88,7 @@ targets:
           - CalendarArmSignal.swift
           - RecordingState.swift
     dependencies:
+      - target: CallNotesCaptureHarnessPlayback
       - package: CallNotesCore
     settings:
       base:
@@ -96,6 +97,20 @@ targets:
         GENERATE_INFOPLIST_FILE: true
         INFOPLIST_KEY_NSMicrophoneUsageDescription: The CallNotes capture harness records the microphone to verify the near channel of a two-channel CAF.
         INFOPLIST_KEY_NSAudioCaptureUsageDescription: The CallNotes capture harness records system audio to verify the far channel of a two-channel CAF.
+        ENABLE_HARDENED_RUNTIME: true
+        ENABLE_APP_SANDBOX: false
+        SWIFT_EMIT_LOC_STRINGS: false
+
+  CallNotesCaptureHarnessPlayback:
+    type: tool
+    platform: macOS
+    sources:
+      - Tests/CaptureHarnessPlayback
+    settings:
+      base:
+        PRODUCT_NAME: CallNotesCaptureHarnessPlayback
+        PRODUCT_BUNDLE_IDENTIFIER: com.thatdudealso.callnotes.capture-harness-playback
+        GENERATE_INFOPLIST_FILE: true
         ENABLE_HARDENED_RUNTIME: true
         ENABLE_APP_SANDBOX: false
         SWIFT_EMIT_LOC_STRINGS: false

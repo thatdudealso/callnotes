@@ -141,9 +141,12 @@ struct CaptureHarness {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("callnotes-harness-\(callID.uuidString).caf")
 
-        let player = try TonePlayer(sampleRate: 48_000)
-        try player.start()
+        let playback = try SyntheticPlaybackProcess()
+        defer { playback.stop() }
         try await Task.sleep(for: .milliseconds(250))
+        guard playback.isRunning else {
+            throw CaptureHarnessError.captureFailed("Synthetic playback helper exited before capture started")
+        }
 
         let capture = AudioCapture()
         do {
@@ -162,7 +165,6 @@ struct CaptureHarness {
                 _ = try? await capture.stop()
             }
         } catch {
-            player.stop()
             throw CaptureHarnessError.permissionDenied(
                 """
                 System audio capture was blocked (\(error)). Grant CallNotesCaptureHarness \
@@ -176,7 +178,7 @@ struct CaptureHarness {
 
         capture.beginCommittedWrite()
         try await Task.sleep(for: .seconds(duration))
-        player.stop()
+        playback.stop()
         try await Task.sleep(for: .milliseconds(200))
         let written = try await capture.stop()
 
@@ -217,43 +219,25 @@ struct CaptureHarness {
     }
 }
 
-/// Plays a 1 kHz tone with a periodic impulse so alignment is measurable.
-final class TonePlayer {
-    private let engine = AVAudioEngine()
-    private let player = AVAudioPlayerNode()
-    private let sampleRate: Double
+private final class SyntheticPlaybackProcess {
+    private let process = Process()
 
-    init(sampleRate: Double) throws {
-        self.sampleRate = sampleRate
-        engine.attach(player)
-        let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
-        engine.connect(player, to: engine.mainMixerNode, format: format)
-        engine.mainMixerNode.outputVolume = 0.6
-    }
+    var isRunning: Bool { process.isRunning }
 
-    func start() throws {
-        let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
-        let frames = AVAudioFrameCount(sampleRate * 4)
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else {
-            throw CaptureHarnessError.captureFailed("Could not allocate playback buffer")
+    init() throws {
+        let harnessURL = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+        let helperURL = harnessURL.deletingLastPathComponent().appendingPathComponent("CallNotesCaptureHarnessPlayback")
+        guard FileManager.default.isExecutableFile(atPath: helperURL.path) else {
+            throw CaptureHarnessError.captureFailed("Synthetic playback helper is missing at \(helperURL.path)")
         }
-        buffer.frameLength = frames
-        guard let channel = buffer.floatChannelData?[0] else {
-            throw CaptureHarnessError.captureFailed("Could not fill playback buffer")
-        }
-        let clickEvery = Int(sampleRate * 0.25)
-        for i in 0..<Int(frames) {
-            let tone = sin(2 * Double.pi * 1000 * Double(i) / sampleRate) * 0.25
-            let click = (i % clickEvery) < 80 ? 0.7 : 0.0
-            channel[i] = Float(tone + click)
-        }
-        try engine.start()
-        player.play()
-        player.scheduleBuffer(buffer, at: nil, options: [.loops], completionHandler: nil)
+        process.executableURL = helperURL
+        try process.run()
     }
 
     func stop() {
-        player.stop()
-        engine.stop()
+        if process.isRunning {
+            process.terminate()
+            process.waitUntilExit()
+        }
     }
 }
