@@ -142,6 +142,50 @@ import Testing
         #expect(!split.near.isEmpty)
         #expect(!split.far.isEmpty)
     }
+
+    @Test func failedDiarizationPersistsFailedCall() async throws {
+        let store = MemoryStore()
+        try await store.migrate()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-failed-spine-\(UUID().uuidString).caf")
+        try ChannelAudio.writeStereoCAF(
+            near: Data(count: 3200),
+            far: Data(count: 3200),
+            sampleRate: 16_000,
+            to: url
+        )
+        let call = Call(
+            source: .fileImport,
+            startedAt: Date(),
+            audioPath: url.path,
+            sttProvider: .appleSpeech
+        )
+        let spine = LocalTranscriptionSpine(
+            speech: ScriptedPCMTranscriber(near: [], far: []),
+            diarizer: FailingDiarizer(),
+            store: store
+        )
+
+        do {
+            _ = try await spine.process(cafURL: url, call: call, profiles: [])
+            Issue.record("Expected diarization failure")
+        } catch {}
+
+        let persisted = try await store.fetchCall(id: call.id)
+        #expect(persisted?.status == .failed)
+        #expect(persisted?.errorStage == "diarization")
+        #expect(persisted?.error?.isEmpty == false)
+    }
+}
+
+private struct FailingDiarizer: DiarizationService {
+    func diarize(fileURL: URL) async throws -> [DiarizedCluster] {
+        throw Failure.diarization
+    }
+
+    private enum Failure: Error {
+        case diarization
+    }
 }
 
 @Suite struct PostgresStoreTests {

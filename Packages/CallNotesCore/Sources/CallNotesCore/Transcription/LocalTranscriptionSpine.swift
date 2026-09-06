@@ -100,74 +100,87 @@ public struct LocalTranscriptionSpine: Sendable {
         working.audioPath = cafURL.path
         try await store.upsertCall(working)
 
-        let config = STTSessionConfig(sampleRate: working.sampleRate)
-        let split = try ChannelAudio.splitStereoCAF(url: cafURL)
-        let near: [RawSegment]
-        let far: [RawSegment]
-        switch speech.dualInstanceMode {
-        case .concurrentLive:
-            async let nearTask = speech.transcribePCM(split.near, channel: .near, config: config)
-            async let farTask = speech.transcribePCM(split.far, channel: .far, config: config)
-            near = try await nearTask
-            far = try await farTask
-        case .nearLiveFarBatch:
-            near = try await speech.transcribePCM(split.near, channel: .near, config: config)
-            far = try await speech.transcribePCM(split.far, channel: .far, config: config)
-        }
+        var stage = "audio_split"
+        do {
+            let config = STTSessionConfig(sampleRate: working.sampleRate)
+            let split = try ChannelAudio.splitStereoCAF(url: cafURL)
+            let near: [RawSegment]
+            let far: [RawSegment]
+            stage = "transcription"
+            switch speech.dualInstanceMode {
+            case .concurrentLive:
+                async let nearTask = speech.transcribePCM(split.near, channel: .near, config: config)
+                async let farTask = speech.transcribePCM(split.far, channel: .far, config: config)
+                near = try await nearTask
+                far = try await farTask
+            case .nearLiveFarBatch:
+                near = try await speech.transcribePCM(split.near, channel: .near, config: config)
+                far = try await speech.transcribePCM(split.far, channel: .far, config: config)
+            }
 
-        let farURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("\(working.id.uuidString)-far.caf")
-        defer { try? FileManager.default.removeItem(at: farURL) }
-        try ChannelAudio.writeMonoCAF(pcm16: split.far, sampleRate: split.sampleRate, to: farURL)
-        let clusters = try await diarizer.diarize(fileURL: farURL)
+            let farURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("\(working.id.uuidString)-far.caf")
+            defer { try? FileManager.default.removeItem(at: farURL) }
+            stage = "diarization"
+            try ChannelAudio.writeMonoCAF(pcm16: split.far, sampleRate: split.sampleRate, to: farURL)
+            let clusters = try await diarizer.diarize(fileURL: farURL)
 
-        let turns = TurnAttributor.attribute(
-            near: near,
-            far: far,
-            clusters: clusters,
-            profiles: profiles
-        )
-        let segments = TurnAttributor.toSegments(turns, callID: working.id, provider: speech.id)
-        try await store.replaceSegments(callID: working.id, provider: speech.id, segments)
-
-        let mappings = clusters.map { cluster -> CallSpeaker in
-            let match = turns.first { $0.clusterKey == cluster.key }
-            return CallSpeaker(
-                callID: working.id,
-                clusterKey: cluster.key,
-                profileID: match?.speakerID,
-                confidence: match?.speakerID == nil ? 0 : 1,
-                labelOverride: match?.speakerName
+            let turns = TurnAttributor.attribute(
+                near: near,
+                far: far,
+                clusters: clusters,
+                profiles: profiles
             )
-        }
-        try await store.replaceCallSpeakers(mappings)
+            let segments = TurnAttributor.toSegments(turns, callID: working.id, provider: speech.id)
+            stage = "persistence"
+            try await store.replaceSegments(callID: working.id, provider: speech.id, segments)
 
-        working.status = .transcribed
-        working.endedAt = working.endedAt ?? Date()
-        if working.durationSec == nil {
-            let last = turns.map(\.end).max() ?? 0
-            working.durationSec = Int(last.rounded())
-        }
-        try await store.upsertCall(working)
+            let mappings = clusters.map { cluster -> CallSpeaker in
+                let match = turns.first { $0.clusterKey == cluster.key }
+                return CallSpeaker(
+                    callID: working.id,
+                    clusterKey: cluster.key,
+                    profileID: match?.speakerID,
+                    confidence: match?.speakerID == nil ? 0 : 1,
+                    labelOverride: match?.speakerName
+                )
+            }
+            try await store.replaceCallSpeakers(mappings)
 
-        let der: DiarizationErrorRate.Result?
-        if !referenceTurns.isEmpty {
-            der = DiarizationErrorRate.compute(
-                reference: referenceTurns,
-                hypothesis: DiarizationErrorRate.turns(from: clusters),
-                collar: DiarizationErrorRate.defaultCollar
+            working.status = .transcribed
+            working.endedAt = working.endedAt ?? Date()
+            if working.durationSec == nil {
+                let last = turns.map(\.end).max() ?? 0
+                working.durationSec = Int(last.rounded())
+            }
+            try await store.upsertCall(working)
+
+            let der: DiarizationErrorRate.Result?
+            if !referenceTurns.isEmpty {
+                der = DiarizationErrorRate.compute(
+                    reference: referenceTurns,
+                    hypothesis: DiarizationErrorRate.turns(from: clusters),
+                    collar: DiarizationErrorRate.defaultCollar
+                )
+            } else {
+                der = nil
+            }
+
+            return ProcessedCall(
+                call: working,
+                turns: turns,
+                clusters: clusters,
+                dualInstanceMode: speech.dualInstanceMode,
+                der: der
             )
-        } else {
-            der = nil
+        } catch {
+            working.status = .failed
+            working.error = error.localizedDescription
+            working.errorStage = stage
+            working.endedAt = working.endedAt ?? Date()
+            try? await store.upsertCall(working)
+            throw error
         }
-
-        return ProcessedCall(
-            call: working,
-            turns: turns,
-            clusters: clusters,
-            dualInstanceMode: speech.dualInstanceMode,
-            der: der
-        )
     }
 }
 
