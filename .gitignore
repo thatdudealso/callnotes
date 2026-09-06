@@ -19,3 +19,6 @@ Package.resolved.lock
 
 # Secrets / local config
 *.local.env
+
+# Private maintainer docs (implementation plan etc.); never commit
+docs/private/

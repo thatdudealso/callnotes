@@ -11,6 +11,11 @@ platform targets, local service bootstrap, and shared domain package. Recording,
 transcription, speaker identity, notes, and phone sync are planned in later
 phases and are not yet product features.
 
+Some docs and code comments cite "plan section" numbers. These refer to the
+private implementation plan that maintainers keep locally at
+`docs/private/callnotes-implementation-plan.md`; `docs/private/` is gitignored
+and is never part of the public repository.
+
 ## Architecture
 
 The Mac app will capture and process calls locally, with shared Swift domain
