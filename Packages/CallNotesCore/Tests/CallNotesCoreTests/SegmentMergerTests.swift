@@ -21,6 +21,15 @@ import Testing
         #expect(merged.count == 2)
     }
 
+    @Test func keepsUnknownSpeakersSeparate() {
+        let merged = SegmentMerger.mergeAndCollapse([
+            RawSegment(start: 0.0, end: 1.0, text: "hello"),
+            RawSegment(start: 1.1, end: 2.0, text: "hi"),
+        ])
+        #expect(merged.count == 2)
+        #expect(merged.map(\.text) == ["hello", "hi"])
+    }
+
     @Test func keepsSameSpeakerBeyondGap() {
         let merged = SegmentMerger.mergeAndCollapse([
             RawSegment(start: 0.0, end: 1.0, text: "hello", speakerTag: "A"),

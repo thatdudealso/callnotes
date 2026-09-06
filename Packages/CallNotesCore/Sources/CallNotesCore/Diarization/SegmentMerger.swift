@@ -6,7 +6,7 @@ public enum SegmentMerger {
     public static let collapseGapSeconds: TimeInterval = 0.8
 
     /// Sorts raw segments by start time and collapses consecutive segments that
-    /// share a speaker tag and are separated by less than `collapseGapSeconds`.
+    /// share a known speaker tag and are separated by less than `collapseGapSeconds`.
     public static func mergeAndCollapse(
         _ segments: [RawSegment],
         gap: TimeInterval = collapseGapSeconds
@@ -15,7 +15,9 @@ public enum SegmentMerger {
         var result: [RawSegment] = []
         for segment in sorted {
             if var last = result.last,
-                last.speakerTag == segment.speakerTag,
+                let lastSpeakerTag = last.speakerTag,
+                let segmentSpeakerTag = segment.speakerTag,
+                lastSpeakerTag == segmentSpeakerTag,
                 segment.start - last.end < gap
             {
                 last.end = max(last.end, segment.end)

@@ -63,6 +63,7 @@ targets:
     dependencies:
       - package: CallNotesCore
       - target: CallNotesShareExtension
+        embed: true
     settings:
       base:
         PRODUCT_NAME: CallNotes
