@@ -3,8 +3,12 @@
 Cross-target test harnesses land here as the phases that need them arrive
 (plan section 16):
 
-- capture test harness (Phase 1) - plays a known recording through a real
-  call app and asserts both channels arrive aligned,
+- capture test harness (Phase 1) - `Tests/CaptureHarness` plus
+  `Scripts/run-capture-harness.sh`. Plays a synthetic click+tone through the
+  default output (stand-in for a live call) and asserts both CAF channels are
+  non-silent and aligned within 50 ms. A real FaceTime / macOS Phone call from
+  a second device is the captain-run acceptance; the script documents that
+  path when it cannot be exercised here.
 - golden-file provider tests and the diarization/identity accuracy harness
   (Phase 2),
 - Meta provider integration tests (Phase 4),

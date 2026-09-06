@@ -1,16 +1,15 @@
 import CallNotesCore
 import SwiftUI
 
-/// Phase 0 stub of the CallNotes menu-bar app: launchable, shows the menu-bar
-/// item and an empty history window. Capture, pipeline, and settings arrive
-/// in Phases 1-3.
+/// Menu-bar CallNotes app. Phase 1 wires detection + two-channel capture;
+/// transcription and notes arrive in later phases.
 @main
 struct CallNotesApp: App {
-    @State private var recordingState = RecordingState.idle
+    @State private var coordinator = CaptureCoordinator()
 
     var body: some Scene {
-        MenuBarExtra("CallNotes", systemImage: recordingState.systemImage) {
-            MenuBarContentView(recordingState: $recordingState)
+        MenuBarExtra("CallNotes", systemImage: coordinator.recordingState.systemImage) {
+            MenuBarContentView(coordinator: coordinator)
         }
 
         Window("CallNotes", id: "main") {
@@ -19,39 +18,31 @@ struct CallNotesApp: App {
     }
 }
 
-/// Menu-bar icon states per plan section 10.1.
-enum RecordingState {
-    case idle
-    case armed
-    case recording
-    case processing
-
-    var systemImage: String {
-        switch self {
-        case .idle: return "phone.badge.waveform"
-        case .armed: return "phone.badge.waveform.fill"
-        case .recording: return "record.circle"
-        case .processing: return "arrow.triangle.2.circlepath"
-        }
-    }
-}
-
 struct MenuBarContentView: View {
-    @Binding var recordingState: RecordingState
+    @Bindable var coordinator: CaptureCoordinator
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Button(recordingState == .recording ? "Stop" : "Record Now") {
-            // Capture engine arrives in Phase 1.
-            recordingState = recordingState == .recording ? .idle : .recording
+        Group {
+            Button(coordinator.recordingState == .recording || coordinator.recordingState == .processing ? "Stop" : "Record Now") {
+                coordinator.toggleManual()
+            }
+            .keyboardShortcut("r", modifiers: [.command, .shift])
+            Button("Open CallNotes") {
+                openWindow(id: "main")
+                NSApp.activate()
+            }
+            if let error = coordinator.lastError {
+                Text(error)
+                    .foregroundStyle(.secondary)
+            }
+            Divider()
+            Button("Quit CallNotes") {
+                NSApp.terminate(nil)
+            }
         }
-        Button("Open CallNotes") {
-            openWindow(id: "main")
-            NSApp.activate()
-        }
-        Divider()
-        Button("Quit CallNotes") {
-            NSApp.terminate(nil)
+        .onAppear {
+            coordinator.start()
         }
     }
 }
