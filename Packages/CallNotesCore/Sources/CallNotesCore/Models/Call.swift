@@ -34,9 +34,13 @@ public struct Call: Identifiable, Codable, Sendable, Equatable {
     public var audioChannels: Int
     public var sampleRate: Int
     public var sttProvider: STTProviderID
+    public var diarizationProvider: String?
+    public var notesProvider: NotesProviderID?
     public var status: CallStatus
     public var consentAnnounced: Bool
     public var metaBilledSec: Int
+    public var error: String?
+    public var errorStage: String?
 
     public init(
         id: UUID = UUID(),
@@ -50,9 +54,13 @@ public struct Call: Identifiable, Codable, Sendable, Equatable {
         audioChannels: Int = 2,
         sampleRate: Int = 16_000,
         sttProvider: STTProviderID,
+        diarizationProvider: String? = nil,
+        notesProvider: NotesProviderID? = nil,
         status: CallStatus = .recording,
         consentAnnounced: Bool = false,
-        metaBilledSec: Int = 0
+        metaBilledSec: Int = 0,
+        error: String? = nil,
+        errorStage: String? = nil
     ) {
         self.id = id
         self.source = source
@@ -65,8 +73,12 @@ public struct Call: Identifiable, Codable, Sendable, Equatable {
         self.audioChannels = audioChannels
         self.sampleRate = sampleRate
         self.sttProvider = sttProvider
+        self.diarizationProvider = diarizationProvider
+        self.notesProvider = notesProvider
         self.status = status
         self.consentAnnounced = consentAnnounced
         self.metaBilledSec = metaBilledSec
+        self.error = error
+        self.errorStage = errorStage
     }
 }

@@ -26,6 +26,9 @@ targets:
     platform: macOS
     sources:
       - CallNotesMac/Sources
+      - path: Fixtures
+        type: folder
+        buildPhase: resources
     dependencies:
       - package: CallNotesCore
     settings:
@@ -37,6 +40,7 @@ targets:
         INFOPLIST_KEY_NSMicrophoneUsageDescription: CallNotes records your calls locally so it can transcribe them and generate notes. Audio never leaves this Mac unless you enable the cloud engine.
         INFOPLIST_KEY_NSAudioCaptureUsageDescription: CallNotes captures the other side of your calls from system audio so it can transcribe them locally. Audio never leaves this Mac unless you enable the cloud engine.
         INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription: CallNotes optionally looks at calendar events with a phone or FaceTime link so it can start recording as the call begins.
+        INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: CallNotes transcribes your calls on this Mac using on-device speech recognition. Audio stays on this device unless you enable the cloud engine.
         ENABLE_HARDENED_RUNTIME: true
         # Process taps and local Postgres sockets rule out the App Sandbox
         # (plan section 12); hardened runtime stays on.

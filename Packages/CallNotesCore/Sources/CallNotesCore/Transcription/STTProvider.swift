@@ -32,19 +32,27 @@ public struct RawSegment: Sendable, Equatable {
     public var words: [Word]?
     /// Provider-native speaker tag, if the provider diarizes (Meta does).
     public var speakerTag: String?
+    /// Capture channel, when the provider is splitting a 2-channel CAF.
+    public var channel: SegmentChannel?
+    /// True while SpeechAnalyzer is still revising this result.
+    public var isVolatile: Bool
 
     public init(
         start: TimeInterval,
         end: TimeInterval,
         text: String,
         words: [Word]? = nil,
-        speakerTag: String? = nil
+        speakerTag: String? = nil,
+        channel: SegmentChannel? = nil,
+        isVolatile: Bool = false
     ) {
         self.start = start
         self.end = end
         self.text = text
         self.words = words
         self.speakerTag = speakerTag
+        self.channel = channel
+        self.isVolatile = isVolatile
     }
 }
 

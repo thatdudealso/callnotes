@@ -5,6 +5,10 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Add durable project-specific notes here as they are discovered through real work.
 - `project.yml` is the XcodeGen source of truth. Use the build commands in `README.md`; generated `CallNotes.xcodeproj` is ignored.
 - `Scripts/bootstrap.sh` owns local service provisioning and immutable Ollama model references. Use `Scripts/bootstrap.sh --check` before making machine-level changes.
+- Phase 2 store: `PostgresStore` against the bootstrap `callnotes` DB, with `MemoryStore` fallback when Postgres is unreachable (CI and machines without the role). Hardware SpeechAnalyzer, FluidAudio, and live Postgres tests are gated on `CALLNOTES_HARNESS=1`.
+- Dual SpeechAnalyzer instances must be held alive together in `DualInstanceProbe`; sequential start-and-stop cannot observe ANE contention. Fallback is `nearLiveFarBatch`.
+- CAF writes fill a non-interleaved Float32 `AVAudioPCMBuffer`; AVAudioFile may store interleaved CAF. Filling an interleaved buffer or writing Int16 stereo CAF fails (`-50` / ExtAudioFile abort).
+- Synthetic diarization audio: `Scripts/generate-diarization-fixture.sh` (macOS `say`, never personal recordings). DER initial target is `DiarizationErrorRate.initialTarget` (0.177).
 
 ## Mac capture (Phase 1)
 

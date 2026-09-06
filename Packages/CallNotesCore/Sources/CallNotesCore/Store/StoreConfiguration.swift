@@ -9,27 +9,40 @@ public struct StoreConfiguration: Sendable {
     public var port: Int
     public var username: String
     public var database: String
+    public var unixSocketPath: String?
 
     public init(
         host: String = "127.0.0.1",
         port: Int = 5432,
         username: String = "callnotes",
-        database: String = "callnotes"
+        database: String = "callnotes",
+        unixSocketPath: String? = nil
     ) {
         self.host = host
         self.port = port
         self.username = username
         self.database = database
+        self.unixSocketPath = unixSocketPath
     }
 
     /// Builds the PostgresNIO client configuration (password comes from
-    /// Keychain at runtime, never from disk).
+    /// Keychain at runtime, never from disk). An empty password becomes `nil`
+    /// so the client does not send a zero-length secret.
     public func clientConfiguration(password: String) -> PostgresClient.Configuration {
-        PostgresClient.Configuration(
+        let secret: String? = password.isEmpty ? nil : password
+        if let unixSocketPath {
+            return PostgresClient.Configuration(
+                unixSocketPath: unixSocketPath,
+                username: username,
+                password: secret,
+                database: database
+            )
+        }
+        return PostgresClient.Configuration(
             host: host,
             port: port,
             username: username,
-            password: password,
+            password: secret,
             database: database,
             tls: .disable
         )
