@@ -18,6 +18,9 @@ final class AppModel {
     private var store: any CallStore
     private var speech = AppleSpeechProvider()
     private let memoryStore = MemoryStore()
+    private var liveSession: (any STTSession)?
+    private var liveResultsTask: Task<Void, Never>?
+    private var fixturePlaybackTask: Task<Void, Never>?
 
     var selectedCall: Call? {
         calls.first { $0.id == selectedCallID }
@@ -74,10 +77,15 @@ final class AppModel {
         recordingState = .processing
         statusMessage = "Processing sample call..."
         live.lastLine = "Processing sample call..."
-        defer { recordingState = .idle }
 
         do {
             let fixture = try SampleCallFixture.materialize()
+            do {
+                try await startLiveSession()
+                startFixturePlayback(cafURL: fixture.cafURL)
+            } catch {
+                live.lastLine = "Processing sample call..."
+            }
             var profiles = try await store.fetchSpeakerProfiles()
             if !profiles.contains(where: \.isOwner) {
                 let owner = SpeakerIdentity.enroll(
@@ -124,14 +132,14 @@ final class AppModel {
 
             turnsByCall[processed.call.id] = processed.turns
             lastDER = processed.der
-            live = LiveTranscriptState(
-                engine: .appleSpeech,
-                elapsed: TimeInterval(processed.call.durationSec ?? 0),
-                currentSpeakerName: processed.turns.last?.speakerName ?? "Me",
-                lastLine: processed.turns.last?.text ?? "",
-                isProvisionalSpeaker: false,
-                dualInstanceMode: processed.dualInstanceMode
-            )
+            live.engine = .appleSpeech
+            live.elapsed = TimeInterval(processed.call.durationSec ?? 0)
+            live.currentSpeakerName = processed.turns.last?.speakerName ?? "Me"
+            if live.lastLine.isEmpty || live.lastLine == "Processing sample call..." {
+                live.lastLine = processed.turns.last?.text ?? ""
+            }
+            live.isProvisionalSpeaker = false
+            live.dualInstanceMode = processed.dualInstanceMode
             selectedCallID = processed.call.id
             try await refresh()
             let derText: String
@@ -143,6 +151,76 @@ final class AppModel {
             statusMessage = "Sample call stored in \(storeBackendName). \(derText)"
         } catch {
             statusMessage = error.localizedDescription
+            recordingState = .idle
+        }
+    }
+
+    func startLiveSession() async throws {
+        if liveSession != nil {
+            return
+        }
+        let session = try await speech.startSession(config: STTSessionConfig())
+        liveSession = session
+        recordingState = .recording
+        liveResultsTask = Task { [weak self] in
+            do {
+                for try await segment in session.results {
+                    guard !Task.isCancelled, let self else { return }
+                    live.elapsed = max(live.elapsed, segment.end)
+                    live.currentSpeakerName = segment.channel == .far ? "Speaker 2" : "Me"
+                    live.lastLine = segment.text
+                    live.isProvisionalSpeaker = segment.channel == .far || segment.isVolatile
+                }
+            } catch {
+                guard let self, !Task.isCancelled else { return }
+                statusMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func appendLivePCM(_ pcm: Data) async throws {
+        try await liveSession?.append(pcm: pcm)
+    }
+
+    func finishLiveSession() async {
+        defer {
+            liveSession = nil
+            liveResultsTask = nil
+            recordingState = .idle
+        }
+        do {
+            try await liveSession?.finish()
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+        liveResultsTask?.cancel()
+    }
+
+    func stopLiveSession() async {
+        fixturePlaybackTask?.cancel()
+        fixturePlaybackTask = nil
+        await finishLiveSession()
+    }
+
+    private func startFixturePlayback(cafURL: URL) {
+        fixturePlaybackTask?.cancel()
+        fixturePlaybackTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let split = try ChannelAudio.splitStereoCAF(url: cafURL)
+                let chunkSize = 8_000
+                for offset in stride(from: 0, to: split.near.count, by: chunkSize) {
+                    guard !Task.isCancelled else { return }
+                    let end = min(offset + chunkSize, split.near.count)
+                    try await appendLivePCM(split.near.subdata(in: offset..<end))
+                    try await Task.sleep(for: .milliseconds(100))
+                }
+                await finishLiveSession()
+            } catch {
+                guard !Task.isCancelled else { return }
+                statusMessage = error.localizedDescription
+                await finishLiveSession()
+            }
         }
     }
 

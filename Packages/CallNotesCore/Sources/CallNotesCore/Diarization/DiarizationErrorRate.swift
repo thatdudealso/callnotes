@@ -96,7 +96,7 @@ public enum DiarizationErrorRate {
         for index in 0..<frameCount {
             if excluded.contains(index) { continue }
             let ref = refFrames[index]
-            let hyp = hypFrames[index].flatMap { mapping[$0] }
+            let hyp = hypFrames[index].map { mapping[$0] ?? $0 }
             if ref != nil { scoredSpeech += 1 }
             switch (ref, hyp) {
             case (nil, .some):
@@ -167,8 +167,8 @@ public enum DiarizationErrorRate {
         max(0, Int((time / frameDuration).rounded(.down)))
     }
 
-    /// Greedy many-to-one mapping of hypothesis speakers onto reference speakers
-    /// by overlapping scored frames.
+    /// Maximum-weight one-to-one mapping of hypothesis speakers onto reference
+    /// speakers by overlapping scored frames.
     private static func speakerMapping(
         reference: [String?],
         hypothesis: [String?],
@@ -179,15 +179,41 @@ public enum DiarizationErrorRate {
             guard let hyp = hypothesis[index], let ref = reference[index] else { continue }
             overlap[hyp, default: [:]][ref, default: 0] += 1
         }
-        var mapping: [String: String] = [:]
-        let hypSpeakers = Set(hypothesis.compactMap { $0 })
-        for hyp in hypSpeakers {
-            if let best = overlap[hyp]?.max(by: { $0.value < $1.value })?.key {
-                mapping[hyp] = best
-            } else {
-                mapping[hyp] = hyp
+        let hypSpeakers = Array(Set(hypothesis.compactMap { $0 })).sorted()
+        let referenceSpeakers = Array(Set(reference.compactMap { $0 })).sorted()
+        var bestScore = -1
+        var bestMapping: [String: String] = [:]
+
+        func search(
+            _ index: Int,
+            usedReferences: Set<String>,
+            mapping: [String: String],
+            score: Int
+        ) {
+            guard index < hypSpeakers.count else {
+                if score > bestScore {
+                    bestScore = score
+                    bestMapping = mapping
+                }
+                return
+            }
+
+            let hyp = hypSpeakers[index]
+            search(index + 1, usedReferences: usedReferences, mapping: mapping, score: score)
+            for reference in referenceSpeakers where !usedReferences.contains(reference) {
+                var nextMapping = mapping
+                nextMapping[hyp] = reference
+                var nextUsed = usedReferences
+                nextUsed.insert(reference)
+                search(
+                    index + 1,
+                    usedReferences: nextUsed,
+                    mapping: nextMapping,
+                    score: score + (overlap[hyp]?[reference] ?? 0)
+                )
             }
         }
-        return mapping
+        search(0, usedReferences: [], mapping: [:], score: 0)
+        return bestMapping
     }
 }

@@ -66,6 +66,27 @@ import Testing
         #expect(turns[0].speakerName == "Speaker 2")
     }
 
+    @Test func suggestedFarMatchRemainsUnassigned() {
+        let far = [RawSegment(start: 0, end: 1, text: "who", channel: .far)]
+        let tentative = SpeakerProfile(
+            displayName: "Priya",
+            centroid: [1, 0],
+            embeddingModel: EmbeddingModel.weSpeakerV2,
+            sampleCount: 1
+        )
+        let clusters = [
+            DiarizedCluster(key: "Z", ranges: [0...1], embedding: [0.6, 0.8])
+        ]
+        let turns = TurnAttributor.attribute(
+            near: [],
+            far: far,
+            clusters: clusters,
+            profiles: [tentative]
+        )
+        #expect(turns[0].speakerID == nil)
+        #expect(turns[0].speakerName == "Speaker 2")
+    }
+
     @Test func sortsAcrossChannelsAndCollapsesSameSpeaker() {
         let near = [
             RawSegment(start: 0.0, end: 1.0, text: "hello", channel: .near),

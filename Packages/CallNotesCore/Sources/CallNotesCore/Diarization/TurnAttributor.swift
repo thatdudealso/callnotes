@@ -180,8 +180,8 @@ public enum TurnAttributor {
             switch outcome {
             case .autoLabel(let profileID, let similarity):
                 result[cluster.key] = (profileID, similarity)
-            case .suggest(let profileID, let similarity):
-                result[cluster.key] = (profileID, similarity)
+            case .suggest:
+                result[cluster.key] = (nil, 0)
             case .unknown:
                 result[cluster.key] = (nil, 0)
             }

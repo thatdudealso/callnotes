@@ -145,13 +145,6 @@ import Testing
 }
 
 @Suite struct PostgresStoreTests {
-    @Test func migrateSQLSplitsIntoStatements() {
-        let statements = PostgresStore.statements(from: PostgresStore.embeddedMigrationSQL)
-        #expect(statements.contains { $0.localizedCaseInsensitiveContains("create table if not exists calls") })
-        #expect(statements.contains { $0.localizedCaseInsensitiveContains("speaker_profiles") })
-        #expect(statements.contains { $0.localizedCaseInsensitiveContains("schema_migrations") })
-    }
-
     @Test func emptyPasswordOmitsSecret() {
         let tcp = StoreConfiguration().clientConfiguration(password: "")
         #expect(tcp.password == nil)

@@ -48,9 +48,8 @@ public struct StoreConfiguration: Sendable {
         )
     }
 
-    /// Local bootstrap instances. Unix sockets that exist are tried first so a
-    /// machine that already has another Postgres on :5432 (or `/tmp`) is not
-    /// used. TCP 127.0.0.1:5432 remains the default for a stock bootstrap.
+    /// Local bootstrap instances. Only known postgresql@16 unix sockets are
+    /// used, so a machine's unrelated Postgres is never probed or migrated.
     public static func localCandidates(
         username: String = "callnotes",
         database: String = "callnotes"
@@ -71,11 +70,6 @@ public struct StoreConfiguration: Sendable {
                     unixSocketPath: path
                 )
             )
-        }
-        // Skip TCP :5432 when a dedicated unix socket exists so a foreign
-        // Postgres already bound there is never migrated into.
-        if configs.isEmpty {
-            configs.append(StoreConfiguration(username: username, database: database))
         }
         return configs
     }

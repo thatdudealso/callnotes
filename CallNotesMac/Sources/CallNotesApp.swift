@@ -20,8 +20,11 @@ struct CallNotesApp: App {
         Window("Live", id: "pill") {
             LivePillView(
                 state: model.live,
-                recordingState: coordinator.recordingState,
-                onStop: stopCapture
+                recordingState: model.recordingState,
+                onStop: {
+                    Task { await model.stopLiveSession() }
+                    stopCapture()
+                }
             )
             .padding(8)
         }
@@ -42,8 +45,21 @@ struct MenuBarContentView: View {
 
     var body: some View {
         Group {
-            Button(coordinator.recordingState == .recording || coordinator.recordingState == .processing ? "Stop" : "Record Now") {
-                coordinator.toggleManual()
+            Button(model.recordingState == .recording ? "Stop" : "Record Now") {
+                if model.recordingState == .recording {
+                    Task { await model.stopLiveSession() }
+                    stopCaptureIfNeeded()
+                } else {
+                    coordinator.toggleManual()
+                    Task {
+                        do {
+                            try await model.startLiveSession()
+                        } catch {
+                            model.statusMessage = error.localizedDescription
+                        }
+                    }
+                    openWindow(id: "pill")
+                }
             }
             .keyboardShortcut("r", modifiers: [.command, .shift])
             Button("Load sample call") {
@@ -67,5 +83,10 @@ struct MenuBarContentView: View {
         .onAppear {
             coordinator.start()
         }
+    }
+
+    private func stopCaptureIfNeeded() {
+        guard coordinator.recordingState == .recording || coordinator.recordingState == .processing else { return }
+        coordinator.toggleManual()
     }
 }

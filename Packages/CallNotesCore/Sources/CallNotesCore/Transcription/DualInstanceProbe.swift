@@ -95,40 +95,64 @@ public enum DualInstanceProbe {
         )
     }
 
-    private struct ProbeAttempt {
+    private struct ProbeAttempt: @unchecked Sendable {
         var started: Bool
         var error: String?
         var analyzer: SpeechAnalyzer?
     }
 
-    private static func startProbeAnalyzer(timeout: TimeInterval) async -> ProbeAttempt {
-        await withTaskGroup(of: ProbeAttempt.self) { group in
-            group.addTask {
-                do {
-                    let locale = try await SpeechLocaleResolver.resolve(preference: "en_US")
-                    let transcriber = SpeechTranscriber(
-                        locale: locale,
-                        preset: .timeIndexedProgressiveTranscription
-                    )
-                    try await SpeechAnalyzerService.ensureAssets(for: transcriber, locale: locale)
-                    let analyzer = SpeechAnalyzer(modules: [transcriber])
-                    let (input, continuation) = AsyncStream<AnalyzerInput>.makeStream()
-                    try await analyzer.start(inputSequence: input)
-                    _ = continuation
-                    return ProbeAttempt(started: true, error: nil, analyzer: analyzer)
-                } catch {
-                    return ProbeAttempt(started: false, error: error.localizedDescription, analyzer: nil)
+    private actor ProbeAttemptRacer {
+        private var result: ProbeAttempt?
+        private var continuation: CheckedContinuation<ProbeAttempt, Never>?
+
+        func finish(_ attempt: ProbeAttempt) {
+            guard result == nil else {
+                if let analyzer = attempt.analyzer {
+                    Task { await analyzer.cancelAndFinishNow() }
                 }
+                return
             }
-            group.addTask {
-                try? await Task.sleep(for: .seconds(timeout))
-                return ProbeAttempt(started: false, error: "probe timed out", analyzer: nil)
-            }
-            let first = await group.next()
-                ?? ProbeAttempt(started: false, error: "probe timed out", analyzer: nil)
-            group.cancelAll()
-            return first
+            result = attempt
+            continuation?.resume(returning: attempt)
+            continuation = nil
         }
+
+        func value() async -> ProbeAttempt {
+            if let result {
+                return result
+            }
+            return await withCheckedContinuation { continuation in
+                self.continuation = continuation
+            }
+        }
+    }
+
+    private static func startProbeAnalyzer(timeout: TimeInterval) async -> ProbeAttempt {
+        let racer = ProbeAttemptRacer()
+        Task {
+            let attempt: ProbeAttempt
+            do {
+                let locale = try await SpeechLocaleResolver.resolve(preference: "en_US")
+                let transcriber = SpeechTranscriber(
+                    locale: locale,
+                    preset: .timeIndexedProgressiveTranscription
+                )
+                try await SpeechAnalyzerService.ensureAssets(for: transcriber, locale: locale)
+                let analyzer = SpeechAnalyzer(modules: [transcriber])
+                let (input, continuation) = AsyncStream<AnalyzerInput>.makeStream()
+                try await analyzer.start(inputSequence: input)
+                _ = continuation
+                attempt = ProbeAttempt(started: true, error: nil, analyzer: analyzer)
+            } catch {
+                attempt = ProbeAttempt(started: false, error: error.localizedDescription, analyzer: nil)
+            }
+            await racer.finish(attempt)
+        }
+        Task {
+            try? await Task.sleep(for: .seconds(timeout))
+            await racer.finish(ProbeAttempt(started: false, error: "probe timed out", analyzer: nil))
+        }
+        return await racer.value()
     }
 
 }
