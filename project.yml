@@ -1,0 +1,106 @@
+# XcodeGen project spec. Regenerate the Xcode project with:
+#   xcodegen generate
+# (see README.md; the generated CallNotes.xcodeproj is not committed)
+name: CallNotes
+options:
+  bundleIdPrefix: com.thatdudealso
+  deploymentTarget:
+    macOS: "26.0"
+    iOS: "26.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: 0.1.0
+    CURRENT_PROJECT_VERSION: 1
+    CODE_SIGN_STYLE: Automatic
+
+packages:
+  CallNotesCore:
+    path: Packages/CallNotesCore
+
+targets:
+  CallNotesMac:
+    type: application
+    platform: macOS
+    sources:
+      - CallNotesMac/Sources
+    dependencies:
+      - package: CallNotesCore
+    settings:
+      base:
+        PRODUCT_NAME: CallNotes
+        PRODUCT_BUNDLE_IDENTIFIER: com.thatdudealso.callnotes
+        GENERATE_INFOPLIST_FILE: true
+        INFOPLIST_KEY_LSUIElement: true
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: CallNotes records your calls locally so it can transcribe them and generate notes. Audio never leaves this Mac unless you enable the cloud engine.
+        ENABLE_HARDENED_RUNTIME: true
+        # Process taps and local Postgres sockets rule out the App Sandbox
+        # (plan section 12); hardened runtime stays on.
+        ENABLE_APP_SANDBOX: false
+
+  # Compatibility launcher (vendored from Megaphone): ships as the bundle's
+  # main executable so pre-macOS-26 machines get a clear requirement message
+  # instead of Launch Services error -10825. Wired into the app bundle by the
+  # release pipeline (Scripts/release), not by the debug build.
+  CallNotesLauncher:
+    type: tool
+    platform: macOS
+    sources:
+      - CallNotesMac/Launcher
+    settings:
+      base:
+        # The launcher must run on old systems to explain the macOS 26
+        # requirement, so it deploys back further than the app itself.
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+  CallNotesIOS:
+    type: application
+    platform: iOS
+    sources:
+      - CallNotesIOS/Sources
+    dependencies:
+      - package: CallNotesCore
+      - target: CallNotesShareExtension
+    settings:
+      base:
+        PRODUCT_NAME: CallNotes
+        PRODUCT_BUNDLE_IDENTIFIER: com.thatdudealso.callnotes.ios
+        GENERATE_INFOPLIST_FILE: true
+        INFOPLIST_KEY_UILaunchScreen_Generation: true
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: CallNotes records in-person meetings you start and uploads them to your Mac for transcription.
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: CallNotes talks only to your own Mac on your local network to sync calls and notes.
+
+  CallNotesShareExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - CallNotesIOS/ShareExtension/Sources
+    info:
+      path: CallNotesIOS/ShareExtension/Info.plist
+      properties:
+        CFBundleDisplayName: CallNotes
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
+          NSExtensionAttributes:
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsFileWithMaxCount: 1
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.thatdudealso.callnotes.ios.ShareExtension
+
+schemes:
+  CallNotesMac:
+    build:
+      targets:
+        CallNotesMac: all
+    run:
+      config: Debug
+  CallNotesIOS:
+    build:
+      targets:
+        CallNotesIOS: all
+    run:
+      config: Debug

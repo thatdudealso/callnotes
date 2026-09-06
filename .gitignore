@@ -1,0 +1,21 @@
+# Xcode
+build/
+DerivedData/
+*.xcodeproj
+!*.xcodeproj/project.pbxproj.keep
+xcuserdata/
+*.xcuserstate
+
+# SPM
+.build/
+.swiftpm/
+Package.resolved.lock
+
+# macOS
+.DS_Store
+
+# Temporary vendoring clones (never commit)
+.megaphone-tmp/
+
+# Secrets / local config
+*.local.env

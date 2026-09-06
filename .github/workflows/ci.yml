@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: CallNotesCore build + test
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode 26
+        run: |
+          latest="$(find /Applications -maxdepth 1 -name 'Xcode_26*.app' | sort -V | tail -1)"
+          if [ -n "$latest" ]; then
+            sudo xcode-select -s "$latest/Contents/Developer"
+          fi
+          swift --version
+          xcodebuild -version
+
+      - name: Build
+        run: swift build --package-path Packages/CallNotesCore
+
+      - name: Test
+        run: swift test --package-path Packages/CallNotesCore
+
+  mac-app:
+    name: CallNotesMac app build
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode 26
+        run: |
+          latest="$(find /Applications -maxdepth 1 -name 'Xcode_26*.app' | sort -V | tail -1)"
+          if [ -n "$latest" ]; then
+            sudo xcode-select -s "$latest/Contents/Developer"
+          fi
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build CallNotesMac
+        run: |
+          xcodebuild -project CallNotes.xcodeproj \
+            -scheme CallNotesMac \
+            -destination 'platform=macOS,arch=arm64' \
+            build \
+            CODE_SIGNING_ALLOWED=NO
+
+  lint:
+    name: Shell + workflow lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y shellcheck
+          find Scripts -name '*.sh' -print0 | xargs -0 shellcheck
+
+      - name: actionlint
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color
