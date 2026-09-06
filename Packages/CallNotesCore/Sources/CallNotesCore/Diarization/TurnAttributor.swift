@@ -209,10 +209,11 @@ public enum TurnAttributor {
             } else {
                 outcome = .unknown
             }
-            if case .unknown = outcome {
-                names[cluster.key] = "Speaker \(next)"
-                next += 1
+            if case .autoLabel = outcome {
+                continue
             }
+            names[cluster.key] = "Speaker \(next)"
+            next += 1
         }
         return names
     }

@@ -48,7 +48,7 @@ public struct StoreConfiguration: Sendable {
         )
     }
 
-    /// Local bootstrap instances. Only known postgresql@16 unix sockets are
+    /// Local bootstrap instances. Only known dedicated postgresql@18 sockets are
     /// used, so a machine's unrelated Postgres is never probed or migrated.
     public static func localCandidates(
         username: String = "callnotes",
@@ -56,10 +56,9 @@ public struct StoreConfiguration: Sendable {
     ) -> [StoreConfiguration] {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let sockets = [
-            "/opt/homebrew/var/callnotes-pg16/.s.PGSQL.5432",
-            "\(home)/Library/Application Support/CallNotes/postgresql@16/.s.PGSQL.5432",
-            "/opt/homebrew/var/postgresql@16/.s.PGSQL.5432",
-            "/usr/local/var/postgresql@16/.s.PGSQL.5432",
+            "/opt/homebrew/var/callnotes-postgresql@18/socket/.s.PGSQL.5433",
+            "/usr/local/var/callnotes-postgresql@18/socket/.s.PGSQL.5433",
+            "\(home)/Library/Application Support/CallNotes/postgresql@18/socket/.s.PGSQL.5433",
         ]
         var configs: [StoreConfiguration] = []
         for path in sockets where FileManager.default.fileExists(atPath: path) {

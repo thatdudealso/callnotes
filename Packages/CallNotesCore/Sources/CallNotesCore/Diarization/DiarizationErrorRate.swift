@@ -167,8 +167,6 @@ public enum DiarizationErrorRate {
         max(0, Int((time / frameDuration).rounded(.down)))
     }
 
-    /// Maximum-weight one-to-one mapping of hypothesis speakers onto reference
-    /// speakers by overlapping scored frames.
     private static func speakerMapping(
         reference: [String?],
         hypothesis: [String?],
@@ -179,41 +177,76 @@ public enum DiarizationErrorRate {
             guard let hyp = hypothesis[index], let ref = reference[index] else { continue }
             overlap[hyp, default: [:]][ref, default: 0] += 1
         }
-        let hypSpeakers = Array(Set(hypothesis.compactMap { $0 })).sorted()
-        let referenceSpeakers = Array(Set(reference.compactMap { $0 })).sorted()
-        var bestScore = -1
-        var bestMapping: [String: String] = [:]
+        let hypotheses = Array(Set(hypothesis.compactMap { $0 })).sorted()
+        let references = Array(Set(reference.compactMap { $0 })).sorted()
+        guard !hypotheses.isEmpty, !references.isEmpty else { return [:] }
 
-        func search(
-            _ index: Int,
-            usedReferences: Set<String>,
-            mapping: [String: String],
-            score: Int
-        ) {
-            guard index < hypSpeakers.count else {
-                if score > bestScore {
-                    bestScore = score
-                    bestMapping = mapping
-                }
-                return
-            }
-
-            let hyp = hypSpeakers[index]
-            search(index + 1, usedReferences: usedReferences, mapping: mapping, score: score)
-            for reference in referenceSpeakers where !usedReferences.contains(reference) {
-                var nextMapping = mapping
-                nextMapping[hyp] = reference
-                var nextUsed = usedReferences
-                nextUsed.insert(reference)
-                search(
-                    index + 1,
-                    usedReferences: nextUsed,
-                    mapping: nextMapping,
-                    score: score + (overlap[hyp]?[reference] ?? 0)
-                )
-            }
+        let maximumWeight = overlap.values.flatMap(\.values).max() ?? 0
+        let weights = hypotheses.map { hypothesis in
+            references.map { overlap[hypothesis]?[$0] ?? 0 }
+                + Array(repeating: 0, count: hypotheses.count)
         }
-        search(0, usedReferences: [], mapping: [:], score: 0)
-        return bestMapping
+        let assignment = maximumWeightAssignment(weights: weights, maximumWeight: maximumWeight)
+        var mapping: [String: String] = [:]
+        for (row, column) in assignment.enumerated()
+        where column < references.count && weights[row][column] > 0 {
+            mapping[hypotheses[row]] = references[column]
+        }
+        return mapping
+    }
+
+    private static func maximumWeightAssignment(weights: [[Int]], maximumWeight: Int) -> [Int] {
+        let rowCount = weights.count
+        let columnCount = weights[0].count
+        var rowPotential = Array(repeating: 0, count: rowCount + 1)
+        var columnPotential = Array(repeating: 0, count: columnCount + 1)
+        var columnMatch = Array(repeating: 0, count: columnCount + 1)
+        var predecessor = Array(repeating: 0, count: columnCount + 1)
+
+        for row in 1...rowCount {
+            columnMatch[0] = row
+            var column = 0
+            var minimum = Array(repeating: Int.max, count: columnCount + 1)
+            var visited = Array(repeating: false, count: columnCount + 1)
+            repeat {
+                visited[column] = true
+                let matchedRow = columnMatch[column]
+                var delta = Int.max
+                var nextColumn = 0
+                for candidate in 1...columnCount where !visited[candidate] {
+                    let cost = maximumWeight - weights[matchedRow - 1][candidate - 1]
+                    let reducedCost = cost - rowPotential[matchedRow] - columnPotential[candidate]
+                    if reducedCost < minimum[candidate] {
+                        minimum[candidate] = reducedCost
+                        predecessor[candidate] = column
+                    }
+                    if minimum[candidate] < delta {
+                        delta = minimum[candidate]
+                        nextColumn = candidate
+                    }
+                }
+                for candidate in 0...columnCount {
+                    if visited[candidate] {
+                        rowPotential[columnMatch[candidate]] += delta
+                        columnPotential[candidate] -= delta
+                    } else {
+                        minimum[candidate] -= delta
+                    }
+                }
+                column = nextColumn
+            } while columnMatch[column] != 0
+
+            repeat {
+                let previousColumn = predecessor[column]
+                columnMatch[column] = columnMatch[previousColumn]
+                column = previousColumn
+            } while column != 0
+        }
+
+        var assignment = Array(repeating: 0, count: rowCount)
+        for column in 1...columnCount where columnMatch[column] != 0 {
+            assignment[columnMatch[column] - 1] = column - 1
+        }
+        return assignment
     }
 }

@@ -5,7 +5,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Add durable project-specific notes here as they are discovered through real work.
 - `project.yml` is the XcodeGen source of truth. Use the build commands in `README.md`; generated `CallNotes.xcodeproj` is ignored.
 - `Scripts/bootstrap.sh` owns local service provisioning and immutable Ollama model references. Use `Scripts/bootstrap.sh --check` before making machine-level changes.
-- Phase 2 store: `PostgresStore` against the bootstrap `callnotes` DB (role `callnotes`, extensions `vector` + `pg_trgm`), with `MemoryStore` fallback when Postgres is unreachable (CI). `StoreConfiguration.localCandidates()` prefers a Homebrew `postgresql@16` unix socket and does not use `/tmp/.s.PGSQL.5432` so an unrelated Postgres on :5432 is left alone.
+- Phase 2 store: `PostgresStore` targets the bootstrap `callnotes` DB (role `callnotes`, extensions `vector` + `pg_trgm`), with `MemoryStore` fallback when the dedicated Postgres instance is unreachable (CI). `StoreConfiguration.localCandidates()` uses only the dedicated `postgresql@18` socket and never `/tmp/.s.PGSQL.5432` or port 5432.
 - Hardware SpeechAnalyzer and FluidAudio tests are gated on `CALLNOTES_HARNESS=1`. Live Postgres tests run when a candidate socket/server accepts the `callnotes` role.
 - Dual SpeechAnalyzer instances must be held alive together in `DualInstanceProbe`; sequential start-and-stop cannot observe ANE contention. Fallback is `nearLiveFarBatch`.
 - CAF writes fill a non-interleaved Float32 `AVAudioPCMBuffer`; AVAudioFile may store interleaved CAF. Filling an interleaved buffer or writing Int16 stereo CAF fails (`-50` / ExtAudioFile abort).

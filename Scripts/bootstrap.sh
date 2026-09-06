@@ -14,6 +14,7 @@ fi
 
 CALLNOTES_ROLE="callnotes"
 CALLNOTES_DATABASE="callnotes"
+CALLNOTES_POSTGRES_PORT="5433"
 GLIMMER_MODEL="muse-glimmer:30b"
 GLIMMER_MANIFEST_DIGEST="sha256:de878ce33ad81d060001db1469a02eebe4d86f0ad58cfe52dc062fdcbe4464c1"
 FALLBACK_MODEL="qwen3:30b-instruct"
@@ -45,7 +46,7 @@ write_postgres_plist() {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>com.thatdudealso.callnotes.postgresql</string>
-  <key>ProgramArguments</key><array><string>$POSTGRES_SERVER</string><string>-D</string><string>$POSTGRES_DATA_DIR</string></array>
+  <key>ProgramArguments</key><array><string>$POSTGRES_SERVER</string><string>-D</string><string>$POSTGRES_DATA_DIR</string><string>-k</string><string>$POSTGRES_SOCKET_DIR</string><string>-p</string><string>$CALLNOTES_POSTGRES_PORT</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>$HOME/Library/Logs/callnotes-postgresql.out.log</string>
@@ -86,7 +87,7 @@ bootstrap_launch_agent() {
 wait_for_postgres() {
   local _attempt
   for _attempt in {1..60}; do
-    if "$PSQL" --dbname=postgres --command="SELECT 1" >/dev/null 2>&1; then
+    if "$PSQL" --host="$POSTGRES_SOCKET_DIR" --port="$CALLNOTES_POSTGRES_PORT" --dbname=postgres --command="SELECT 1" >/dev/null 2>&1; then
       return
     fi
     sleep 1
@@ -150,29 +151,31 @@ if ! command -v brew >/dev/null 2>&1; then
 fi
 
 say "Installing or updating Homebrew dependencies"
-run brew install postgresql@16 pgvector ollama tailscale
+run brew install postgresql@18 pgvector ollama tailscale
 
 if "$CHECK_ONLY"; then
-  say "would locate Homebrew's postgresql@16 and pgvector installation"
+  say "would locate Homebrew's dedicated postgresql@18 and pgvector installation"
   say "would create PostgreSQL role '$CALLNOTES_ROLE', database '$CALLNOTES_DATABASE', and extensions vector + pg_trgm"
   say "would pull model: $GLIMMER_MODEL and verify manifest $GLIMMER_MANIFEST_DIGEST"
   say "would pull fallback: $FALLBACK_MODEL and verify manifest $FALLBACK_MANIFEST_DIGEST"
-  say "would write launchd agents for postgresql@16 and ollama"
+  say "would write launchd agents for dedicated postgresql@18 and ollama"
   exit 0
 fi
 
-POSTGRES_PREFIX="$(brew --prefix postgresql@16)"
+POSTGRES_PREFIX="$(brew --prefix postgresql@18)"
 PGVECTOR_PREFIX="$(brew --prefix pgvector)"
 HOMEBREW_PREFIX="$(brew --prefix)"
 PSQL="$POSTGRES_PREFIX/bin/psql"
 CREATEDB="$POSTGRES_PREFIX/bin/createdb"
 POSTGRES_SERVER="$POSTGRES_PREFIX/bin/postgres"
-POSTGRES_DATA_DIR="${PGDATA:-$HOMEBREW_PREFIX/var/postgresql@16}"
+POSTGRES_DATA_DIR="${PGDATA:-$HOMEBREW_PREFIX/var/callnotes-postgresql@18}"
+POSTGRES_SOCKET_DIR="$POSTGRES_DATA_DIR/socket"
 
 if [[ ! -f "$POSTGRES_DATA_DIR/PG_VERSION" ]]; then
-  say "Initializing PostgreSQL 16 data directory at $POSTGRES_DATA_DIR"
+  say "Initializing dedicated PostgreSQL 18 data directory at $POSTGRES_DATA_DIR"
   "$POSTGRES_PREFIX/bin/initdb" --pgdata="$POSTGRES_DATA_DIR"
 fi
+mkdir -p "$POSTGRES_SOCKET_DIR"
 
 write_postgres_plist
 write_ollama_plist
@@ -180,20 +183,20 @@ bootstrap_launch_agent "$POSTGRES_PLIST"
 bootstrap_launch_agent "$OLLAMA_PLIST"
 wait_for_postgres
 
-if ! "$PSQL" --dbname=postgres --tuples-only --no-align \
+if ! "$PSQL" --host="$POSTGRES_SOCKET_DIR" --port="$CALLNOTES_POSTGRES_PORT" --dbname=postgres --tuples-only --no-align \
   --command="SELECT 1 FROM pg_roles WHERE rolname = '$CALLNOTES_ROLE'" | grep -qx 1; then
   say "Creating PostgreSQL role $CALLNOTES_ROLE"
-  "$PSQL" --dbname=postgres --command="CREATE ROLE $CALLNOTES_ROLE LOGIN"
+  "$PSQL" --host="$POSTGRES_SOCKET_DIR" --port="$CALLNOTES_POSTGRES_PORT" --dbname=postgres --command="CREATE ROLE $CALLNOTES_ROLE LOGIN"
 fi
 
-if ! "$PSQL" --dbname=postgres --tuples-only --no-align \
+if ! "$PSQL" --host="$POSTGRES_SOCKET_DIR" --port="$CALLNOTES_POSTGRES_PORT" --dbname=postgres --tuples-only --no-align \
   --command="SELECT 1 FROM pg_database WHERE datname = '$CALLNOTES_DATABASE'" | grep -qx 1; then
   say "Creating PostgreSQL database $CALLNOTES_DATABASE"
-  "$CREATEDB" --owner="$CALLNOTES_ROLE" "$CALLNOTES_DATABASE"
+  "$CREATEDB" --host="$POSTGRES_SOCKET_DIR" --port="$CALLNOTES_POSTGRES_PORT" --owner="$CALLNOTES_ROLE" "$CALLNOTES_DATABASE"
 fi
 
-"$PSQL" --dbname="$CALLNOTES_DATABASE" --command="CREATE EXTENSION IF NOT EXISTS vector"
-"$PSQL" --dbname="$CALLNOTES_DATABASE" --command="CREATE EXTENSION IF NOT EXISTS pg_trgm"
+"$PSQL" --host="$POSTGRES_SOCKET_DIR" --port="$CALLNOTES_POSTGRES_PORT" --dbname="$CALLNOTES_DATABASE" --command="CREATE EXTENSION IF NOT EXISTS vector"
+"$PSQL" --host="$POSTGRES_SOCKET_DIR" --port="$CALLNOTES_POSTGRES_PORT" --dbname="$CALLNOTES_DATABASE" --command="CREATE EXTENSION IF NOT EXISTS pg_trgm"
 
 # pgvector's extension control file is normally found by Homebrew automatically.
 # Keep its prefix visible in the script output for troubleshooting mixed-prefix installs.

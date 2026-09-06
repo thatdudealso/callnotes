@@ -66,6 +66,30 @@ import Testing
         #expect(turns[0].speakerName == "Speaker 2")
     }
 
+    @Test func suggestedClusterKeepsOneUnknownLabelAcrossTurns() {
+        let tentative = SpeakerProfile(
+            displayName: "Priya",
+            centroid: [1, 0],
+            embeddingModel: EmbeddingModel.weSpeakerV2,
+            sampleCount: 1
+        )
+        let far = [
+            RawSegment(start: 0, end: 1, text: "first", channel: .far),
+            RawSegment(start: 2, end: 3, text: "second", channel: .far),
+        ]
+        let clusters = [
+            DiarizedCluster(key: "Z", ranges: [0...1, 2...3], embedding: [0.6, 0.8])
+        ]
+        let turns = TurnAttributor.attribute(
+            near: [],
+            far: far,
+            clusters: clusters,
+            profiles: [tentative]
+        )
+        #expect(turns.map(\.speakerName) == ["Speaker 1", "Speaker 1"])
+        #expect(turns.allSatisfy { $0.speakerID == nil })
+    }
+
     @Test func suggestedFarMatchRemainsUnassigned() {
         let far = [RawSegment(start: 0, end: 1, text: "who", channel: .far)]
         let tentative = SpeakerProfile(
@@ -84,7 +108,7 @@ import Testing
             profiles: [tentative]
         )
         #expect(turns[0].speakerID == nil)
-        #expect(turns[0].speakerName == "Speaker 2")
+        #expect(turns[0].speakerName == "Speaker 1")
     }
 
     @Test func sortsAcrossChannelsAndCollapsesSameSpeaker() {

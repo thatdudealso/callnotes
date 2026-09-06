@@ -67,10 +67,22 @@ public enum DualInstanceProbe {
             group.cancelAll()
             return collected
         }
-        let near = attempts.first ?? ProbeAttempt(started: false, error: "probe timed out", analyzer: nil)
+        let near = attempts.first ?? ProbeAttempt(
+            started: false,
+            error: "probe timed out",
+            analyzer: nil,
+            inputContinuation: nil
+        )
         let far = attempts.count > 1
             ? attempts[1]
-            : ProbeAttempt(started: false, error: "probe timed out", analyzer: nil)
+            : ProbeAttempt(
+                started: false,
+                error: "probe timed out",
+                analyzer: nil,
+                inputContinuation: nil
+            )
+        near.inputContinuation?.finish()
+        far.inputContinuation?.finish()
         await near.analyzer?.cancelAndFinishNow()
         await far.analyzer?.cancelAndFinishNow()
 
@@ -99,6 +111,7 @@ public enum DualInstanceProbe {
         var started: Bool
         var error: String?
         var analyzer: SpeechAnalyzer?
+        var inputContinuation: AsyncStream<AnalyzerInput>.Continuation?
     }
 
     private actor ProbeAttemptRacer {
@@ -142,15 +155,32 @@ public enum DualInstanceProbe {
                 let (input, continuation) = AsyncStream<AnalyzerInput>.makeStream()
                 try await analyzer.start(inputSequence: input)
                 _ = continuation
-                attempt = ProbeAttempt(started: true, error: nil, analyzer: analyzer)
+                attempt = ProbeAttempt(
+                    started: true,
+                    error: nil,
+                    analyzer: analyzer,
+                    inputContinuation: continuation
+                )
             } catch {
-                attempt = ProbeAttempt(started: false, error: error.localizedDescription, analyzer: nil)
+                attempt = ProbeAttempt(
+                    started: false,
+                    error: error.localizedDescription,
+                    analyzer: nil,
+                    inputContinuation: nil
+                )
             }
             await racer.finish(attempt)
         }
         Task {
             try? await Task.sleep(for: .seconds(timeout))
-            await racer.finish(ProbeAttempt(started: false, error: "probe timed out", analyzer: nil))
+            await racer.finish(
+                ProbeAttempt(
+                    started: false,
+                    error: "probe timed out",
+                    analyzer: nil,
+                    inputContinuation: nil
+                )
+            )
         }
         return await racer.value()
     }

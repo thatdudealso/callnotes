@@ -41,19 +41,17 @@ import Testing
     }
 
     @Test(.enabled(if: ProcessInfo.processInfo.environment["CALLNOTES_HARNESS"] == "1"))
-    func fluidAudioDEROnGeneratedFixture() async throws {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("callnotes-harness-\(UUID().uuidString).caf")
-        try ChannelAudio.writeStereoCAF(
-            near: Data(count: 16_000 * 2 * 3),
-            far: Data(count: 16_000 * 2 * 3),
-            sampleRate: 16_000,
-            to: url
-        )
+    func fluidAudioDEROnCommittedFixture() async throws {
+        guard let directory = RepoFixtures.diarizationDirectory() else {
+            throw FixtureError.missingDiarizationFixture
+        }
+        let url = directory.appendingPathComponent("two-speaker.caf")
+        let rttm = directory.appendingPathComponent("two-speaker.rttm")
+        let reference = DiarizationErrorRate.parseRTTM(try String(contentsOf: rttm, encoding: .utf8))
         let diarizer = FluidDiarizer()
         let clusters = try await diarizer.diarize(fileURL: url)
         let result = DiarizationErrorRate.compute(
-            reference: SampleReference.turns,
+            reference: reference,
             hypothesis: DiarizationErrorRate.turns(from: clusters)
         )
         print(
@@ -64,7 +62,7 @@ import Testing
                 DiarizationErrorRate.initialTarget
             )
         )
-        #expect(result.der <= 1.0)
+        #expect(result.der <= DiarizationErrorRate.initialTarget)
     }
 
     @Test(.enabled(if: ProcessInfo.processInfo.environment["CALLNOTES_HARNESS"] == "1"))
@@ -74,10 +72,8 @@ import Testing
     }
 }
 
-private enum SampleReference {
-    static let turns = [
-        DiarizationTurn(speaker: "A", start: 2.4, end: 5.0)
-    ]
+private enum FixtureError: Error {
+    case missingDiarizationFixture
 }
 
 enum RepoFixtures {
