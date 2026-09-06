@@ -160,8 +160,7 @@ import Testing
         #expect(unix.password == nil)
     }
 
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["CALLNOTES_HARNESS"] == "1"))
-    func livePostgresMigratesWhenReachable() async throws {
+    @Test func livePostgresMigratesWhenReachable() async throws {
         guard let store = await PostgresStore.makeIfAvailable() else {
             return
         }
@@ -175,5 +174,65 @@ import Testing
         )
         try await store.upsertCall(call)
         #expect(try await store.fetchCall(id: call.id)?.id == call.id)
+    }
+
+    @Test func fixtureSpinePersistsAttributedSpeakersToPostgres() async throws {
+        guard let store = await PostgresStore.makeIfAvailable() else {
+            return
+        }
+        try await store.migrate()
+        let owner = SpeakerIdentity.enroll(
+            displayName: "Me",
+            isOwner: true,
+            embedding: [1, 0, 0],
+            embeddingModel: EmbeddingModel.weSpeakerV2
+        )
+        let priya = SpeakerIdentity.enroll(
+            displayName: "Priya",
+            embedding: [0, 1, 0],
+            embeddingModel: EmbeddingModel.weSpeakerV2
+        )
+        try await store.upsertSpeakerProfile(owner)
+        try await store.upsertSpeakerProfile(priya)
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-pg-spine-\(UUID().uuidString).caf")
+        try ChannelAudio.writeStereoCAF(
+            near: Data(count: 3200),
+            far: Data(count: 3200),
+            sampleRate: 16_000,
+            to: url
+        )
+        let spine = LocalTranscriptionSpine(
+            speech: ScriptedPCMTranscriber(
+                near: [RawSegment(start: 0, end: 1, text: "hello priya", channel: .near)],
+                far: [RawSegment(start: 1.0, end: 2.5, text: "hi lets ship the pilot", channel: .far)]
+            ),
+            diarizer: ScriptedDiarizer(
+                clusters: [DiarizedCluster(key: "A", ranges: [1.0...2.5], embedding: [0, 1, 0])]
+            ),
+            store: store
+        )
+        let call = Call(
+            source: .fileImport,
+            startedAt: Date(),
+            counterpartyName: "Priya",
+            audioPath: url.path,
+            sttProvider: .appleSpeech
+        )
+        let processed = try await spine.process(
+            cafURL: url,
+            call: call,
+            profiles: [owner, priya]
+        )
+        #expect(processed.turns.map(\.speakerName) == ["Me", "Priya"])
+
+        let history = try await store.fetchCalls()
+        #expect(history.contains { $0.id == call.id && $0.status == .transcribed })
+        let detail = try await store.fetchSegments(callID: call.id, provider: .appleSpeech)
+        #expect(detail.map(\.text) == ["hello priya", "hi lets ship the pilot"])
+        #expect(detail.map(\.channel) == [.near, .far])
+        let speakers = try await store.fetchCallSpeakers(callID: call.id)
+        #expect(speakers.contains { $0.profileID == priya.id })
     }
 }

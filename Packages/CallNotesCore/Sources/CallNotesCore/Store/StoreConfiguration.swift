@@ -47,4 +47,32 @@ public struct StoreConfiguration: Sendable {
             tls: .disable
         )
     }
+
+    /// Local bootstrap instances. Unix sockets that exist are tried first so a
+    /// machine that already has another Postgres on :5432 (or `/tmp`) is not
+    /// used. TCP 127.0.0.1:5432 remains the default for a stock bootstrap.
+    public static func localCandidates(
+        username: String = "callnotes",
+        database: String = "callnotes"
+    ) -> [StoreConfiguration] {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let sockets = [
+            "/opt/homebrew/var/callnotes-pg16/.s.PGSQL.5432",
+            "\(home)/Library/Application Support/CallNotes/postgresql@16/.s.PGSQL.5432",
+            "/opt/homebrew/var/postgresql@16/.s.PGSQL.5432",
+            "/usr/local/var/postgresql@16/.s.PGSQL.5432",
+        ]
+        var configs: [StoreConfiguration] = []
+        for path in sockets where FileManager.default.fileExists(atPath: path) {
+            configs.append(
+                StoreConfiguration(
+                    username: username,
+                    database: database,
+                    unixSocketPath: path
+                )
+            )
+        }
+        configs.append(StoreConfiguration(username: username, database: database))
+        return configs
+    }
 }

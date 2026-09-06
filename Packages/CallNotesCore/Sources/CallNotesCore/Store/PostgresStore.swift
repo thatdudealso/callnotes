@@ -296,19 +296,17 @@ public actor PostgresStore: CallStore {
     }
 
     public static func makeIfAvailable(
-        configuration: StoreConfiguration = StoreConfiguration()
+        configuration: StoreConfiguration? = nil
     ) async -> PostgresStore? {
-        var candidates = [configuration]
-        if configuration.unixSocketPath == nil {
-            candidates.append(
-                StoreConfiguration(
-                    username: configuration.username,
-                    database: configuration.database,
-                    unixSocketPath: "/tmp"
-                )
-            )
+        var candidates: [StoreConfiguration] = []
+        if let configuration {
+            candidates.append(configuration)
         }
+        candidates.append(contentsOf: StoreConfiguration.localCandidates())
+        var seen = Set<String>()
         for candidate in candidates {
+            let key = candidate.unixSocketPath ?? "\(candidate.host):\(candidate.port)"
+            if !seen.insert(key).inserted { continue }
             if let store = await probe(candidate) {
                 return store
             }
