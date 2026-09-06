@@ -77,14 +77,15 @@ EOF
 
 bootstrap_launch_agent() {
   local plist="$1"
-  local domain="gui/$(id -u)"
+  local domain
+  domain="gui/$(id -u)"
   launchctl bootout "$domain" "$plist" >/dev/null 2>&1 || true
   launchctl bootstrap "$domain" "$plist"
 }
 
 wait_for_postgres() {
-  local attempt
-  for attempt in {1..60}; do
+  local _attempt
+  for _attempt in {1..60}; do
     if "$PSQL" --dbname=postgres --command="SELECT 1" >/dev/null 2>&1; then
       return
     fi
@@ -95,8 +96,8 @@ wait_for_postgres() {
 }
 
 wait_for_ollama() {
-  local attempt
-  for attempt in {1..60}; do
+  local _attempt
+  for _attempt in {1..60}; do
     if curl --connect-timeout 1 --max-time 2 --fail --silent --output /dev/null http://127.0.0.1:11434/api/tags; then
       return
     fi
