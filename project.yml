@@ -91,6 +91,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.thatdudealso.callnotes.ios.ShareExtension
+        MARKETING_VERSION: 0.1.0
 
 schemes:
   CallNotesMac:
