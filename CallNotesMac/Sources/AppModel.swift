@@ -49,9 +49,6 @@ final class AppModel {
         }
         do {
             try await postgres.migrate()
-            store = postgres
-            storeBackendName = "postgres"
-            isStoreInitialized = true
         } catch {
             store = memoryStore
             storeBackendName = "unavailable"
@@ -59,8 +56,13 @@ final class AppModel {
             statusMessage = "Dedicated CallNotes Postgres is unavailable: \(error.localizedDescription). Load sample call is disabled."
             return
         }
+        statusMessage = "Validating Apple SpeechAnalyzer dual-instance support..."
         speech = await AppleSpeechProvider.validated()
         live.dualInstanceMode = speech.dualInstanceMode
+        store = postgres
+        storeBackendName = "postgres"
+        isStoreInitialized = true
+        statusMessage = nil
         do {
             try await refresh()
         } catch {
@@ -91,7 +93,7 @@ final class AppModel {
         guard canProcessSampleCall else {
             statusMessage = isStoreInitialized
                 ? "Dedicated CallNotes Postgres is unavailable. Load sample call is disabled."
-                : "Checking dedicated CallNotes Postgres before loading the sample call..."
+                : "Waiting for dedicated CallNotes Postgres and SpeechAnalyzer validation before loading the sample call..."
             return
         }
         recordingState = .processing
