@@ -10,15 +10,20 @@ enum GenerateDiarizationFixture {
             withIntermediateDirectories: true
         )
 
-        let near = try synthesize(
-            text: "Hello Priya, this is the near channel confirming the meeting time.",
-            voices: ["Samantha", "Karen"]
+        let near = trim(
+            try synthesize(
+                text: "Hello Priya, this is the near channel confirming the meeting time.",
+                voices: ["Samantha", "Karen"]
+            ),
+            to: 3.0
         )
-        let farSpeech = try synthesize(
-            text: "Hi, this is Priya on the far channel. Let's ship the pilot next week.",
-            voices: ["Daniel", "Karen"]
+        let farSpeech = trim(
+            try synthesize(
+                text: "Hi, this is Priya on the far channel. Let's ship the pilot next week.",
+                voices: ["Daniel", "Karen"]
+            ),
+            to: 2.6
         )
-        // RTTM: near 0-3.0s, far 2.4-5.0s. Offset the far channel to match.
         let farDelay = Data(count: Int(2.4 * 16_000) * MemoryLayout<Int16>.size)
         try writeStereoCAF(near: near, far: farDelay + farSpeech, sampleRate: 16_000, to: out)
         FileHandle.standardError.write(
@@ -89,6 +94,11 @@ enum GenerateDiarizationFixture {
             throw NSError(domain: "GenerateDiarizationFixture", code: 2)
         }
         return Data(bytes: channel, count: outFrames * MemoryLayout<Int16>.size)
+    }
+
+    static func trim(_ pcm16: Data, to duration: Double, sampleRate: Double = 16_000) -> Data {
+        let byteCount = Int(duration * sampleRate) * MemoryLayout<Int16>.size
+        return Data(pcm16.prefix(byteCount))
     }
 
     static func writeStereoCAF(near: Data, far: Data, sampleRate: Double, to url: URL) throws {

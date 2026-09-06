@@ -102,6 +102,11 @@ final class AppModel {
             let fixture = try SampleCallFixture.materialize()
             try await startLiveSession()
             try await playFixture(cafURL: fixture.cafURL)
+            let diarizer = FluidDiarizer()
+            let priyaEmbedding = try await SampleCallFixture.priyaEmbedding(
+                cafURL: fixture.cafURL,
+                diarizer: diarizer
+            )
             var profiles = try await store.fetchSpeakerProfiles()
             if !profiles.contains(where: \.isOwner) {
                 let owner = SpeakerIdentity.enroll(
@@ -113,16 +118,22 @@ final class AppModel {
                 try await store.upsertSpeakerProfile(owner)
                 profiles.append(owner)
             }
-            let priyaEmbedding = SampleCallFixture.embedding([0, 1, 0])
-            if !profiles.contains(where: {
-                $0.displayName == "Priya"
-                    && $0.embeddingModel == EmbeddingModel.weSpeakerV2
-                    && $0.centroid == priyaEmbedding
+            if let index = profiles.firstIndex(where: {
+                $0.contactIdentifier == SampleCallFixture.priyaContactIdentifier
             }) {
+                var priya = profiles[index]
+                priya.displayName = "Priya"
+                priya.centroid = priyaEmbedding
+                priya.embeddingModel = diarizer.embeddingModelID()
+                priya.sampleCount = max(priya.sampleCount, 1)
+                try await store.upsertSpeakerProfile(priya)
+                profiles[index] = priya
+            } else {
                 let priya = SpeakerIdentity.enroll(
                     displayName: "Priya",
+                    contactIdentifier: SampleCallFixture.priyaContactIdentifier,
                     embedding: priyaEmbedding,
-                    embeddingModel: EmbeddingModel.weSpeakerV2
+                    embeddingModel: diarizer.embeddingModelID()
                 )
                 try await store.upsertSpeakerProfile(priya)
                 profiles.append(priya)
@@ -140,7 +151,8 @@ final class AppModel {
             let processed = try await processWithLocalEngine(
                 cafURL: fixture.cafURL,
                 call: call,
-                profiles: profiles
+                profiles: profiles,
+                diarizer: diarizer
             )
 
             turnsByCall[processed.call.id] = processed.turns
@@ -232,11 +244,12 @@ final class AppModel {
     private func processWithLocalEngine(
         cafURL: URL,
         call: Call,
-        profiles: [SpeakerProfile]
+        profiles: [SpeakerProfile],
+        diarizer: FluidDiarizer
     ) async throws -> ProcessedCall {
         let spine = LocalTranscriptionSpine(
             speech: speech,
-            diarizer: FluidDiarizer(),
+            diarizer: diarizer,
             store: store
         )
         let processed = try await spine.process(
@@ -261,12 +274,22 @@ final class AppModel {
 }
 
 enum SampleCallFixture {
+    static let priyaContactIdentifier = "callnotes-fixture-priya"
+
     static let referenceTurns = [
         DiarizationTurn(speaker: "A", start: 2.4, end: 5.0),
     ]
 
     static func embedding(_ values: [Float]) -> [Float] {
         values + Array(repeating: 0, count: max(EmbeddingModel.dimension - values.count, 0))
+    }
+
+    static func priyaEmbedding(cafURL: URL, diarizer: FluidDiarizer) async throws -> [Float] {
+        let split = try ChannelAudio.splitStereoCAF(url: cafURL)
+        let samples = split.far.withUnsafeBytes { raw in
+            raw.bindMemory(to: Int16.self).map { Float($0) / Float(Int16.max) }
+        }
+        return try await diarizer.enrollEmbedding(samples: samples)
     }
 
     static func materialize() throws -> (cafURL: URL, referenceTurns: [DiarizationTurn]) {
@@ -286,7 +309,8 @@ enum SampleCallFixture {
         if !FileManager.default.fileExists(atPath: url.path) {
             try ChannelAudio.writeStereoCAF(
                 near: tone(frequency: 440, seconds: 3),
-                far: tone(frequency: 660, seconds: 3),
+                far: Data(count: Int(2.4 * 16_000) * MemoryLayout<Int16>.size)
+                    + tone(frequency: 660, seconds: 2.6),
                 sampleRate: 16_000,
                 to: url
             )
