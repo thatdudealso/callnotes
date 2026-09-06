@@ -94,14 +94,22 @@ final class AppModel {
                     embedding: SampleCallFixture.embedding([1, 0, 0]),
                     embeddingModel: EmbeddingModel.weSpeakerV2
                 )
+                try await store.upsertSpeakerProfile(owner)
+                profiles.append(owner)
+            }
+            let priyaEmbedding = SampleCallFixture.embedding([0, 1, 0])
+            if !profiles.contains(where: {
+                $0.displayName == "Priya"
+                    && $0.embeddingModel == EmbeddingModel.weSpeakerV2
+                    && $0.centroid == priyaEmbedding
+            }) {
                 let priya = SpeakerIdentity.enroll(
                     displayName: "Priya",
-                    embedding: SampleCallFixture.embedding([0, 1, 0]),
+                    embedding: priyaEmbedding,
                     embeddingModel: EmbeddingModel.weSpeakerV2
                 )
-                try await store.upsertSpeakerProfile(owner)
                 try await store.upsertSpeakerProfile(priya)
-                profiles = [owner, priya]
+                profiles.append(priya)
             }
 
             let call = Call(
