@@ -14,8 +14,10 @@ fi
 
 CALLNOTES_ROLE="callnotes"
 CALLNOTES_DATABASE="callnotes"
-GLIMMER_MODEL="muse-glimmer:30b@sha256:de878ce33ad81d060001db1469a02eebe4d86f0ad58cfe52dc062fdcbe4464c1"
-FALLBACK_MODEL="qwen3:30b-instruct@sha256:19e422b0231392335cfc49cfd172de7034bb1aeabb08aa307cce745c60b272fe"
+GLIMMER_MODEL="muse-glimmer:30b"
+GLIMMER_MANIFEST_DIGEST="sha256:de878ce33ad81d060001db1469a02eebe4d86f0ad58cfe52dc062fdcbe4464c1"
+FALLBACK_MODEL="qwen3:30b-instruct"
+FALLBACK_MANIFEST_DIGEST="sha256:19e422b0231392335cfc49cfd172de7034bb1aeabb08aa307cce745c60b272fe"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 POSTGRES_PLIST="$LAUNCH_AGENTS_DIR/com.thatdudealso.callnotes.postgresql.plist"
 OLLAMA_PLIST="$LAUNCH_AGENTS_DIR/com.thatdudealso.callnotes.ollama.plist"
@@ -73,6 +75,74 @@ write_ollama_plist() {
 EOF
 }
 
+bootstrap_launch_agent() {
+  local plist="$1"
+  local domain="gui/$(id -u)"
+  launchctl bootout "$domain" "$plist" >/dev/null 2>&1 || true
+  launchctl bootstrap "$domain" "$plist"
+}
+
+wait_for_postgres() {
+  local attempt
+  for attempt in {1..60}; do
+    if "$PSQL" --dbname=postgres --command="SELECT 1" >/dev/null 2>&1; then
+      return
+    fi
+    sleep 1
+  done
+  say "PostgreSQL did not become ready"
+  exit 1
+}
+
+wait_for_ollama() {
+  local attempt
+  for attempt in {1..60}; do
+    if curl --connect-timeout 1 --max-time 2 --fail --silent --output /dev/null http://127.0.0.1:11434/api/tags; then
+      return
+    fi
+    sleep 1
+  done
+  say "Ollama did not become ready"
+  exit 1
+}
+
+model_manifest_digest() {
+  local model="$1"
+  local tags_file
+  local index=0
+  local name
+  local digest
+  tags_file="$(mktemp)"
+  curl --fail --silent http://127.0.0.1:11434/api/tags > "$tags_file"
+  plutil -convert xml1 "$tags_file"
+
+  while name="$(/usr/libexec/PlistBuddy -c "Print :models:$index:name" "$tags_file" 2>/dev/null)"; do
+    if [[ "$name" == "$model" ]]; then
+      digest="$(/usr/libexec/PlistBuddy -c "Print :models:$index:digest" "$tags_file")"
+      rm -f "$tags_file"
+      say "sha256:$digest"
+      return
+    fi
+    ((index += 1))
+  done
+
+  rm -f "$tags_file"
+  say "No locally installed manifest found for $model" >&2
+  return 1
+}
+
+pull_and_verify_model() {
+  local model="$1"
+  local expected_digest="$2"
+  local actual_digest
+  ollama pull "$model"
+  actual_digest="$(model_manifest_digest "$model")"
+  if [[ "$actual_digest" != "$expected_digest" ]]; then
+    say "Manifest digest mismatch for $model: expected $expected_digest, got $actual_digest" >&2
+    return 1
+  fi
+}
+
 if ! command -v brew >/dev/null 2>&1; then
   say "Homebrew is required: https://brew.sh"
   exit 1
@@ -84,8 +154,8 @@ run brew install postgresql@16 pgvector ollama tailscale
 if "$CHECK_ONLY"; then
   say "would locate Homebrew's postgresql@16 and pgvector installation"
   say "would create PostgreSQL role '$CALLNOTES_ROLE', database '$CALLNOTES_DATABASE', and extensions vector + pg_trgm"
-  say "would pull pinned model: $GLIMMER_MODEL"
-  say "would pull pinned fallback: $FALLBACK_MODEL"
+  say "would pull model: $GLIMMER_MODEL and verify manifest $GLIMMER_MANIFEST_DIGEST"
+  say "would pull fallback: $FALLBACK_MODEL and verify manifest $FALLBACK_MANIFEST_DIGEST"
   say "would write launchd agents for postgresql@16 and ollama"
   exit 0
 fi
@@ -95,7 +165,6 @@ PGVECTOR_PREFIX="$(brew --prefix pgvector)"
 HOMEBREW_PREFIX="$(brew --prefix)"
 PSQL="$POSTGRES_PREFIX/bin/psql"
 CREATEDB="$POSTGRES_PREFIX/bin/createdb"
-PG_CTL="$POSTGRES_PREFIX/bin/pg_ctl"
 POSTGRES_SERVER="$POSTGRES_PREFIX/bin/postgres"
 POSTGRES_DATA_DIR="${PGDATA:-$HOMEBREW_PREFIX/var/postgresql@16}"
 
@@ -104,10 +173,11 @@ if [[ ! -f "$POSTGRES_DATA_DIR/PG_VERSION" ]]; then
   "$POSTGRES_PREFIX/bin/initdb" --pgdata="$POSTGRES_DATA_DIR"
 fi
 
-if ! "$PG_CTL" --pgdata="$POSTGRES_DATA_DIR" status >/dev/null 2>&1; then
-  say "Starting PostgreSQL 16"
-  "$PG_CTL" --pgdata="$POSTGRES_DATA_DIR" --wait start
-fi
+write_postgres_plist
+write_ollama_plist
+bootstrap_launch_agent "$POSTGRES_PLIST"
+bootstrap_launch_agent "$OLLAMA_PLIST"
+wait_for_postgres
 
 if ! "$PSQL" --dbname=postgres --tuples-only --no-align \
   --command="SELECT 1 FROM pg_roles WHERE rolname = '$CALLNOTES_ROLE'" | grep -qx 1; then
@@ -128,12 +198,8 @@ fi
 # Keep its prefix visible in the script output for troubleshooting mixed-prefix installs.
 say "Using pgvector from $PGVECTOR_PREFIX"
 
-ollama pull "$GLIMMER_MODEL"
-ollama pull "$FALLBACK_MODEL"
-
-write_postgres_plist
-write_ollama_plist
-launchctl bootstrap "gui/$(id -u)" "$POSTGRES_PLIST" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$OLLAMA_PLIST" 2>/dev/null || true
+wait_for_ollama
+pull_and_verify_model "$GLIMMER_MODEL" "$GLIMMER_MANIFEST_DIGEST"
+pull_and_verify_model "$FALLBACK_MODEL" "$FALLBACK_MANIFEST_DIGEST"
 
 say "CallNotes bootstrap complete. Models are pinned in docs/models.md."

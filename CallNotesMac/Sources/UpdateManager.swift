@@ -225,6 +225,7 @@ final class UpdateManager: ObservableObject {
     private let postTranscriptionReminderInterval: TimeInterval = 24 * 60 * 60 // 1 day
     private var periodicTimer: Timer?
     private var activeDownloadTask: Task<Void, Never>?
+    private var activeByteDownloadTask: Task<Int, Error>?
 
     private init() {
         lastCheckDate = UserDefaults.standard.object(forKey: "updateLastCheckDate") as? Date
@@ -776,7 +777,9 @@ final class UpdateManager: ObservableObject {
 
     func cancelDownload() {
         activeDownloadTask?.cancel()
+        activeByteDownloadTask?.cancel()
         activeDownloadTask = nil
+        activeByteDownloadTask = nil
         downloadProgress = nil
         updateStatus = .idle
     }
@@ -792,6 +795,7 @@ final class UpdateManager: ObservableObject {
         guard let downloadURL = URL(string: dmgAsset.browserDownloadUrl) else { return }
 
         activeDownloadTask?.cancel()
+        activeByteDownloadTask?.cancel()
         activeDownloadTask = Task {
             await performUpdate(
                 downloadURL: downloadURL,
@@ -875,8 +879,10 @@ final class UpdateManager: ObservableObject {
                 }
                 return receivedBytes
             }
+            activeByteDownloadTask = downloadTask
 
             let receivedBytes = try await downloadTask.value
+            try Task.checkCancellation()
             if expectedSize > 0 && receivedBytes != expectedSize {
                 throw NSError(domain: "UpdateManager", code: 4, userInfo: [
                     NSLocalizedDescriptionKey: "Downloaded update size did not match the release asset"
@@ -902,9 +908,11 @@ final class UpdateManager: ObservableObject {
         downloadProgress = nil
 
         do {
+            try Task.checkCancellation()
             let mountPoint = try await Task.detached {
                 try self.mountDMG(at: dmgPath)
             }.value
+            try Task.checkCancellation()
 
             defer {
                 // Always try to detach
@@ -943,6 +951,7 @@ final class UpdateManager: ObservableObject {
                 try? fm.removeItem(at: tempDir)
 
                 // MARK: Replace & relaunch
+                try Task.checkCancellation()
                 updateStatus = .readyToRelaunch
                 try replaceAndRelaunch(
                     stagedApp: stagedApp,
@@ -956,6 +965,8 @@ final class UpdateManager: ObservableObject {
                 throw error
             }
 
+        } catch is CancellationError {
+            try? fm.removeItem(at: tempDir)
         } catch {
             updateStatus = .error("Install failed: \(error.localizedDescription)")
             try? fm.removeItem(at: tempDir)
