@@ -73,6 +73,22 @@ import Testing
         #expect(abs(result.der - 0.5) < 0.0001)
     }
 
+    @Test func overlappingReferenceSpeechContributesToScoredDuration() {
+        let reference = [
+            DiarizationTurn(speaker: "A", start: 0, end: 2),
+            DiarizationTurn(speaker: "B", start: 1, end: 2),
+        ]
+        let hypothesis = [DiarizationTurn(speaker: "X", start: 0, end: 2)]
+        let result = DiarizationErrorRate.compute(
+            reference: reference,
+            hypothesis: hypothesis,
+            collar: 0
+        )
+        #expect(abs(result.scoredSpeech - 3) < 0.0001)
+        #expect(abs(result.missedSpeech - (1.0 / 3.0)) < 0.0001)
+        #expect(abs(result.der - (1.0 / 3.0)) < 0.0001)
+    }
+
     @Test func parseRTTMReadsSpeakerTurns() {
         let rttm = """
             SPEAKER two-speaker 1 0.000 3.000 <NA> <NA> near <NA>

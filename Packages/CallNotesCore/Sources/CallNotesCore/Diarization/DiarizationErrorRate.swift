@@ -62,8 +62,8 @@ public enum DiarizationErrorRate {
         }
 
         let frameCount = Int((end / frameDuration).rounded(.up))
-        var refFrames = Array(repeating: Optional<String>.none, count: frameCount)
-        var hypFrames = Array(repeating: Optional<String>.none, count: frameCount)
+        var refFrames = Array(repeating: Set<String>(), count: frameCount)
+        var hypFrames = Array(repeating: Set<String>(), count: frameCount)
         fill(&refFrames, with: reference)
         fill(&hypFrames, with: hypothesis)
 
@@ -83,7 +83,7 @@ public enum DiarizationErrorRate {
         }
 
         var scored = Set<Int>()
-        for (index, speaker) in refFrames.enumerated() where speaker != nil && !excluded.contains(index) {
+        for (index, speakers) in refFrames.enumerated() where !speakers.isEmpty && !excluded.contains(index) {
             scored.insert(index)
         }
 
@@ -95,19 +95,13 @@ public enum DiarizationErrorRate {
         var scoredSpeech = 0
         for index in 0..<frameCount {
             if excluded.contains(index) { continue }
-            let ref = refFrames[index]
-            let hyp = hypFrames[index].map { mapping[$0] ?? $0 }
-            if ref != nil { scoredSpeech += 1 }
-            switch (ref, hyp) {
-            case (nil, .some):
-                falseAlarm += 1
-            case (.some, nil):
-                miss += 1
-            case let (.some(refSpeaker), .some(hypSpeaker)) where refSpeaker != hypSpeaker:
-                speakerError += 1
-            default:
-                break
-            }
+            let referenceSpeakers = refFrames[index]
+            let hypothesisSpeakers = Set(hypFrames[index].map { mapping[$0] ?? $0 })
+            scoredSpeech += referenceSpeakers.count
+            miss += max(referenceSpeakers.count - hypothesisSpeakers.count, 0)
+            falseAlarm += max(hypothesisSpeakers.count - referenceSpeakers.count, 0)
+            speakerError += min(referenceSpeakers.count, hypothesisSpeakers.count)
+                - referenceSpeakers.intersection(hypothesisSpeakers).count
         }
 
         let scoredSpeechTime = Double(max(scoredSpeech, 1)) * frameDuration
@@ -151,13 +145,13 @@ public enum DiarizationErrorRate {
         }
     }
 
-    private static func fill(_ frames: inout [String?], with turns: [DiarizationTurn]) {
+    private static func fill(_ frames: inout [Set<String>], with turns: [DiarizationTurn]) {
         for turn in turns {
             let start = frameIndex(turn.start)
             let stop = max(start, frameIndex(turn.end))
             if start < frames.count {
                 for index in start..<min(stop, frames.count) {
-                    frames[index] = turn.speaker
+                    frames[index].insert(turn.speaker)
                 }
             }
         }
@@ -168,17 +162,20 @@ public enum DiarizationErrorRate {
     }
 
     private static func speakerMapping(
-        reference: [String?],
-        hypothesis: [String?],
+        reference: [Set<String>],
+        hypothesis: [Set<String>],
         scored: Set<Int>
     ) -> [String: String] {
         var overlap: [String: [String: Int]] = [:]
         for index in scored {
-            guard let hyp = hypothesis[index], let ref = reference[index] else { continue }
-            overlap[hyp, default: [:]][ref, default: 0] += 1
+            for hypothesisSpeaker in hypothesis[index] {
+                for referenceSpeaker in reference[index] {
+                    overlap[hypothesisSpeaker, default: [:]][referenceSpeaker, default: 0] += 1
+                }
+            }
         }
-        let hypotheses = Array(Set(hypothesis.compactMap { $0 })).sorted()
-        let references = Array(Set(reference.compactMap { $0 })).sorted()
+        let hypotheses = Array(hypothesis.flatMap { $0 }.reduce(into: Set<String>()) { $0.insert($1) }).sorted()
+        let references = Array(reference.flatMap { $0 }.reduce(into: Set<String>()) { $0.insert($1) }).sorted()
         guard !hypotheses.isEmpty, !references.isEmpty else { return [:] }
 
         let maximumWeight = overlap.values.flatMap(\.values).max() ?? 0
