@@ -4,35 +4,37 @@ import Testing
 @testable import CallNotesCore
 
 @Suite struct CaptureAlignmentTests {
-    @Test func identicalSignalsHaveZeroLagAndAreLive() {
-        let pulse = makePulse(frames: 2_000, pulseAt: 200)
-        let result = CaptureAlignment.analyze(near: pulse, far: pulse, sampleRate: 16_000)
-        #expect(abs(result.lagSeconds) < 0.001)
+    @Test func startTimesWithinToleranceAreAligned() {
+        let result = CaptureAlignment.analyze(
+            near: makePulse(frames: 2_000, pulseAt: 200),
+            far: makePulse(frames: 2_000, pulseAt: 800),
+            nearStartTime: 10,
+            farStartTime: 10.049
+        )
+        #expect(abs(result.lagSeconds - 0.049) < 0.001)
         #expect(result.isAligned)
         #expect(result.bothChannelsLive)
     }
 
-    @Test func tenMillisecondFarDelayIsWithinTolerance() {
-        let near = makePulse(frames: 4_000, pulseAt: 400)
-        let delay = 160 // 10 ms at 16 kHz
-        var far = [Int16](repeating: 0, count: near.count)
-        for i in delay..<near.count {
-            far[i] = near[i - delay]
-        }
-        let result = CaptureAlignment.analyze(near: near, far: far, sampleRate: 16_000)
-        #expect(abs(result.lagSeconds - 0.010) < 0.002)
-        #expect(result.isAligned)
+    @Test func startTimesBeyondToleranceFailAlignment() {
+        let result = CaptureAlignment.analyze(
+            near: makePulse(frames: 8_000, pulseAt: 400),
+            far: makePulse(frames: 8_000, pulseAt: 1_600),
+            nearStartTime: 10,
+            farStartTime: 10.051
+        )
+        #expect(abs(result.lagSeconds - 0.051) < 0.001)
+        #expect(!result.isAligned)
     }
 
-    @Test func eightyMillisecondDelayFailsAlignment() {
-        let near = makePulse(frames: 8_000, pulseAt: 400)
-        let delay = 1_280 // 80 ms at 16 kHz
-        var far = [Int16](repeating: 0, count: near.count)
-        for i in delay..<near.count {
-            far[i] = near[i - delay]
-        }
-        let result = CaptureAlignment.analyze(near: near, far: far, sampleRate: 16_000)
-        #expect(abs(result.lagSeconds - 0.080) < 0.005)
+    @Test func missingStartTimeFailsAlignment() {
+        let result = CaptureAlignment.analyze(
+            near: makePulse(frames: 1_000, pulseAt: 10),
+            far: makePulse(frames: 1_000, pulseAt: 700),
+            nearStartTime: 10,
+            farStartTime: nil
+        )
+        #expect(!result.hasStartTimestamps)
         #expect(!result.isAligned)
     }
 

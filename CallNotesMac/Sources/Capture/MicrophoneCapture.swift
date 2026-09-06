@@ -22,6 +22,12 @@ final class MicrophoneCapture: @unchecked Sendable {
     func start(enableVoiceProcessing: Bool = true) throws {
         guard !isRunning else { throw CaptureError.alreadyRunning }
         let input = engine.inputNode
+        var started = false
+        defer {
+            if !started {
+                reset()
+            }
+        }
         if enableVoiceProcessing {
             do {
                 try input.setVoiceProcessingEnabled(true)
@@ -40,10 +46,14 @@ final class MicrophoneCapture: @unchecked Sendable {
         engine.prepare()
         try engine.start()
         isRunning = true
+        started = true
     }
 
     func stop() {
-        guard isRunning else { return }
+        reset()
+    }
+
+    private func reset() {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         if voiceProcessingEnabled {

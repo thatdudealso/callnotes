@@ -56,6 +56,15 @@ final class AudioCapture: @unchecked Sendable {
 
     var ringSnapshot: [Int16] { ring.snapshot() }
 
+    var channelStartTimes: (near: TimeInterval?, far: TimeInterval?) {
+        mixer.withLock { state in
+            (
+                near: state.nearHost.map(AVHostTime.seconds),
+                far: state.farHost.map(AVHostTime.seconds)
+            )
+        }
+    }
+
     func start(_ configuration: Configuration) async throws {
         guard !isRunning else { throw CaptureError.alreadyRunning }
         ring.reset()
@@ -106,6 +115,7 @@ final class AudioCapture: @unchecked Sendable {
                 try microphone.start(enableVoiceProcessing: configuration.enableVoiceProcessing)
             }
         } catch {
+            microphone.stop()
             processTap.stop()
             await screenFallback.stop()
             writer?.close()

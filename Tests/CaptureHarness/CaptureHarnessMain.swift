@@ -180,11 +180,13 @@ struct CaptureHarness {
         try await Task.sleep(for: .milliseconds(200))
         let written = try await capture.stop()
 
+        let startTimes = capture.channelStartTimes
         let channels = try StereoCAFReader.read(written)
         let analysis = CaptureAlignment.analyze(
             near: channels.near,
             far: channels.far,
-            sampleRate: channels.sampleRate
+            nearStartTime: startTimes.near,
+            farStartTime: startTimes.far
         )
         return CaptureHarnessResult(
             cafURL: written,
