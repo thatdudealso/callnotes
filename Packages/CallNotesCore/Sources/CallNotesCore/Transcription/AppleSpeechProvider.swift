@@ -236,13 +236,21 @@ public final class AppleSpeechSession: STTSession, @unchecked Sendable {
     public func finish() async throws {
         inputBuilder?.finish()
         inputBuilder = nil
-        if let analyzer {
-            try await analyzer.finalizeAndFinishThroughEndOfInput()
+        do {
+            if let analyzer {
+                try await analyzer.finalizeAndFinishThroughEndOfInput()
+            }
+            try await resultsTask?.value
+            continuation.finish()
+            analyzer = nil
+            resultsTask = nil
+        } catch {
+            resultsTask?.cancel()
+            resultsTask = nil
+            analyzer = nil
+            continuation.finish(throwing: error)
+            throw error
         }
-        try await resultsTask?.value
-        continuation.finish()
-        analyzer = nil
-        resultsTask = nil
     }
 }
 
