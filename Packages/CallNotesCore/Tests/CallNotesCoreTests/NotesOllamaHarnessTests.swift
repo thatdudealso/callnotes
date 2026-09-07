@@ -39,5 +39,32 @@ import Testing
         FileHandle.standardError.write(
             Data("callnotes notes speed fallback=\(fallbackElapsed) target=60s\n".utf8)
         )
+
+        let store = MemoryStore()
+        let call = Call(
+            source: .fileImport,
+            startedAt: Date(),
+            counterpartyName: "Priya",
+            audioPath: "/tmp/two-speaker.caf",
+            sttProvider: .appleSpeech,
+            status: .transcribed
+        )
+        try await store.upsertCall(call)
+        let spine = NotesGenerationSpine(
+            instant: ScriptedNotesProvider(
+                id: .appleFM,
+                health: .unavailable(reason: "harness"),
+                outputs: []
+            ),
+            deep: OllamaGlimmerProvider(
+                client: client,
+                healthProbe: { .unavailable(reason: "forced glimmer failure") }
+            ),
+            fallback: fallback,
+            store: store
+        )
+        let forced = try await spine.generateDeep(transcript, call: call)
+        #expect(forced.provider == .fallbackInstruct)
+        #expect(!forced.body.title.isEmpty)
     }
 }

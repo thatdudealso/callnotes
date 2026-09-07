@@ -207,6 +207,24 @@ import Testing
         #expect(try OllamaClient.decodeChatContent(data) == "{\"title\":\"x\"}")
     }
 
+    @Test func nativeChatResponseDecodesContent() throws {
+        let data = Data(
+            """
+            {"message":{"role":"assistant","content":"{\\"title\\":\\"y\\"}"}}
+            """.utf8
+        )
+        #expect(try OllamaClient.decodeChatContent(data) == "{\"title\":\"y\"}")
+    }
+
+    @Test func nativeChatResponseStripsTrailingStopToken() throws {
+        let data = Data(
+            """
+            {"message":{"role":"assistant","content":"{\\"title\\":\\"y\\"}<|eot|>"}}
+            """.utf8
+        )
+        #expect(try OllamaClient.decodeChatContent(data) == "{\"title\":\"y\"}")
+    }
+
     static let invalidJSON = #"{"title":"","summary":""}"#
     static let validJSON = """
         {
@@ -298,6 +316,14 @@ import Testing
                 == "sha256:19e422b0231392335cfc49cfd172de7034bb1aeabb08aa307cce745c60b272fe"
         )
         #expect(PinnedNotesModel.glimmer.matches(digest: PinnedNotesModel.glimmer.digest))
+    }
+
+    @Test func contextWindowScalesWithPromptSize() {
+        #expect(NotesContextBudget.contextWindow(for: "short") == 8_192)
+        let medium = String(repeating: "word ", count: 4_000)
+        #expect(NotesContextBudget.contextWindow(for: medium) == 16_384)
+        let long = String(repeating: "word ", count: 12_000)
+        #expect(NotesContextBudget.contextWindow(for: long) == 32_768)
     }
 }
 
@@ -393,10 +419,11 @@ actor ScriptedOllamaClient: OllamaServing {
         self.replies = replies
     }
 
-    func chat(model: String, messages: [OllamaChatMessage], numCtx: Int) async throws -> String {
+    func chat(model: String, messages: [OllamaChatMessage], numCtx: Int, jsonSchema: String?) async throws -> String {
         _ = model
         _ = messages
         _ = numCtx
+        _ = jsonSchema
         guard !replies.isEmpty else {
             throw NotesGenerationError.ollamaUnavailable("scripted Ollama has no replies")
         }

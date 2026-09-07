@@ -24,12 +24,14 @@ public struct OllamaModelTag: Sendable, Equatable {
 
 /// HTTP surface used by the Ollama notes providers.
 public protocol OllamaServing: Sendable {
-    func chat(model: String, messages: [OllamaChatMessage], numCtx: Int) async throws -> String
+    func chat(model: String, messages: [OllamaChatMessage], numCtx: Int, jsonSchema: String?) async throws -> String
     func listModels() async throws -> [OllamaModelTag]
 }
 
-/// Localhost Ollama client. Chat uses the OpenAI-compatible completions path
-/// from plan section 7.1; health uses `/api/tags` so digests can be checked.
+/// Localhost Ollama client. Chat uses native `/api/chat` with a JSON schema
+/// as `format` so constrained decoding keeps notes schema-valid. Thinking is
+/// disabled because Glimmer's reasoning tokens miss the 60s notes budget.
+/// Health uses `/api/tags` so digests can be checked.
 public struct OllamaClient: OllamaServing {
     public var baseURL: URL
     public var session: URLSession
@@ -45,21 +47,31 @@ public struct OllamaClient: OllamaServing {
         self.keepAlive = keepAlive
     }
 
-    public func chat(model: String, messages: [OllamaChatMessage], numCtx: Int) async throws -> String {
-        let url = baseURL.appending(path: "/v1/chat/completions")
+    public func chat(
+        model: String,
+        messages: [OllamaChatMessage],
+        numCtx: Int,
+        jsonSchema: String?
+    ) async throws -> String {
+        let url = baseURL.appending(path: "/api/chat")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 180
-        let body = ChatRequest(
-            model: model,
-            messages: messages,
-            temperature: 0,
-            responseFormat: .init(type: "json_object"),
-            options: .init(numCtx: numCtx),
-            keepAlive: keepAlive
-        )
-        request.httpBody = try JSONEncoder().encode(body)
+        request.timeoutInterval = 300
+        var payload: [String: Any] = [
+            "model": model,
+            "messages": messages.map { ["role": $0.role, "content": $0.content] },
+            "stream": false,
+            "think": false,
+            "keep_alive": keepAlive,
+            "options": ["num_ctx": numCtx, "temperature": 0],
+        ]
+        if let jsonSchema,
+            let schemaObject = try JSONSerialization.jsonObject(with: Data(jsonSchema.utf8)) as? [String: Any]
+        {
+            payload["format"] = schemaObject
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
         let (data, response) = try await session.data(for: request)
         try Self.throwIfHTTPError(response, data: data)
         return try Self.decodeChatContent(data)
@@ -112,15 +124,26 @@ public struct OllamaClient: OllamaServing {
             let content = openai.choices.first?.message.content,
             !content.isEmpty
         {
-            return content
+            return stripStopTokens(content)
         }
         if let native = try? JSONDecoder().decode(NativeChatResponse.self, from: data),
             let content = native.message?.content,
             !content.isEmpty
         {
-            return content
+            return stripStopTokens(content)
         }
         throw NotesGenerationError.schemaInvalid("Ollama chat response had no content")
+    }
+
+    static func stripStopTokens(_ content: String) -> String {
+        var text = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        for token in ["<|eot|>", "<|end_of_text|>", "<|im_end|>"] {
+            if let range = text.range(of: token) {
+                text.removeSubrange(range.lowerBound...)
+                text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        return text
     }
 
     private static func throwIfHTTPError(_ response: URLResponse, data: Data) throws {
@@ -128,33 +151,6 @@ public struct OllamaClient: OllamaServing {
         guard (200..<300).contains(http.statusCode) else {
             let body = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
             throw NotesGenerationError.ollamaUnavailable(body)
-        }
-    }
-
-    private struct ChatRequest: Encodable {
-        var model: String
-        var messages: [OllamaChatMessage]
-        var temperature: Double
-        var responseFormat: ResponseFormat
-        var options: Options
-        var keepAlive: String
-
-        enum CodingKeys: String, CodingKey {
-            case model, messages, temperature, options
-            case responseFormat = "response_format"
-            case keepAlive = "keep_alive"
-        }
-    }
-
-    private struct ResponseFormat: Encodable {
-        var type: String
-    }
-
-    private struct Options: Encodable {
-        var numCtx: Int
-
-        enum CodingKeys: String, CodingKey {
-            case numCtx = "num_ctx"
         }
     }
 

@@ -69,13 +69,16 @@ struct OllamaNotesEngine: Sendable {
 
     private func completeValidated(user: String) async throws -> CallNotes {
         let system = "Return only valid call-notes JSON. Do not wrap it in markdown."
+        let numCtx = NotesContextBudget.contextWindow(for: user)
+        let schema = NotesSchemaValidator.formatSchemaJSON
         let first = try await client.chat(
             model: model.name,
             messages: [
                 OllamaChatMessage(role: "system", content: system),
                 OllamaChatMessage(role: "user", content: user),
             ],
-            numCtx: NotesContextBudget.numCtx
+            numCtx: numCtx,
+            jsonSchema: schema
         )
         do {
             return try validator.validate(first, kind: .deep)
@@ -94,7 +97,8 @@ struct OllamaNotesEngine: Sendable {
                         )
                     ),
                 ],
-                numCtx: NotesContextBudget.numCtx
+                numCtx: numCtx,
+                jsonSchema: schema
             )
             return try validator.validate(repaired, kind: .deep)
         }

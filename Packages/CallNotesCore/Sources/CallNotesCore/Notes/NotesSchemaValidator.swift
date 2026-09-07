@@ -10,6 +10,44 @@ public enum NotesSchemaKind: Sendable {
 
 /// Validates model output against the CallNotes JSON schema before persistence.
 public struct NotesSchemaValidator: Sendable {
+    /// Constrained-decoding schema sent as Ollama `format`. Metadata keys like
+    /// `$schema` are omitted because they confuse some local models.
+    public static let formatSchemaJSON = """
+        {
+          "type": "object",
+          "required": ["title", "summary", "decisions", "action_items", "follow_ups", "open_questions", "entities"],
+          "properties": {
+            "title": {"type": "string"},
+            "summary": {"type": "string"},
+            "decisions": {"type": "array", "items": {"type": "string"}},
+            "action_items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["text"],
+                "properties": {
+                  "owner": {"type": ["string", "null"]},
+                  "text": {"type": "string"},
+                  "due": {"type": ["string", "null"]}
+                }
+              }
+            },
+            "follow_ups": {"type": "array", "items": {"type": "string"}},
+            "open_questions": {"type": "array", "items": {"type": "string"}},
+            "entities": {
+              "type": "object",
+              "required": ["people", "companies", "amounts", "dates"],
+              "properties": {
+                "people": {"type": "array", "items": {"type": "string"}},
+                "companies": {"type": "array", "items": {"type": "string"}},
+                "amounts": {"type": "array", "items": {"type": "string"}},
+                "dates": {"type": "array", "items": {"type": "string"}}
+              }
+            }
+          }
+        }
+        """
+
     public init() {}
 
     public func validate(_ raw: String, kind: NotesSchemaKind) throws -> CallNotes {

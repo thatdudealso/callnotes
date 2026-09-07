@@ -41,6 +41,19 @@ import Testing
         }
     }
 
+    @Test func formatSchemaJSONIsConstrainedDecodingObject() throws {
+        let data = Data(NotesSchemaValidator.formatSchemaJSON.utf8)
+        let parsed = try JSONSerialization.jsonObject(with: data)
+        let object = try #require(parsed as? [String: Any])
+        #expect(object["type"] as? String == "object")
+        #expect(object["$schema"] == nil)
+        #expect(object["$id"] == nil)
+        let required = try #require(object["required"] as? [String])
+        #expect(required.contains("title"))
+        #expect(required.contains("action_items"))
+        #expect(required.contains("entities"))
+    }
+
     @Test func instantRequiresTitleAndSummary() throws {
         let notes = try validator.validate(
             """
