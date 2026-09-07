@@ -268,6 +268,41 @@ import Testing
         #expect(requests.dropLast().allSatisfy { $0.messages.last?.content.contains("This is chunk") == true })
     }
 
+    @Test func previousUserOnlyBoundaryUsesMapRequests() async throws {
+        let callID = UUID()
+        let dialogueBytes = NotesContextBudget.maxTranscriptTokens * 4
+        let transcript = Transcript(
+            callID: callID,
+            segments: [
+                Segment(
+                    callID: callID,
+                    seq: 0,
+                    startSec: 0,
+                    endSec: 1,
+                    channel: .near,
+                    clusterKey: "me",
+                    text: String(repeating: "x", count: dialogueBytes - "Me: ".utf8.count),
+                    provider: .appleSpeech
+                )
+            ],
+            speakerNames: ["me": "Me"]
+        )
+        #expect(NotesContextBudget.estimateTokens(transcript.dialogueText()) == NotesContextBudget.maxTranscriptTokens)
+        let mapper = NotesMapReduce.default
+        let windows = mapper.windows(from: transcript)
+        let client = ScriptedOllamaClient(
+            tags: [OllamaModelTag(name: PinnedNotesModel.glimmer.name, digest: PinnedNotesModel.glimmer.digest)],
+            replies: Array(repeating: Self.validJSON, count: windows.count + 1)
+        )
+        let engine = OllamaNotesEngine(
+            id: .glimmer, model: .glimmer, client: client, prompt: .load(), validator: NotesSchemaValidator(), mapReduce: mapper, healthProbe: nil
+        )
+        _ = try await engine.generate(transcript, style: .deep)
+        let requests = await client.requests()
+        #expect(requests.count == windows.count + 1)
+        #expect(requests.dropLast().allSatisfy { $0.messages.last?.content.contains("This is chunk") == true })
+    }
+
     @Test func openaiChatResponseDecodesContent() throws {
         let data = Data(
             """

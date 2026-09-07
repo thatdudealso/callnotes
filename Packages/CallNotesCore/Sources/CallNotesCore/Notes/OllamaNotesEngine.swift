@@ -34,12 +34,11 @@ struct OllamaNotesEngine: Sendable {
         guard !dialogue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw NotesGenerationError.emptyTranscript
         }
-        if mapReduce.needsChunking(dialogue) {
+        let user = prompt.render(dialogue: dialogue, counterparty: transcript.counterpartyName)
+        if mapReduce.needsChunking(dialogue) || !fitsInitialContext(user: user) {
             return try await generateMapped(transcript)
         }
-        return try await completeValidated(
-            user: prompt.render(dialogue: dialogue, counterparty: transcript.counterpartyName)
-        )
+        return try await completeValidated(user: user)
     }
 
     private func generateMapped(_ transcript: Transcript) async throws -> CallNotes {
@@ -89,7 +88,9 @@ struct OllamaNotesEngine: Sendable {
         for partial in partialJSON {
             let candidate = group + [partial]
             let candidatePrompt = prompt.reducePrompt(partialJSON: candidate, counterparty: counterparty)
-            if NotesContextBudget.estimateTokens(candidatePrompt) <= mapReduce.reducePromptTokenBudget {
+            if NotesContextBudget.estimateTokens(candidatePrompt) <= mapReduce.reducePromptTokenBudget,
+                fitsInitialContext(user: candidatePrompt)
+            {
                 group = candidate
                 continue
             }
@@ -98,7 +99,9 @@ struct OllamaNotesEngine: Sendable {
             }
             groups.append(group)
             let singlePrompt = prompt.reducePrompt(partialJSON: [partial], counterparty: counterparty)
-            guard NotesContextBudget.estimateTokens(singlePrompt) <= mapReduce.reducePromptTokenBudget else {
+            guard NotesContextBudget.estimateTokens(singlePrompt) <= mapReduce.reducePromptTokenBudget,
+                fitsInitialContext(user: singlePrompt)
+            else {
                 throw NotesGenerationError.schemaInvalid("partial notes exceed the reduction context budget")
             }
             group = [partial]
@@ -110,12 +113,11 @@ struct OllamaNotesEngine: Sendable {
     }
 
     private func completeValidated(user: String) async throws -> CallNotes {
-        let system = "Return only valid call-notes JSON. Do not wrap it in markdown."
         let schema = NotesSchemaValidator.formatSchemaJSON
-        let firstMessages = [
-            OllamaChatMessage(role: "system", content: system),
-            OllamaChatMessage(role: "user", content: user),
-        ]
+        let firstMessages = initialMessages(user: user)
+        guard fitsInitialContext(user: user) else {
+            throw NotesGenerationError.schemaInvalid("notes prompt exceeds the context budget")
+        }
         let first = try await client.chat(
             model: model.name,
             messages: firstMessages,
@@ -144,6 +146,18 @@ struct OllamaNotesEngine: Sendable {
 
     private func contextWindow(for messages: [OllamaChatMessage]) -> Int {
         NotesContextBudget.contextWindow(for: messages.map(\.content).joined(separator: "\n"))
+    }
+
+    private func initialMessages(user: String) -> [OllamaChatMessage] {
+        [
+            OllamaChatMessage(role: "system", content: "Return only valid call-notes JSON. Do not wrap it in markdown."),
+            OllamaChatMessage(role: "user", content: user),
+        ]
+    }
+
+    private func fitsInitialContext(user: String) -> Bool {
+        NotesContextBudget.estimateTokens(initialMessages(user: user).map(\.content).joined(separator: "\n"))
+            <= NotesContextBudget.maxTranscriptTokens
     }
 }
 
