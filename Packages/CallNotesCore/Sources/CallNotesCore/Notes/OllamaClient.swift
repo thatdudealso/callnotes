@@ -93,7 +93,7 @@ public struct OllamaClient: OllamaServing, OllamaTokenCounting {
     }
 
     public func tokenCount(model: String, messages: [OllamaChatMessage]) async throws -> Int {
-        let url = baseURL.appending(path: "/api/chat")
+        let url = baseURL.appending(path: "/api/tokenize")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -101,17 +101,11 @@ public struct OllamaClient: OllamaServing, OllamaTokenCounting {
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": model,
             "messages": messages.map { ["role": $0.role, "content": $0.content] },
-            "stream": false,
-            "think": false,
-            "keep_alive": keepAlive,
-            "options": ["num_ctx": NotesContextBudget.tokenCountContextWindow, "num_predict": 1, "temperature": 0],
+            "add_generation_prompt": true,
         ])
         let (data, response) = try await session.data(for: request)
         try Self.throwIfHTTPError(response, data: data)
-        guard let count = try JSONDecoder().decode(NativeChatResponse.self, from: data).promptEvalCount else {
-            throw NotesGenerationError.ollamaUnavailable("Ollama did not report prompt token count")
-        }
-        return count
+        return try Self.decodeTokenCount(data)
     }
 
     public func health(of model: PinnedNotesModel) async -> ProviderHealth {
@@ -162,6 +156,11 @@ public struct OllamaClient: OllamaServing, OllamaTokenCounting {
         throw NotesGenerationError.schemaInvalid("Ollama chat response had no content")
     }
 
+    static func decodeTokenCount(_ data: Data) throws -> Int {
+        let response = try JSONDecoder().decode(TokenizeResponse.self, from: data)
+        return response.tokens.count
+    }
+
     static func stripStopTokens(_ content: String) -> String {
         var text = content.trimmingCharacters(in: .whitespacesAndNewlines)
         for token in ["<|eot|>", "<|end_of_text|>", "<|im_end|>"] {
@@ -201,15 +200,13 @@ public struct OllamaClient: OllamaServing, OllamaTokenCounting {
 
     private struct NativeChatResponse: Decodable {
         var message: Message?
-        var promptEvalCount: Int?
-
-        enum CodingKeys: String, CodingKey {
-            case message
-            case promptEvalCount = "prompt_eval_count"
-        }
 
         struct Message: Decodable {
             var content: String
         }
+    }
+
+    private struct TokenizeResponse: Decodable {
+        var tokens: [Int]
     }
 }

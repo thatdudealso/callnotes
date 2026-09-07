@@ -37,7 +37,6 @@ public struct PinnedNotesModel: Sendable, Equatable {
 /// Context window used for deep notes (plan section 7.3).
 public enum NotesContextBudget: Sendable {
     public static let numCtx = 32_768
-    public static let tokenCountContextWindow = 131_072
     public static let promptReserveTokens = 4_096
     public static let maxTranscriptTokens = numCtx - promptReserveTokens
     public static let chunkTokens = 8_192

@@ -416,6 +416,30 @@ import Testing
         #expect(try OllamaClient.decodeChatContent(data) == "{\"title\":\"y\"}")
     }
 
+    @Test func nativeTokenizeResponseDecodesExactCount() throws {
+        let data = Data("{\"tokens\":[1,2,3,4]}".utf8)
+        #expect(try OllamaClient.decodeTokenCount(data) == 4)
+    }
+
+    @Test func tokenCountUsesNativeTokenizerRequest() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [TokenizeOnlyURLProtocol.self]
+        let client = OllamaClient(
+            baseURL: URL(string: "http://tokenizer.test")!,
+            session: URLSession(configuration: configuration)
+        )
+
+        let count = try await client.tokenCount(
+            model: PinnedNotesModel.glimmer.name,
+            messages: [
+                OllamaChatMessage(role: "system", content: "System instructions"),
+                OllamaChatMessage(role: "user", content: "Transcript content"),
+            ]
+        )
+
+        #expect(count == 4)
+    }
+
     @Test func nativeChatResponseStripsTrailingStopToken() throws {
         let data = Data(
             """
@@ -627,6 +651,65 @@ final class ScriptedNotesProvider: NotesProvider, @unchecked Sendable {
 
     func healthCheck() async -> ProviderHealth {
         health
+    }
+}
+
+private final class TokenizeOnlyURLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.host == "tokenizer.test"
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        let validRequest: Bool
+        if let body = Self.requestBody(request),
+            let payload = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+            let messages = payload["messages"] as? [[String: String]],
+            request.url?.path == "/api/tokenize",
+            payload["model"] as? String == PinnedNotesModel.glimmer.name,
+            payload["add_generation_prompt"] as? Bool == true,
+            messages == [
+                ["role": "system", "content": "System instructions"],
+                ["role": "user", "content": "Transcript content"],
+            ]
+        {
+            validRequest = true
+        } else {
+            validRequest = false
+        }
+
+        let status = validRequest ? 200 : 400
+        let body = Data(validRequest ? "{\"tokens\":[1,2,3,4]}".utf8 : "invalid tokenizer request".utf8)
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    private static func requestBody(_ request: URLRequest) -> Data? {
+        if let body = request.httpBody {
+            return body
+        }
+        guard let stream = request.httpBodyStream else {
+            return nil
+        }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 1_024)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            data.append(buffer, count: count)
+        }
+        return data
     }
 }
 
