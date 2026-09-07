@@ -40,6 +40,10 @@ final class AppModel {
             && !isProcessingSample
     }
 
+    var canStartLiveSession: Bool {
+        recordingState == .idle && liveSession == nil && !isProcessingSample
+    }
+
     init() {
         self.store = memoryStore
         statusMessage = "Checking dedicated CallNotes Postgres..."

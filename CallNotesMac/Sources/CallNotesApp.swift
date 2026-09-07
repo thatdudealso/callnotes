@@ -23,7 +23,6 @@ struct CallNotesApp: App {
                 recordingState: model.recordingState,
                 onStop: {
                     Task { await model.stopLiveSession() }
-                    stopCapture()
                 }
             )
             .padding(8)
@@ -32,10 +31,6 @@ struct CallNotesApp: App {
         .windowResizability(.contentSize)
     }
 
-    private func stopCapture() {
-        guard coordinator.recordingState == .recording || coordinator.recordingState == .processing else { return }
-        coordinator.toggleManual()
-    }
 }
 
 struct MenuBarContentView: View {
@@ -48,9 +43,7 @@ struct MenuBarContentView: View {
             Button(model.recordingState == .recording ? "Stop" : "Record Now") {
                 if model.recordingState == .recording {
                     Task { await model.stopLiveSession() }
-                    stopCaptureIfNeeded()
                 } else {
-                    coordinator.toggleManual()
                     Task {
                         do {
                             try await model.startLiveSession()
@@ -62,6 +55,7 @@ struct MenuBarContentView: View {
                 }
             }
             .keyboardShortcut("r", modifiers: [.command, .shift])
+            .disabled(model.recordingState != .recording && !model.canStartLiveSession)
             Button("Load sample call") {
                 openWindow(id: "main")
                 openWindow(id: "pill")
@@ -84,10 +78,5 @@ struct MenuBarContentView: View {
         .onAppear {
             coordinator.start()
         }
-    }
-
-    private func stopCaptureIfNeeded() {
-        guard coordinator.recordingState == .recording || coordinator.recordingState == .processing else { return }
-        coordinator.toggleManual()
     }
 }
