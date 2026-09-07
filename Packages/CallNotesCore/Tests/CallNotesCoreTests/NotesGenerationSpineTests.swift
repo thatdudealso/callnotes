@@ -141,6 +141,7 @@ import Testing
         let notes = try await provider.generate(FixtureTranscript.twoSpeaker(), style: .deep)
         #expect(notes.title == "Priya - meeting time and pilot")
         #expect(await provider.healthCheck() == .healthy)
+        #expect(!(await client.countedRequests()).isEmpty)
     }
 
     @Test func glimmerThrowsAfterFailedRepair() async throws {
@@ -441,18 +442,31 @@ import Testing
 }
 
 @Suite struct PinnedNotesModelTests {
-    @Test func matchesDocsModelsDigests() {
-        #expect(PinnedNotesModel.glimmer.name == "muse-glimmer:30b")
-        #expect(
-            PinnedNotesModel.glimmer.digest
-                == "sha256:de878ce33ad81d060001db1469a02eebe4d86f0ad58cfe52dc062fdcbe4464c1"
-        )
-        #expect(PinnedNotesModel.fallbackInstruct.name == "qwen3:30b-instruct")
-        #expect(
-            PinnedNotesModel.fallbackInstruct.digest
-                == "sha256:19e422b0231392335cfc49cfd172de7034bb1aeabb08aa307cce745c60b272fe"
-        )
+    @Test func bootstrapModelCatalogMatchesRuntimePins() throws {
+        let sourceFile = URL(fileURLWithPath: #filePath)
+        let root = (0..<5).reduce(sourceFile) { url, _ in url.deletingLastPathComponent() }
+        let document = try String(contentsOf: root.appending(path: "docs/models.md"), encoding: .utf8)
+        let catalog = Dictionary(uniqueKeysWithValues: document
+            .split(separator: "\n")
+            .compactMap { line -> (String, String)? in
+                let fields = line.split(separator: "|", omittingEmptySubsequences: false)
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                guard fields.count >= 4,
+                    fields[2].hasPrefix("`"), fields[3].hasPrefix("`sha256:")
+                else {
+                    return nil
+                }
+                return (
+                    String(fields[2].dropFirst().dropLast()),
+                    String(fields[3].dropFirst().dropLast())
+                )
+            })
+        #expect(catalog == Dictionary(uniqueKeysWithValues: PinnedNotesModel.all.map { ($0.name, $0.digest) }))
+    }
+
+    @Test func acceptsCompletePinnedDigests() {
         #expect(PinnedNotesModel.glimmer.matches(digest: PinnedNotesModel.glimmer.digest))
+        #expect(PinnedNotesModel.fallbackInstruct.matches(digest: PinnedNotesModel.fallbackInstruct.digest))
     }
 
     @Test func rejectsIncompleteModelDigests() {
@@ -554,7 +568,7 @@ final class ScriptedNotesProvider: NotesProvider, @unchecked Sendable {
     }
 }
 
-actor ScriptedOllamaClient: OllamaServing {
+actor ScriptedOllamaClient: OllamaServing, OllamaTokenCounting {
     struct Request: Sendable {
         var messages: [OllamaChatMessage]
         var numCtx: Int
@@ -563,6 +577,7 @@ actor ScriptedOllamaClient: OllamaServing {
     var tags: [OllamaModelTag]
     var replies: [String]
     var recordedRequests: [Request] = []
+    var tokenCountRequests: [[OllamaChatMessage]] = []
 
     init(tags: [OllamaModelTag], replies: [String]) {
         self.tags = tags
@@ -583,7 +598,17 @@ actor ScriptedOllamaClient: OllamaServing {
         tags
     }
 
+    func tokenCount(model: String, messages: [OllamaChatMessage]) async throws -> Int {
+        _ = model
+        tokenCountRequests.append(messages)
+        return NotesContextBudget.estimateTokens(messages.map(\.content).joined(separator: "\n"))
+    }
+
     func requests() -> [Request] {
         recordedRequests
+    }
+
+    func countedRequests() -> [[OllamaChatMessage]] {
+        tokenCountRequests
     }
 }

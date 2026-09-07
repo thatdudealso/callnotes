@@ -211,7 +211,7 @@ final class AppModel {
             live.dualInstanceMode = processed.dualInstanceMode
             selectedCallID = processed.call.id
             try await refresh()
-            await generateNotes(for: processed)
+            await generateDeepNotes(for: processed)
             let derText: String
             if let der = processed.der {
                 derText = String(format: "DER %.1f%% (target %.1f%%)", der.der * 100, DiarizationErrorRate.initialTarget * 100)
@@ -319,6 +319,7 @@ final class AppModel {
             referenceTurns: SampleCallFixture.referenceTurns,
             requiredFarSpeakerID: priyaProfileID
         )
+        await generateInstantNotes(for: processed)
         return processed
     }
 
@@ -349,7 +350,7 @@ final class AppModel {
         notesByCall[callID].map { NotesMarkdown.render($0.body) }
     }
 
-    private func generateNotes(for processed: ProcessedCall) async {
+    private func generateInstantNotes(for processed: ProcessedCall) async {
         guard let notesSpine else { return }
         let transcript = Transcript(
             callID: processed.call.id,
@@ -360,11 +361,19 @@ final class AppModel {
         do {
             let instant = try await notesSpine.generateInstant(transcript, call: processed.call)
             notesByCall[processed.call.id] = instant
-            try await refresh()
         } catch {
             statusMessage = error.localizedDescription
-            return
         }
+    }
+
+    private func generateDeepNotes(for processed: ProcessedCall) async {
+        guard let notesSpine else { return }
+        let transcript = Transcript(
+            callID: processed.call.id,
+            turns: processed.turns,
+            provider: processed.call.sttProvider,
+            counterpartyName: processed.call.counterpartyName
+        )
         let callID = processed.call.id
         notesGeneratingCallID = callID
         statusMessage = "Notes generating..."

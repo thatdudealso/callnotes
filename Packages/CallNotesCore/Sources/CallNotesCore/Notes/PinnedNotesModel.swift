@@ -48,6 +48,11 @@ public enum NotesContextBudget: Sendable {
 
     public static func contextWindow(for text: String) -> Int {
         let needed = estimateTokens(text) + promptReserveTokens
+        return contextWindow(forTokenCount: needed - promptReserveTokens)
+    }
+
+    public static func contextWindow(forTokenCount tokenCount: Int) -> Int {
+        let needed = tokenCount + promptReserveTokens
         if needed <= 8_192 { return 8_192 }
         if needed <= 16_384 { return 16_384 }
         return numCtx

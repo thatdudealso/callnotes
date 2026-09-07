@@ -28,11 +28,16 @@ public protocol OllamaServing: Sendable {
     func listModels() async throws -> [OllamaModelTag]
 }
 
+/// Exact prompt-token accounting provided by the loaded Ollama model.
+public protocol OllamaTokenCounting: Sendable {
+    func tokenCount(model: String, messages: [OllamaChatMessage]) async throws -> Int
+}
+
 /// Localhost Ollama client. Chat uses native `/api/chat` with a JSON schema
 /// as `format` so constrained decoding keeps notes schema-valid. Thinking is
 /// disabled because Glimmer's reasoning tokens miss the 60s notes budget.
 /// Health uses `/api/tags` so digests can be checked.
-public struct OllamaClient: OllamaServing {
+public struct OllamaClient: OllamaServing, OllamaTokenCounting {
     public var baseURL: URL
     public var session: URLSession
     public var keepAlive: String
@@ -85,6 +90,28 @@ public struct OllamaClient: OllamaServing {
         try Self.throwIfHTTPError(response, data: data)
         let decoded = try JSONDecoder().decode(TagsResponse.self, from: data)
         return decoded.models.map { OllamaModelTag(name: $0.name, digest: $0.digest) }
+    }
+
+    public func tokenCount(model: String, messages: [OllamaChatMessage]) async throws -> Int {
+        let url = baseURL.appending(path: "/api/chat")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 300
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": model,
+            "messages": messages.map { ["role": $0.role, "content": $0.content] },
+            "stream": false,
+            "think": false,
+            "keep_alive": keepAlive,
+            "options": ["num_ctx": NotesContextBudget.numCtx, "num_predict": 1, "temperature": 0],
+        ])
+        let (data, response) = try await session.data(for: request)
+        try Self.throwIfHTTPError(response, data: data)
+        guard let count = try JSONDecoder().decode(NativeChatResponse.self, from: data).promptEvalCount else {
+            throw NotesGenerationError.ollamaUnavailable("Ollama did not report prompt token count")
+        }
+        return count
     }
 
     public func health(of model: PinnedNotesModel) async -> ProviderHealth {
@@ -174,6 +201,13 @@ public struct OllamaClient: OllamaServing {
 
     private struct NativeChatResponse: Decodable {
         var message: Message?
+        var promptEvalCount: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case message
+            case promptEvalCount = "prompt_eval_count"
+        }
+
         struct Message: Decodable {
             var content: String
         }
