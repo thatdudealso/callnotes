@@ -93,6 +93,7 @@ public struct OllamaClient: OllamaServing, OllamaTokenCounting {
     }
 
     public func tokenCount(model: String, messages: [OllamaChatMessage]) async throws -> Int {
+        let prompt = try await renderedPrompt(model: model, messages: messages)
         let url = baseURL.appending(path: "/api/tokenize")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -100,12 +101,24 @@ public struct OllamaClient: OllamaServing, OllamaTokenCounting {
         request.timeoutInterval = 300
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": model,
-            "messages": messages.map { ["role": $0.role, "content": $0.content] },
-            "add_generation_prompt": true,
+            "content": prompt,
         ])
         let (data, response) = try await session.data(for: request)
         try Self.throwIfHTTPError(response, data: data)
         return try Self.decodeTokenCount(data)
+    }
+
+    private func renderedPrompt(model: String, messages: [OllamaChatMessage]) async throws -> String {
+        let url = baseURL.appending(path: "/api/show")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 2
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["model": model])
+        let (data, response) = try await session.data(for: request)
+        try Self.throwIfHTTPError(response, data: data)
+        let template = try JSONDecoder().decode(ShowResponse.self, from: data).template
+        return try Self.render(messages: messages, with: template)
     }
 
     public func health(of model: PinnedNotesModel) async -> ProviderHealth {
@@ -161,6 +174,23 @@ public struct OllamaClient: OllamaServing, OllamaTokenCounting {
         return response.tokens.count
     }
 
+    static func render(messages: [OllamaChatMessage], with template: String) throws -> String {
+        if template.trimmingCharacters(in: .whitespacesAndNewlines) == "{{ .Prompt }}" {
+            return messages.map(\.content).joined(separator: "\n")
+        }
+        guard template.contains("<|im_start|>") else {
+            throw NotesGenerationError.ollamaUnavailable("Unsupported Ollama chat template")
+        }
+        var prompt = ""
+        for message in messages {
+            guard ["system", "user", "assistant"].contains(message.role) else {
+                throw NotesGenerationError.ollamaUnavailable("Unsupported Ollama chat role \(message.role)")
+            }
+            prompt += "<|im_start|>\(message.role)\n\(message.content)<|im_end|>\n"
+        }
+        return prompt + "<|im_start|>assistant\n"
+    }
+
     static func stripStopTokens(_ content: String) -> String {
         var text = content.trimmingCharacters(in: .whitespacesAndNewlines)
         for token in ["<|eot|>", "<|end_of_text|>", "<|im_end|>"] {
@@ -208,5 +238,9 @@ public struct OllamaClient: OllamaServing, OllamaTokenCounting {
 
     private struct TokenizeResponse: Decodable {
         var tokens: [Int]
+    }
+
+    private struct ShowResponse: Decodable {
+        var template: String
     }
 }

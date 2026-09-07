@@ -440,6 +440,18 @@ import Testing
         #expect(count == 4)
     }
 
+    @Test func rendersChatTemplateBeforeTokenizing() throws {
+        let rendered = try OllamaClient.render(
+            messages: [
+                OllamaChatMessage(role: "system", content: "System instructions"),
+                OllamaChatMessage(role: "user", content: "Transcript content"),
+            ],
+            with: "{{ .Prompt }}"
+        )
+
+        #expect(rendered == "System instructions\nTranscript content")
+    }
+
     @Test func nativeChatResponseStripsTrailingStopToken() throws {
         let data = Data(
             """
@@ -665,16 +677,22 @@ private final class TokenizeOnlyURLProtocol: URLProtocol {
 
     override func startLoading() {
         let validRequest: Bool
+        if request.url?.path == "/api/show" {
+            let body = Data("{\"template\":\"{{ .Prompt }}\"}".utf8)
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: body)
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
         if let body = Self.requestBody(request),
             let payload = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-            let messages = payload["messages"] as? [[String: String]],
             request.url?.path == "/api/tokenize",
             payload["model"] as? String == PinnedNotesModel.glimmer.name,
-            payload["add_generation_prompt"] as? Bool == true,
-            messages == [
-                ["role": "system", "content": "System instructions"],
-                ["role": "user", "content": "Transcript content"],
-            ]
+            payload["content"] as? String == "System instructions\nTranscript content",
+            payload["messages"] == nil
         {
             validRequest = true
         } else {
