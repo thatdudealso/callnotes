@@ -51,14 +51,13 @@ public struct StoreConfiguration: Sendable {
     /// used, so a machine's unrelated Postgres is never probed or migrated.
     public static func localCandidates(
         username: String = "callnotes",
-        database: String = "callnotes"
+        database: String = "callnotes",
+        homebrewPrefixes: [String]? = nil
     ) -> [StoreConfiguration] {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let sockets = [
-            "/opt/homebrew/var/callnotes-postgresql@18/socket/.s.PGSQL.5433",
-            "/usr/local/var/callnotes-postgresql@18/socket/.s.PGSQL.5433",
-            "\(home)/Library/Application Support/CallNotes/postgresql@18/socket/.s.PGSQL.5433",
-        ]
+        let prefixes = homebrewPrefixes ?? resolvedHomebrewPrefixes()
+        let sockets = prefixes.map {
+            "\($0)/var/callnotes-postgresql@18/socket/.s.PGSQL.5433"
+        }
         var configs: [StoreConfiguration] = []
         for path in sockets where FileManager.default.fileExists(atPath: path) {
             configs.append(
@@ -70,5 +69,43 @@ public struct StoreConfiguration: Sendable {
             )
         }
         return configs
+    }
+
+    private static func resolvedHomebrewPrefixes() -> [String] {
+        var prefixes = ["/opt/homebrew", "/usr/local"]
+        if let environmentPrefix = ProcessInfo.processInfo.environment["HOMEBREW_PREFIX"],
+            !environmentPrefix.isEmpty
+        {
+            prefixes.append(environmentPrefix)
+        }
+        if let installedPrefix = installedHomebrewPrefix() {
+            prefixes.append(installedPrefix)
+        }
+        return Array(Set(prefixes)).sorted()
+    }
+
+    private static func installedHomebrewPrefix() -> String? {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["brew", "--prefix"]
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+        guard process.terminationStatus == 0,
+            let prefix = String(
+                data: output.fileHandleForReading.readDataToEndOfFile(),
+                encoding: .utf8
+            )?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !prefix.isEmpty
+        else {
+            return nil
+        }
+        return prefix
     }
 }

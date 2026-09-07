@@ -232,6 +232,57 @@ import Testing
         #expect(persisted?.errorStage == "transcription")
         #expect(persisted?.error?.isEmpty == false)
     }
+
+    @Test func spineUsesDecodedCAFSampleRate() async throws {
+        let store = MemoryStore()
+        try await store.migrate()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-sample-rate-\(UUID().uuidString).caf")
+        try ChannelAudio.writeStereoCAF(
+            near: Data(count: 8_820),
+            far: Data(count: 8_820),
+            sampleRate: 44_100,
+            to: url
+        )
+        let speech = ConfigCapturingTranscriber()
+        let call = Call(
+            source: .fileImport,
+            startedAt: Date(),
+            audioPath: url.path,
+            sttProvider: .appleSpeech
+        )
+        let spine = LocalTranscriptionSpine(
+            speech: speech,
+            diarizer: ScriptedDiarizer(clusters: []),
+            store: store
+        )
+
+        let processed = try await spine.process(cafURL: url, call: call, profiles: [])
+
+        #expect(await speech.sampleRates() == [44_100, 44_100])
+        #expect(processed.call.sampleRate == 44_100)
+        #expect(try await store.fetchCall(id: call.id)?.sampleRate == 44_100)
+    }
+}
+
+private actor ConfigCapturingTranscriber: PCMTranscriber {
+    nonisolated let id: STTProviderID = .appleSpeech
+    nonisolated let dualInstanceMode: DualInstanceMode = .concurrentLive
+    private var capturedSampleRates: [Int] = []
+
+    func transcribePCM(
+        _ pcm16: Data,
+        channel: SegmentChannel,
+        config: STTSessionConfig
+    ) -> [RawSegment] {
+        _ = pcm16
+        capturedSampleRates.append(config.sampleRate)
+        return [RawSegment(start: 0, end: 1, text: "hello", channel: channel)]
+    }
+
+    func sampleRates() -> [Int] {
+        capturedSampleRates
+    }
 }
 
 private struct FailingDiarizer: DiarizationService {
@@ -253,6 +304,24 @@ private struct FailingDiarizer: DiarizationService {
         let unix = StoreConfiguration(unixSocketPath: "/tmp").clientConfiguration(password: "")
         #expect(unix.unixSocketPath == "/tmp")
         #expect(unix.password == nil)
+    }
+
+    @Test func discoversDedicatedSocketUnderConfiguredHomebrewPrefix() throws {
+        let prefix = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-homebrew-\(UUID().uuidString)")
+        let socket = prefix
+            .appendingPathComponent("var/callnotes-postgresql@18/socket/.s.PGSQL.5433")
+        try FileManager.default.createDirectory(
+            at: socket.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: prefix) }
+        #expect(FileManager.default.createFile(atPath: socket.path, contents: Data()))
+
+        let candidates = StoreConfiguration.localCandidates(homebrewPrefixes: [prefix.path])
+
+        #expect(candidates.map(\.unixSocketPath) == [socket.path])
+        #expect(candidates.allSatisfy { $0.username == "callnotes" && $0.database == "callnotes" })
     }
 
     @Test func livePostgresMigratesWhenReachable() async throws {

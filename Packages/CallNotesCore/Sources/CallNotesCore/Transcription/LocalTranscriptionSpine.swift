@@ -113,8 +113,9 @@ public struct LocalTranscriptionSpine: Sendable {
 
         var stage = "audio_split"
         do {
-            let config = STTSessionConfig(sampleRate: working.sampleRate)
             let split = try ChannelAudio.splitStereoCAF(url: cafURL)
+            working.sampleRate = Int(split.sampleRate.rounded())
+            let config = STTSessionConfig(sampleRate: working.sampleRate)
             let near: [RawSegment]
             let far: [RawSegment]
             stage = "transcription"
