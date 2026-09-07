@@ -125,18 +125,13 @@ struct OllamaNotesEngine: Sendable {
         do {
             return try validator.validate(first, kind: .deep)
         } catch {
+            let repairPrompt = prompt.repairPrompt(invalidJSON: first, error: error.localizedDescription)
             let repairMessages = [
-                OllamaChatMessage(role: "system", content: system),
-                OllamaChatMessage(role: "user", content: user),
-                OllamaChatMessage(role: "assistant", content: first),
-                OllamaChatMessage(
-                    role: "user",
-                    content: prompt.repairPrompt(
-                        invalidJSON: first,
-                        error: error.localizedDescription
-                    )
-                ),
+                OllamaChatMessage(role: "user", content: repairPrompt),
             ]
+            guard NotesContextBudget.estimateTokens(repairPrompt) <= NotesContextBudget.maxTranscriptTokens else {
+                throw NotesGenerationError.schemaInvalid("invalid JSON exceeds the repair context budget")
+            }
             let repaired = try await client.chat(
                 model: model.name,
                 messages: repairMessages,

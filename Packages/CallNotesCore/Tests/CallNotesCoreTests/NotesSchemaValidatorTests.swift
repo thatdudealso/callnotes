@@ -153,6 +153,31 @@ import Testing
         #expect(windows.count >= 2)
         #expect(windows.allSatisfy { $0.contains("Me:") || $0.contains("Priya:") })
     }
+
+    @Test func oversizedSegmentSplitsIntoBoundedLabeledWindows() {
+        let callID = UUID()
+        let transcript = Transcript(
+            callID: callID,
+            segments: [
+                Segment(
+                    callID: callID,
+                    seq: 0,
+                    startSec: 0,
+                    endSec: 1,
+                    channel: .near,
+                    clusterKey: "me",
+                    text: String(repeating: "word ", count: 500),
+                    provider: .appleSpeech
+                )
+            ],
+            speakerNames: ["me": "Me"]
+        )
+        let mapper = NotesMapReduce(transcriptTokenBudget: 50, chunkTokenBudget: 80)
+        let windows = mapper.windows(from: transcript)
+        #expect(windows.count > 1)
+        #expect(windows.allSatisfy { NotesContextBudget.estimateTokens($0) <= mapper.chunkTokenBudget })
+        #expect(windows.allSatisfy { $0.hasPrefix("Me: ") })
+    }
 }
 
 @Suite struct InstantNotesHeuristicTests {

@@ -24,7 +24,7 @@ public struct NotesMapReduce: Sendable {
 
     /// Groups consecutive segments so each window stays under `chunkTokenBudget`.
     public func windows(from transcript: Transcript) -> [String] {
-        let lines = transcript.labeledLines()
+        let lines = transcript.labeledLines().flatMap(splitOversizedLine)
         guard !lines.isEmpty else { return [] }
 
         var windows: [String] = []
@@ -45,5 +45,44 @@ public struct NotesMapReduce: Sendable {
             windows.append(current.joined(separator: "\n"))
         }
         return windows
+    }
+
+    private func splitOversizedLine(_ line: String) -> [String] {
+        guard NotesContextBudget.estimateTokens(line) > chunkTokenBudget, chunkTokenBudget > 0 else {
+            return [line]
+        }
+        guard let separator = line.range(of: ": ") else {
+            return split(line, prefix: "")
+        }
+        let prefix = String(line[..<separator.upperBound])
+        guard NotesContextBudget.estimateTokens(prefix) <= chunkTokenBudget else {
+            return split(line, prefix: "")
+        }
+        return split(String(line[separator.upperBound...]), prefix: prefix)
+    }
+
+    private func split(_ text: String, prefix: String) -> [String] {
+        let prefixBytes = prefix.utf8.count
+        var chunks: [String] = []
+        var chunk = prefix
+        var chunkBytes = 0
+        var hasContent = false
+        for character in text {
+            let characterBytes = String(character).utf8.count
+            let candidateTokens = max((prefixBytes + chunkBytes + characterBytes) / 4, 1)
+            if hasContent, candidateTokens > chunkTokenBudget {
+                chunks.append(chunk)
+                chunk = prefix
+                chunkBytes = 0
+                hasContent = false
+            }
+            chunk.append(character)
+            chunkBytes += characterBytes
+            hasContent = true
+        }
+        if hasContent {
+            chunks.append(chunk)
+        }
+        return chunks
     }
 }

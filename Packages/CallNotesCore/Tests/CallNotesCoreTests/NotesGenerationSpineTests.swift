@@ -228,8 +228,44 @@ import Testing
         _ = try await provider.generate(FixtureTranscript.twoSpeaker(), style: .deep)
         let requests = await client.requests()
         #expect(requests.count == 2)
+        #expect(requests[1].messages.count == 1)
+        #expect(requests[1].messages[0].role == "user")
+        #expect(requests[1].messages[0].content.contains(invalid))
         #expect(requests[1].numCtx == NotesContextBudget.contextWindow(for: requests[1].messages.map(\.content).joined(separator: "\n")))
-        #expect(requests[1].numCtx > requests[0].numCtx)
+        #expect(requests[1].numCtx <= NotesContextBudget.numCtx)
+    }
+
+    @Test func oversizedSegmentUsesMultipleMapRequests() async throws {
+        let callID = UUID()
+        let transcript = Transcript(
+            callID: callID,
+            segments: [
+                Segment(
+                    callID: callID,
+                    seq: 0,
+                    startSec: 0,
+                    endSec: 1,
+                    channel: .near,
+                    clusterKey: "me",
+                    text: String(repeating: "word ", count: 500),
+                    provider: .appleSpeech
+                )
+            ],
+            speakerNames: ["me": "Me"]
+        )
+        let mapper = NotesMapReduce(transcriptTokenBudget: 50, chunkTokenBudget: 80)
+        let windows = mapper.windows(from: transcript)
+        let client = ScriptedOllamaClient(
+            tags: [OllamaModelTag(name: PinnedNotesModel.glimmer.name, digest: PinnedNotesModel.glimmer.digest)],
+            replies: Array(repeating: Self.validJSON, count: windows.count + 1)
+        )
+        let engine = OllamaNotesEngine(
+            id: .glimmer, model: .glimmer, client: client, prompt: .load(), validator: NotesSchemaValidator(), mapReduce: mapper, healthProbe: nil
+        )
+        _ = try await engine.generate(transcript, style: .deep)
+        let requests = await client.requests()
+        #expect(requests.count == windows.count + 1)
+        #expect(requests.dropLast().allSatisfy { $0.messages.last?.content.contains("This is chunk") == true })
     }
 
     @Test func openaiChatResponseDecodesContent() throws {
