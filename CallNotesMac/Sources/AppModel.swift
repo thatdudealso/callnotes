@@ -25,6 +25,8 @@ final class AppModel {
     private let memoryStore = MemoryStore()
     private var liveSession: (any STTSession)?
     private var liveResultsTask: Task<Void, Never>?
+    private var liveSegments: [RawSegment] = []
+    private var instantCallAtHangUp: Call?
     private var isStartingLiveSession = false
     private var isProcessingSample = false
 
@@ -143,6 +145,16 @@ final class AppModel {
 
         do {
             let fixture = try SampleCallFixture.materialize()
+            let call = Call(
+                source: .fileImport,
+                startedAt: Date(),
+                counterpartyName: "Priya",
+                audioPath: fixture.cafURL.path,
+                sttProvider: .appleSpeech,
+                status: .transcribing
+            )
+            try await store.upsertCall(call)
+            instantCallAtHangUp = call
             try await startLiveSession(forSamplePlayback: true)
             try await playFixture(cafURL: fixture.cafURL)
             let diarizer = FluidDiarizer()
@@ -181,15 +193,6 @@ final class AppModel {
                 try await store.upsertSpeakerProfile(priya)
                 profiles.append(priya)
             }
-
-            let call = Call(
-                source: .fileImport,
-                startedAt: Date(),
-                counterpartyName: "Priya",
-                audioPath: fixture.cafURL.path,
-                sttProvider: .appleSpeech,
-                status: .transcribing
-            )
 
             let processed = try await processWithLocalEngine(
                 cafURL: fixture.cafURL,
@@ -236,6 +239,7 @@ final class AppModel {
         do {
             let session = try await speech.startSession(config: STTSessionConfig())
             liveSession = session
+            liveSegments = []
             recordingState = .recording
             liveResultsTask = Task { [weak self] in
                 do {
@@ -245,6 +249,7 @@ final class AppModel {
                         live.currentSpeakerName = segment.channel == .far ? "Speaker 2" : "Me"
                         live.lastLine = segment.text
                         live.isProvisionalSpeaker = segment.channel == .far || segment.isVolatile
+                        liveSegments.append(segment)
                     }
                 } catch {
                     guard let self, !Task.isCancelled else { return }
@@ -270,10 +275,15 @@ final class AppModel {
         }
         do {
             try await liveSession?.finish()
+            await liveResultsTask?.value
         } catch {
+            liveResultsTask?.cancel()
             statusMessage = error.localizedDescription
         }
-        liveResultsTask?.cancel()
+        if let call = instantCallAtHangUp {
+            instantCallAtHangUp = nil
+            await generateInstantNotes(for: call, rawSegments: liveSegments)
+        }
     }
 
     func stopLiveSession() async {
@@ -319,7 +329,6 @@ final class AppModel {
             referenceTurns: SampleCallFixture.referenceTurns,
             requiredFarSpeakerID: priyaProfileID
         )
-        await generateInstantNotes(for: processed)
         return processed
     }
 
@@ -350,17 +359,30 @@ final class AppModel {
         notesByCall[callID].map { NotesMarkdown.render($0.body) }
     }
 
-    private func generateInstantNotes(for processed: ProcessedCall) async {
+    private func generateInstantNotes(for call: Call, rawSegments: [RawSegment]) async {
         guard let notesSpine else { return }
         let transcript = Transcript(
-            callID: processed.call.id,
-            turns: processed.turns,
-            provider: processed.call.sttProvider,
-            counterpartyName: processed.call.counterpartyName
+            callID: call.id,
+            segments: rawSegments.enumerated().map { index, segment in
+                Segment(
+                    callID: call.id,
+                    seq: index,
+                    startSec: segment.start,
+                    endSec: segment.end,
+                    channel: segment.channel ?? .near,
+                    clusterKey: segment.channel == .far ? "far" : "near",
+                    text: segment.text,
+                    provider: call.sttProvider
+                )
+            },
+            speakerNames: ["near": "Me", "far": call.counterpartyName ?? "Speaker 2"],
+            counterpartyName: call.counterpartyName
         )
         do {
-            let instant = try await notesSpine.generateInstant(transcript, call: processed.call)
-            notesByCall[processed.call.id] = instant
+            let instant = try await notesSpine.generateInstant(transcript, call: call)
+            notesByCall[call.id] = instant
+            selectedCallID = call.id
+            try await refresh()
         } catch {
             statusMessage = error.localizedDescription
         }
