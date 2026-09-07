@@ -48,8 +48,18 @@ import Testing
         let url = directory.appendingPathComponent("two-speaker.caf")
         let rttm = directory.appendingPathComponent("two-speaker.rttm")
         let reference = DiarizationErrorRate.parseRTTM(try String(contentsOf: rttm, encoding: .utf8))
+            .filter { $0.speaker == "far" }
+        let split = try ChannelAudio.splitStereoCAF(url: url)
+        let farURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("diarization-harness-\(UUID().uuidString).caf")
+        defer { try? FileManager.default.removeItem(at: farURL) }
+        try ChannelAudio.writeMonoCAF(
+            pcm16: split.far,
+            sampleRate: split.sampleRate,
+            to: farURL
+        )
         let diarizer = FluidDiarizer()
-        let clusters = try await diarizer.diarize(fileURL: url)
+        let clusters = try await diarizer.diarize(fileURL: farURL)
         let result = DiarizationErrorRate.compute(
             reference: reference,
             hypothesis: DiarizationErrorRate.turns(from: clusters)
