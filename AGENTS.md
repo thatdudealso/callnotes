@@ -6,6 +6,13 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - `project.yml` is the XcodeGen source of truth. Use the build commands in `README.md`; generated `CallNotes.xcodeproj` is ignored.
 - `Scripts/bootstrap.sh` owns local service provisioning and immutable Ollama model references. Use `Scripts/bootstrap.sh --check` before making machine-level changes.
 
+## Mac capture (Phase 1)
+
+- Shared audio math lives in `Packages/CallNotesCore/Sources/CallNotesCore/Audio`. Mac hardware (process tap, mic, detector, coordinator) lives in `CallNotesMac/Sources/Capture`.
+- FaceTime/Phone bundle IDs are observed from display names (`CallAppNameMatcher`) and stored in UserDefaults (`CallAppIdentityStore`); never hardcode them.
+- Process tap: `kAudioAggregateDeviceTapAutoStartKey` must be `false` or `AudioDeviceStart` waits forever until the tapped process produces audio. Pass a non-nil queue to `AudioDeviceCreateIOProcIDWithBlock` (nil silently fails on macOS 26).
+- TCC: Microphone plus Screen & System Audio Recording → System Audio Recording Only. The CLI harness (`Scripts/run-capture-harness.sh`) must not call `AVCaptureDevice.requestAccess` (no GUI dialog; hangs a headless process).
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

@@ -6,9 +6,10 @@ private processing and storage hub.
 
 ## Status
 
-CallNotes is in early development. Phase 0 establishes the repository,
-platform targets, local service bootstrap, and shared domain package. Recording,
-transcription, speaker identity, notes, and phone sync are planned in later
+CallNotes is in early development. Phase 1 adds Mac call detection and local,
+two-channel capture: use the menu-bar **Record Now** control to start or stop
+recording manually, or let the app detect an active FaceTime or Phone call.
+Transcription, speaker identity, notes, and phone sync are planned in later
 phases and are not yet product features.
 
 Some docs and code comments cite "plan section" numbers. These refer to the
@@ -24,6 +25,14 @@ designed to support Apple SpeechAnalyzer and FluidAudio locally, Postgres for
 the Mac-side store, Hummingbird for a local API, and Ollama for deep notes. The
 iPhone app and Share Extension are intentionally minimal Phase 0 shells that
 will later upload recordings to the paired Mac.
+
+## Capture harness
+
+To verify capture hardware with a synthetic far-end signal, run
+`Scripts/run-capture-harness.sh`. It requires Microphone access and, for system
+audio, System Settings → Privacy & Security → Screen & System Audio Recording
+→ System Audio Recording Only. See [Tests/README.md](Tests/README.md) for the
+harness contract and its output.
 
 ## Build
 
