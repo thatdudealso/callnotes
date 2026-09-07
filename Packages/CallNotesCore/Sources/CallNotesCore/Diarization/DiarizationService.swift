@@ -20,9 +20,8 @@ public struct DiarizedCluster: Sendable, Equatable {
     }
 }
 
-/// Batch diarization of the far channel; the FluidAudio-backed implementation
-/// arrives in Phase 2. The batch pass is the source of truth for identity;
-/// streaming (LS-EEND / Sortformer) labels are provisional.
+/// Batch diarization of the far channel. The batch pass is the source of truth
+/// for identity; streaming (LS-EEND / Sortformer) labels are provisional.
 public protocol DiarizationService: Sendable {
     var providerID: String { get }
     func diarize(fileURL: URL) async throws -> [DiarizedCluster]

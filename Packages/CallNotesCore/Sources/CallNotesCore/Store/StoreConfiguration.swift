@@ -1,9 +1,8 @@
 import Foundation
 import PostgresNIO
 
-/// Connection settings for the local Postgres instance the Mac app owns.
-/// The PostgresNIO-backed store implementation arrives in Phase 2; declaring
-/// the configuration here keeps the dependency surface in one place.
+/// Connection settings for a Postgres store. Automatic local discovery uses
+/// `localCandidates()` so only the dedicated CallNotes instance is probed.
 public struct StoreConfiguration: Sendable {
     public var host: String
     public var port: Int
