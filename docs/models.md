@@ -1,9 +1,8 @@
 # Pinned local models
 
-This file is the source of truth for the pinned notes-model references. The
-notes phase will pull the named model tags and verify each local manifest
-digest against the expected value; Phase 2's `Scripts/bootstrap.sh` does not
-download any Ollama models.
+This file is the source of truth for the pinned notes-model references.
+`Scripts/bootstrap.sh` pulls each named model tag and verifies the local
+manifest digest against the expected value.
 
 | Purpose | Model reference | Manifest digest | Why it is present |
 | --- | --- | --- | --- |

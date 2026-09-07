@@ -16,8 +16,11 @@ final class AppModel {
     var lastDER: DiarizationErrorRate.Result?
     var lastDERCallID: UUID?
     var statusMessage: String?
+    var notesByCall: [UUID: NotesRecord] = [:]
+    var notesGeneratingCallID: UUID?
 
     private var store: any CallStore
+    private var notesSpine: NotesGenerationSpine?
     private var speech = AppleSpeechProvider()
     private let memoryStore = MemoryStore()
     private var liveSession: (any STTSession)?
@@ -32,6 +35,15 @@ final class AppModel {
     var selectedTurns: [AttributedTurn] {
         guard let selectedCallID else { return [] }
         return turnsByCall[selectedCallID] ?? []
+    }
+
+    var selectedNotes: NotesRecord? {
+        guard let selectedCallID else { return nil }
+        return notesByCall[selectedCallID]
+    }
+
+    var isGeneratingNotes: Bool {
+        selectedCallID != nil && selectedCallID == notesGeneratingCallID
     }
 
     var canProcessSampleCall: Bool {
@@ -77,6 +89,7 @@ final class AppModel {
         store = postgres
         storeBackendName = "postgres"
         isStoreInitialized = true
+        notesSpine = NotesGenerationSpine(client: OllamaClient(), store: postgres)
         statusMessage = nil
         do {
             try await refresh()
@@ -90,6 +103,11 @@ final class AppModel {
         if selectedCallID == nil {
             selectedCallID = calls.first?.id
         }
+        for call in calls {
+            if let notes = try await store.fetchPreferredNotes(callID: call.id) {
+                notesByCall[call.id] = notes
+            }
+        }
         if let selectedCallID {
             turnsByCall[selectedCallID] = try await loadTurns(callID: selectedCallID)
         }
@@ -99,6 +117,7 @@ final class AppModel {
         selectedCallID = call.id
         do {
             turnsByCall[call.id] = try await loadTurns(callID: call.id)
+            notesByCall[call.id] = try await store.fetchPreferredNotes(callID: call.id)
         } catch {
             statusMessage = error.localizedDescription
         }
@@ -192,6 +211,7 @@ final class AppModel {
             live.dualInstanceMode = processed.dualInstanceMode
             selectedCallID = processed.call.id
             try await refresh()
+            await generateNotes(for: processed)
             let derText: String
             if let der = processed.der {
                 derText = String(format: "DER %.1f%% (target %.1f%%)", der.der * 100, DiarizationErrorRate.initialTarget * 100)
@@ -300,6 +320,67 @@ final class AppModel {
             requiredFarSpeakerID: priyaProfileID
         )
         return processed
+    }
+
+    func regenerateNotes() async {
+        guard let call = selectedCall, let notesSpine else { return }
+        let transcript = Transcript(
+            callID: call.id,
+            turns: selectedTurns,
+            provider: call.sttProvider,
+            counterpartyName: call.counterpartyName
+        )
+        notesGeneratingCallID = call.id
+        statusMessage = "Notes generating..."
+        defer {
+            if notesGeneratingCallID == call.id { notesGeneratingCallID = nil }
+        }
+        do {
+            let record = try await notesSpine.regenerate(transcript, call: call)
+            notesByCall[call.id] = record
+            try await refresh()
+            statusMessage = "Notes regenerated (\(record.provider.rawValue))."
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    func notesMarkdown(for callID: UUID) -> String? {
+        notesByCall[callID].map { NotesMarkdown.render($0.body) }
+    }
+
+    private func generateNotes(for processed: ProcessedCall) async {
+        guard let notesSpine else { return }
+        let transcript = Transcript(
+            callID: processed.call.id,
+            turns: processed.turns,
+            provider: processed.call.sttProvider,
+            counterpartyName: processed.call.counterpartyName
+        )
+        do {
+            let instant = try await notesSpine.generateInstant(transcript, call: processed.call)
+            notesByCall[processed.call.id] = instant
+            try await refresh()
+        } catch {
+            statusMessage = error.localizedDescription
+            return
+        }
+        let callID = processed.call.id
+        notesGeneratingCallID = callID
+        statusMessage = "Notes generating..."
+        Task { [notesSpine] in
+            defer {
+                if notesGeneratingCallID == callID { notesGeneratingCallID = nil }
+            }
+            do {
+                let deep = try await notesSpine.generateDeep(transcript, call: processed.call)
+                notesByCall[callID] = deep
+                try await refresh()
+                statusMessage = "Notes ready (\(deep.provider.rawValue))."
+            } catch {
+                statusMessage = error.localizedDescription
+            }
+        }
     }
 
     private func loadTurns(callID: UUID) async throws -> [AttributedTurn] {

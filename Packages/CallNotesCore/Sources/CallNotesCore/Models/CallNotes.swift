@@ -66,4 +66,15 @@ public struct CallNotes: Codable, Sendable, Equatable {
         case openQuestions = "open_questions"
         case entities
     }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        title = try container.decode(String.self, forKey: .title)
+        summary = try container.decode(String.self, forKey: .summary)
+        decisions = try container.decodeIfPresent([String].self, forKey: .decisions) ?? []
+        actionItems = try container.decodeIfPresent([ActionItem].self, forKey: .actionItems) ?? []
+        followUps = try container.decodeIfPresent([String].self, forKey: .followUps) ?? []
+        openQuestions = try container.decodeIfPresent([String].self, forKey: .openQuestions) ?? []
+        entities = try container.decodeIfPresent(Entities.self, forKey: .entities) ?? Entities()
+    }
 }

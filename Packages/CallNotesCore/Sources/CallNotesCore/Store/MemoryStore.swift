@@ -7,6 +7,7 @@ public actor MemoryStore: CallStore {
     private var profiles: [UUID: SpeakerProfile] = [:]
     private var callSpeakers: [UUID: [CallSpeaker]] = [:]
     private var samples: [SpeakerSample] = []
+    private var notes: [UUID: [NotesRecord]] = [:]
 
     public init() {}
 
@@ -75,6 +76,20 @@ public actor MemoryStore: CallStore {
                 positive: positive
             )
         )
+    }
+
+    public func upsertNotes(_ record: NotesRecord) async throws {
+        var rows = notes[record.callID] ?? []
+        if let index = rows.firstIndex(where: { $0.id == record.id }) {
+            rows[index] = record
+        } else {
+            rows.append(record)
+        }
+        notes[record.callID] = rows
+    }
+
+    public func fetchNotes(callID: UUID) async throws -> [NotesRecord] {
+        (notes[callID] ?? []).sorted { $0.createdAt > $1.createdAt }
     }
 }
 

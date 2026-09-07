@@ -294,6 +294,64 @@ public actor PostgresStore: CallStore {
         )
     }
 
+    public func upsertNotes(_ record: NotesRecord) async throws {
+        let provider = record.provider.rawValue
+        let body = String(data: try JSONEncoder().encode(record.body), encoding: .utf8)
+        try await client.query(
+            """
+            INSERT INTO notes (id, call_id, provider, model_digest, prompt_version, body, edited_by_user, created_at)
+            VALUES (
+              \(record.id), \(record.callID), \(provider), \(record.modelDigest), \(record.promptVersion),
+              CAST(\(body) AS jsonb), \(record.editedByUser), \(record.createdAt)
+            )
+            ON CONFLICT (id) DO UPDATE SET
+              provider = EXCLUDED.provider,
+              model_digest = EXCLUDED.model_digest,
+              prompt_version = EXCLUDED.prompt_version,
+              body = EXCLUDED.body,
+              edited_by_user = EXCLUDED.edited_by_user
+            """,
+            logger: logger
+        )
+    }
+
+    public func fetchNotes(callID: UUID) async throws -> [NotesRecord] {
+        let rows = try await client.query(
+            """
+            SELECT id, call_id, provider, model_digest, prompt_version, body::text, edited_by_user, created_at
+            FROM notes WHERE call_id = \(callID)
+            ORDER BY created_at DESC
+            """,
+            logger: logger
+        )
+        var records: [NotesRecord] = []
+        for try await (
+            id,
+            callID,
+            provider,
+            digest,
+            promptVersion,
+            bodyJSON,
+            edited,
+            createdAt
+        ) in rows.decode((UUID, UUID, String, String?, String, String, Bool, Date).self) {
+            let body = try JSONDecoder().decode(CallNotes.self, from: Data(bodyJSON.utf8))
+            records.append(
+                NotesRecord(
+                    id: id,
+                    callID: callID,
+                    provider: NotesProviderID(rawValue: provider) ?? .glimmer,
+                    modelDigest: digest,
+                    promptVersion: promptVersion,
+                    body: body,
+                    editedByUser: edited,
+                    createdAt: createdAt
+                )
+            )
+        }
+        return records
+    }
+
     public static func makeIfAvailable() async -> PostgresStore? {
         let candidates = StoreConfiguration.localCandidates()
         var seen = Set<String>()
