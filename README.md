@@ -7,10 +7,11 @@ private processing and storage hub.
 ## Status
 
 CallNotes is in early development. Phase 1 adds Mac call detection and local,
-two-channel capture: use the menu-bar **Record Now** control to start or stop
-recording manually, or let the app detect an active FaceTime or Phone call.
-Transcription, speaker identity, notes, and phone sync are planned in later
-phases and are not yet product features.
+two-channel capture. Phase 2 provides a thin local proof path: a synthetic
+two-channel sample call is transcribed with Apple SpeechAnalyzer, diarized and
+speaker-labeled with FluidAudio, then stored in the dedicated local Postgres
+database for the Mac history and detail views. Notes and phone sync remain
+later-phase work.
 
 Some docs and code comments cite "plan section" numbers. These refer to the
 private implementation plan that maintainers keep locally at
@@ -19,12 +20,12 @@ and is never part of the public repository.
 
 ## Architecture
 
-The Mac app will capture and process calls locally, with shared Swift domain
-models and provider protocols in `Packages/CallNotesCore`. The core package is
-designed to support Apple SpeechAnalyzer and FluidAudio locally, Postgres for
-the Mac-side store, Hummingbird for a local API, and Ollama for deep notes. The
-iPhone app and Share Extension are intentionally minimal Phase 0 shells that
-will later upload recordings to the paired Mac.
+The Mac app processes the bundled sample call locally, with shared Swift domain
+models and provider protocols in `Packages/CallNotesCore`. The core package
+uses Apple SpeechAnalyzer and FluidAudio locally and Postgres for the Mac-side
+store; Hummingbird and Ollama support are planned for later phases. The iPhone
+app and Share Extension are intentionally minimal Phase 0 shells that will
+later upload recordings to the paired Mac.
 
 ## Capture harness
 
@@ -50,10 +51,11 @@ xcodebuild -project CallNotes.xcodeproj -scheme CallNotesMac \
 `project.yml` is the source of truth for the Xcode project. Run `xcodegen
 generate` whenever it changes; the generated project is deliberately ignored.
 
-For local Postgres, Ollama, Tailscale, and the pinned notes models, review then
-run `Scripts/bootstrap.sh`. Use `Scripts/bootstrap.sh --check` to see the
-operations without making changes. See [docs/models.md](docs/models.md) for the
-immutable model references.
+For the dedicated local Postgres instance, review then run
+`Scripts/bootstrap.sh`. Use `Scripts/bootstrap.sh --check` to see the
+operations without making changes. Ollama and the pinned notes models are not
+downloaded in this phase; see [docs/models.md](docs/models.md) for the
+immutable model references that the notes phase will install.
 
 ## License and attribution
 

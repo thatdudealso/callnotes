@@ -1,33 +1,67 @@
+import AppKit
 import CallNotesCore
 import SwiftUI
 
-/// Menu-bar CallNotes app. Phase 1 wires detection + two-channel capture;
-/// transcription and notes arrive in later phases.
 @main
 struct CallNotesApp: App {
     @State private var coordinator = CaptureCoordinator()
+    @State private var model = AppModel()
 
     var body: some Scene {
         MenuBarExtra("CallNotes", systemImage: coordinator.recordingState.systemImage) {
-            MenuBarContentView(coordinator: coordinator)
+            MenuBarContentView(coordinator: coordinator, model: model)
         }
 
         Window("CallNotes", id: "main") {
-            HistoryWindowView()
+            HistorySplitView(model: model)
+                .frame(minWidth: 720, minHeight: 420)
         }
+
+        Window("Live", id: "pill") {
+            LivePillView(
+                state: model.live,
+                recordingState: model.recordingState,
+                onStop: {
+                    Task { await model.stopLiveSession() }
+                }
+            )
+            .padding(8)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentSize)
     }
+
 }
 
 struct MenuBarContentView: View {
     @Bindable var coordinator: CaptureCoordinator
+    @Bindable var model: AppModel
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Group {
-            Button(coordinator.recordingState == .recording || coordinator.recordingState == .processing ? "Stop" : "Record Now") {
-                coordinator.toggleManual()
+            Button(model.recordingState == .recording ? "Stop" : "Record Now") {
+                if model.recordingState == .recording {
+                    Task { await model.stopLiveSession() }
+                } else {
+                    Task {
+                        do {
+                            try await model.startLiveSession()
+                        } catch {
+                            model.statusMessage = error.localizedDescription
+                        }
+                    }
+                    openWindow(id: "pill")
+                }
             }
             .keyboardShortcut("r", modifiers: [.command, .shift])
+            .disabled(model.recordingState != .recording && !model.canStartLiveSession)
+            Button("Load sample call") {
+                openWindow(id: "main")
+                openWindow(id: "pill")
+                Task { await model.processSampleCall() }
+            }
+            .disabled(!model.canProcessSampleCall)
             Button("Open CallNotes") {
                 openWindow(id: "main")
                 NSApp.activate()
@@ -44,20 +78,5 @@ struct MenuBarContentView: View {
         .onAppear {
             coordinator.start()
         }
-    }
-}
-
-struct HistoryWindowView: View {
-    var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "phone.badge.waveform")
-                .font(.system(size: 40))
-                .foregroundStyle(.secondary)
-            Text("No calls yet.")
-                .font(.headline)
-            Text("Take a call on your Mac or share a recording from your iPhone.")
-                .foregroundStyle(.secondary)
-        }
-        .frame(minWidth: 480, minHeight: 320)
     }
 }

@@ -22,6 +22,9 @@ let package = Package(
                 .product(name: "FluidAudio", package: "FluidAudio"),
                 .product(name: "PostgresNIO", package: "postgres-nio"),
                 .product(name: "Hummingbird", package: "hummingbird"),
+            ],
+            resources: [
+                .process("Store/Migrations")
             ]
         ),
         .testTarget(

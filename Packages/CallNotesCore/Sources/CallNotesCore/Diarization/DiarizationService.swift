@@ -5,18 +5,25 @@ public struct DiarizedCluster: Sendable, Equatable {
     public var key: String
     public var ranges: [ClosedRange<TimeInterval>]
     public var embedding: [Float]?
+    public var embeddingModel: String?
 
-    public init(key: String, ranges: [ClosedRange<TimeInterval>], embedding: [Float]? = nil) {
+    public init(
+        key: String,
+        ranges: [ClosedRange<TimeInterval>],
+        embedding: [Float]? = nil,
+        embeddingModel: String? = nil
+    ) {
         self.key = key
         self.ranges = ranges
         self.embedding = embedding
+        self.embeddingModel = embeddingModel
     }
 }
 
-/// Batch diarization of the far channel; the FluidAudio-backed implementation
-/// arrives in Phase 2. The batch pass is the source of truth for identity;
-/// streaming (LS-EEND / Sortformer) labels are provisional.
+/// Batch diarization of the far channel. The batch pass is the source of truth
+/// for identity; streaming (LS-EEND / Sortformer) labels are provisional.
 public protocol DiarizationService: Sendable {
+    var providerID: String { get }
     func diarize(fileURL: URL) async throws -> [DiarizedCluster]
 }
 

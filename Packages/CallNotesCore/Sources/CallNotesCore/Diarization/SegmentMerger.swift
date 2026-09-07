@@ -18,6 +18,7 @@ public enum SegmentMerger {
                 let lastSpeakerTag = last.speakerTag,
                 let segmentSpeakerTag = segment.speakerTag,
                 lastSpeakerTag == segmentSpeakerTag,
+                last.channel == segment.channel,
                 segment.start - last.end < gap
             {
                 last.end = max(last.end, segment.end)
