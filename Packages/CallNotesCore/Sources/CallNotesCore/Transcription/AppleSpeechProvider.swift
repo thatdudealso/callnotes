@@ -164,7 +164,15 @@ public final class AppleSpeechSession: STTSession, @unchecked Sendable {
                 )
             }
         }
-        try await analyzer.start(inputSequence: inputSequence)
+        do {
+            try await analyzer.start(inputSequence: inputSequence)
+        } catch {
+            builder.finish()
+            resultsTask?.cancel()
+            resultsTask = nil
+            continuation.finish(throwing: error)
+            throw error
+        }
         self.analyzer = analyzer
         self.inputBuilder = builder
         self.analyzerFormat = format

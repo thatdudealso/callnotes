@@ -23,6 +23,17 @@ public struct ProcessedCall: Sendable {
     }
 }
 
+public enum LocalTranscriptionSpineError: Error, LocalizedError {
+    case emptyTranscript
+
+    public var errorDescription: String? {
+        switch self {
+        case .emptyTranscript:
+            "No final transcript segments were produced."
+        }
+    }
+}
+
 /// Live pill state bound to partial SpeechAnalyzer results.
 public struct LiveTranscriptState: Sendable, Equatable {
     public var engine: STTProviderID
@@ -116,6 +127,9 @@ public struct LocalTranscriptionSpine: Sendable {
             case .nearLiveFarBatch:
                 near = try await speech.transcribePCM(split.near, channel: .near, config: config)
                 far = try await speech.transcribePCM(split.far, channel: .far, config: config)
+            }
+            guard !(near + far).isEmpty else {
+                throw LocalTranscriptionSpineError.emptyTranscript
             }
 
             let farURL = FileManager.default.temporaryDirectory

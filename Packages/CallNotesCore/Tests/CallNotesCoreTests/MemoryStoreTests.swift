@@ -180,7 +180,10 @@ import Testing
             sttProvider: .appleSpeech
         )
         let spine = LocalTranscriptionSpine(
-            speech: ScriptedPCMTranscriber(near: [], far: []),
+            speech: ScriptedPCMTranscriber(
+                near: [RawSegment(start: 0, end: 1, text: "hello", channel: .near)],
+                far: []
+            ),
             diarizer: FailingDiarizer(),
             store: store
         )
@@ -193,6 +196,40 @@ import Testing
         let persisted = try await store.fetchCall(id: call.id)
         #expect(persisted?.status == .failed)
         #expect(persisted?.errorStage == "diarization")
+        #expect(persisted?.error?.isEmpty == false)
+    }
+
+    @Test func emptyTranscriptPersistsFailedCall() async throws {
+        let store = MemoryStore()
+        try await store.migrate()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-empty-spine-\(UUID().uuidString).caf")
+        try ChannelAudio.writeStereoCAF(
+            near: Data(count: 3200),
+            far: Data(count: 3200),
+            sampleRate: 16_000,
+            to: url
+        )
+        let call = Call(
+            source: .fileImport,
+            startedAt: Date(),
+            audioPath: url.path,
+            sttProvider: .appleSpeech
+        )
+        let spine = LocalTranscriptionSpine(
+            speech: ScriptedPCMTranscriber(near: [], far: []),
+            diarizer: ScriptedDiarizer(clusters: []),
+            store: store
+        )
+
+        do {
+            _ = try await spine.process(cafURL: url, call: call, profiles: [])
+            Issue.record("Expected empty transcript failure")
+        } catch {}
+
+        let persisted = try await store.fetchCall(id: call.id)
+        #expect(persisted?.status == .failed)
+        #expect(persisted?.errorStage == "transcription")
         #expect(persisted?.error?.isEmpty == false)
     }
 }
