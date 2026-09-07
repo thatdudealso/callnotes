@@ -368,6 +368,36 @@ import Testing
         #expect((await client.requests()).count == 1)
     }
 
+    @Test func tokenizerCountOverGenerationContextUsesMapRequests() async throws {
+        let callID = UUID()
+        let transcript = Transcript(
+            callID: callID,
+            segments: [
+                Segment(
+                    callID: callID,
+                    seq: 0,
+                    startSec: 0,
+                    endSec: 1,
+                    channel: .near,
+                    clusterKey: "me",
+                    text: String(repeating: "word ", count: 35_000),
+                    provider: .appleSpeech
+                )
+            ],
+            speakerNames: ["me": "Me"]
+        )
+        let client = ScriptedOllamaClient(
+            tags: [OllamaModelTag(name: PinnedNotesModel.glimmer.name, digest: PinnedNotesModel.glimmer.digest)],
+            replies: Array(repeating: Self.validJSON, count: 20),
+            tokenCounts: [40_000] + Array(repeating: 100, count: 100)
+        )
+        let engine = OllamaNotesEngine(
+            id: .glimmer, model: .glimmer, client: client, prompt: .load(), validator: NotesSchemaValidator(), mapReduce: .default, healthProbe: nil
+        )
+        _ = try await engine.generate(transcript, style: .deep)
+        #expect((await client.requests()).count > 1)
+    }
+
     @Test func openaiChatResponseDecodesContent() throws {
         let data = Data(
             """
@@ -611,11 +641,18 @@ actor ScriptedOllamaClient: OllamaServing, OllamaTokenCounting {
     var recordedRequests: [Request] = []
     var tokenCountRequests: [[OllamaChatMessage]] = []
     var tokenCountOverride: Int?
+    var tokenCounts: [Int]
 
-    init(tags: [OllamaModelTag], replies: [String], tokenCountOverride: Int? = nil) {
+    init(
+        tags: [OllamaModelTag],
+        replies: [String],
+        tokenCountOverride: Int? = nil,
+        tokenCounts: [Int] = []
+    ) {
         self.tags = tags
         self.replies = replies
         self.tokenCountOverride = tokenCountOverride
+        self.tokenCounts = tokenCounts
     }
 
     func chat(model: String, messages: [OllamaChatMessage], numCtx: Int, jsonSchema: String?) async throws -> String {
@@ -635,6 +672,9 @@ actor ScriptedOllamaClient: OllamaServing, OllamaTokenCounting {
     func tokenCount(model: String, messages: [OllamaChatMessage]) async throws -> Int {
         _ = model
         tokenCountRequests.append(messages)
+        if !tokenCounts.isEmpty {
+            return tokenCounts.removeFirst()
+        }
         return tokenCountOverride ?? NotesContextBudget.estimateTokens(messages.map(\.content).joined(separator: "\n"))
     }
 

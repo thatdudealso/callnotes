@@ -104,7 +104,7 @@ public struct OllamaClient: OllamaServing, OllamaTokenCounting {
             "stream": false,
             "think": false,
             "keep_alive": keepAlive,
-            "options": ["num_ctx": NotesContextBudget.numCtx, "num_predict": 1, "temperature": 0],
+            "options": ["num_ctx": NotesContextBudget.tokenCountContextWindow, "num_predict": 1, "temperature": 0],
         ])
         let (data, response) = try await session.data(for: request)
         try Self.throwIfHTTPError(response, data: data)
