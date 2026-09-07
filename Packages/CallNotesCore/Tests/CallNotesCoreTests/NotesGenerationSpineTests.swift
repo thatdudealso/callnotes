@@ -224,7 +224,8 @@ import Testing
         let validator = NotesSchemaValidator()
         let partial = String(data: try JSONEncoder().encode(validator.validate(Self.validJSON, kind: .deep)), encoding: .utf8)!
         let singlePromptTokens = NotesContextBudget.estimateTokens(
-            prompt.reducePrompt(partialJSON: [partial], counterparty: "Priya")
+            "Return only valid call-notes JSON. Do not wrap it in markdown.\n"
+                + prompt.reducePrompt(partialJSON: [partial], counterparty: "Priya")
         )
         #expect(
             NotesContextBudget.estimateTokens(
@@ -334,6 +335,37 @@ import Testing
         let requests = await client.requests()
         #expect(requests.count == windows.count + 1)
         #expect(requests.dropLast().allSatisfy { $0.messages.last?.content.contains("This is chunk") == true })
+    }
+
+    @Test func tokenizerKeepsCompressiblePromptOneShot() async throws {
+        let callID = UUID()
+        let transcript = Transcript(
+            callID: callID,
+            segments: [
+                Segment(
+                    callID: callID,
+                    seq: 0,
+                    startSec: 0,
+                    endSec: 1,
+                    channel: .near,
+                    clusterKey: "me",
+                    text: String(repeating: "!", count: (NotesContextBudget.maxTranscriptTokens + 1) * 4),
+                    provider: .appleSpeech
+                )
+            ],
+            speakerNames: ["me": "Me"]
+        )
+        #expect(NotesContextBudget.estimateTokens(transcript.dialogueText()) > NotesContextBudget.maxTranscriptTokens)
+        let client = ScriptedOllamaClient(
+            tags: [OllamaModelTag(name: PinnedNotesModel.glimmer.name, digest: PinnedNotesModel.glimmer.digest)],
+            replies: [Self.validJSON],
+            tokenCountOverride: 100
+        )
+        let engine = OllamaNotesEngine(
+            id: .glimmer, model: .glimmer, client: client, prompt: .load(), validator: NotesSchemaValidator(), mapReduce: .default, healthProbe: nil
+        )
+        _ = try await engine.generate(transcript, style: .deep)
+        #expect((await client.requests()).count == 1)
     }
 
     @Test func openaiChatResponseDecodesContent() throws {
@@ -578,10 +610,12 @@ actor ScriptedOllamaClient: OllamaServing, OllamaTokenCounting {
     var replies: [String]
     var recordedRequests: [Request] = []
     var tokenCountRequests: [[OllamaChatMessage]] = []
+    var tokenCountOverride: Int?
 
-    init(tags: [OllamaModelTag], replies: [String]) {
+    init(tags: [OllamaModelTag], replies: [String], tokenCountOverride: Int? = nil) {
         self.tags = tags
         self.replies = replies
+        self.tokenCountOverride = tokenCountOverride
     }
 
     func chat(model: String, messages: [OllamaChatMessage], numCtx: Int, jsonSchema: String?) async throws -> String {
@@ -601,7 +635,7 @@ actor ScriptedOllamaClient: OllamaServing, OllamaTokenCounting {
     func tokenCount(model: String, messages: [OllamaChatMessage]) async throws -> Int {
         _ = model
         tokenCountRequests.append(messages)
-        return NotesContextBudget.estimateTokens(messages.map(\.content).joined(separator: "\n"))
+        return tokenCountOverride ?? NotesContextBudget.estimateTokens(messages.map(\.content).joined(separator: "\n"))
     }
 
     func requests() -> [Request] {

@@ -154,6 +154,7 @@ final class AppModel {
                 status: .transcribing
             )
             try await store.upsertCall(call)
+            instantCallAtHangUp = nil
             instantCallAtHangUp = call
             try await startLiveSession(forSamplePlayback: true)
             try await playFixture(cafURL: fixture.cafURL)
@@ -223,6 +224,7 @@ final class AppModel {
             }
             statusMessage = "Sample call stored in \(storeBackendName). \(derText)"
         } catch {
+            instantCallAtHangUp = nil
             statusMessage = error.localizedDescription
             recordingState = .idle
         }
@@ -259,6 +261,8 @@ final class AppModel {
             isStartingLiveSession = false
         } catch {
             isStartingLiveSession = false
+            instantCallAtHangUp = nil
+            liveSegments = []
             throw error
         }
     }

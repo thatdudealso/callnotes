@@ -35,8 +35,8 @@ struct OllamaNotesEngine: Sendable {
             throw NotesGenerationError.emptyTranscript
         }
         let user = prompt.render(dialogue: dialogue, counterparty: transcript.counterpartyName)
-        let fitsInitialContext = try await fitsInitialContext(user: user)
-        if mapReduce.needsChunking(dialogue) || !fitsInitialContext {
+        let initialTokenCount = try await exactTokenCount(messages: initialMessages(user: user))
+        if initialTokenCount > min(mapReduce.transcriptTokenBudget, NotesContextBudget.maxTranscriptTokens) {
             return try await generateMapped(transcript)
         }
         return try await completeValidated(user: user)
@@ -112,8 +112,8 @@ struct OllamaNotesEngine: Sendable {
         for partial in partialJSON {
             let candidate = group + [partial]
             let candidatePrompt = prompt.reducePrompt(partialJSON: candidate, counterparty: counterparty)
-            if NotesContextBudget.estimateTokens(candidatePrompt) <= mapReduce.reducePromptTokenBudget,
-                try await fitsInitialContext(user: candidatePrompt)
+            let candidateTokenCount = try await exactTokenCount(messages: initialMessages(user: candidatePrompt))
+            if candidateTokenCount <= min(mapReduce.reducePromptTokenBudget, NotesContextBudget.maxTranscriptTokens)
             {
                 group = candidate
                 continue
@@ -123,8 +123,8 @@ struct OllamaNotesEngine: Sendable {
             }
             groups.append(group)
             let singlePrompt = prompt.reducePrompt(partialJSON: [partial], counterparty: counterparty)
-            guard NotesContextBudget.estimateTokens(singlePrompt) <= mapReduce.reducePromptTokenBudget,
-                try await fitsInitialContext(user: singlePrompt)
+            let singleTokenCount = try await exactTokenCount(messages: initialMessages(user: singlePrompt))
+            guard singleTokenCount <= min(mapReduce.reducePromptTokenBudget, NotesContextBudget.maxTranscriptTokens)
             else {
                 throw NotesGenerationError.schemaInvalid("partial notes exceed the reduction context budget")
             }
