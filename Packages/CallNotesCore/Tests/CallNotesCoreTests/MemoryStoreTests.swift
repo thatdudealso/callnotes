@@ -117,7 +117,11 @@ import Testing
             far: [RawSegment(start: 1.0, end: 2.5, text: "hi lets ship the pilot", channel: .far)]
         )
         let diarizer = ScriptedDiarizer(
-            clusters: [DiarizedCluster(key: "A", ranges: [1.0...2.5], embedding: [0, 1, 0])]
+            clusters: [
+                DiarizedCluster(
+                    key: "A", ranges: [1.0...2.5], embedding: [0, 1, 0], embeddingModel: EmbeddingModel.weSpeakerV2
+                )
+            ]
         )
         let spine = LocalTranscriptionSpine(speech: speech, diarizer: diarizer, store: store)
         let call = Call(
@@ -263,7 +267,11 @@ private struct FailingDiarizer: DiarizationService {
                 far: [RawSegment(start: 1.0, end: 2.5, text: "hi lets ship the pilot", channel: .far)]
             ),
             diarizer: ScriptedDiarizer(
-                clusters: [DiarizedCluster(key: "A", ranges: [1.0...2.5], embedding: [0, 1, 0])]
+                clusters: [
+                    DiarizedCluster(
+                        key: "A", ranges: [1.0...2.5], embedding: [0, 1, 0], embeddingModel: EmbeddingModel.weSpeakerV2
+                    )
+                ]
             ),
             store: store
         )

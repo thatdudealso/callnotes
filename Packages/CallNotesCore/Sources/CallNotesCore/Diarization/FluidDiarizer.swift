@@ -52,7 +52,12 @@ public struct FluidDiarizer: DiarizationService {
             }
         }
         return ranges.keys.sorted().map { key in
-            DiarizedCluster(key: key, ranges: ranges[key] ?? [], embedding: embeddings[key])
+            DiarizedCluster(
+                key: key,
+                ranges: ranges[key] ?? [],
+                embedding: embeddings[key],
+                embeddingModel: EmbeddingModel.weSpeakerV2
+            )
         }
     }
 

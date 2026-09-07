@@ -294,14 +294,8 @@ public actor PostgresStore: CallStore {
         )
     }
 
-    public static func makeIfAvailable(
-        configuration: StoreConfiguration? = nil
-    ) async -> PostgresStore? {
-        var candidates: [StoreConfiguration] = []
-        if let configuration {
-            candidates.append(configuration)
-        }
-        candidates.append(contentsOf: StoreConfiguration.localCandidates())
+    public static func makeIfAvailable() async -> PostgresStore? {
+        let candidates = StoreConfiguration.localCandidates()
         var seen = Set<String>()
         for candidate in candidates {
             let key = candidate.unixSocketPath ?? "\(candidate.host):\(candidate.port)"

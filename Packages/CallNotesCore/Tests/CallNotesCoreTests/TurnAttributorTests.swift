@@ -36,7 +36,7 @@ import Testing
     @Test func farSegmentTakesClusterWithMaxOverlapAndAutoLabels() {
         let far = [RawSegment(start: 1.0, end: 3.0, text: "hi there", channel: .far)]
         let clusters = [
-            DiarizedCluster(key: "A", ranges: [1.0...3.0], embedding: [0, 1, 0])
+            DiarizedCluster(key: "A", ranges: [1.0...3.0], embedding: [0, 1, 0], embeddingModel: EmbeddingModel.weSpeakerV2)
         ]
         let turns = TurnAttributor.attribute(
             near: [],
@@ -54,7 +54,7 @@ import Testing
     @Test func unknownFarClusterGetsSpeakerNumber() {
         let far = [RawSegment(start: 0, end: 1, text: "who", channel: .far)]
         let clusters = [
-            DiarizedCluster(key: "Z", ranges: [0...1], embedding: [0, 0, 1])
+            DiarizedCluster(key: "Z", ranges: [0...1], embedding: [0, 0, 1], embeddingModel: EmbeddingModel.weSpeakerV2)
         ]
         let turns = TurnAttributor.attribute(
             near: [],
@@ -78,7 +78,7 @@ import Testing
             RawSegment(start: 2, end: 3, text: "second", channel: .far),
         ]
         let clusters = [
-            DiarizedCluster(key: "Z", ranges: [0...1, 2...3], embedding: [0.6, 0.8])
+            DiarizedCluster(key: "Z", ranges: [0...1, 2...3], embedding: [0.6, 0.8], embeddingModel: EmbeddingModel.weSpeakerV2)
         ]
         let turns = TurnAttributor.attribute(
             near: [],
@@ -99,7 +99,7 @@ import Testing
             sampleCount: 1
         )
         let clusters = [
-            DiarizedCluster(key: "Z", ranges: [0...1], embedding: [0.6, 0.8])
+            DiarizedCluster(key: "Z", ranges: [0...1], embedding: [0.6, 0.8], embeddingModel: EmbeddingModel.weSpeakerV2)
         ]
         let turns = TurnAttributor.attribute(
             near: [],
@@ -120,7 +120,7 @@ import Testing
             RawSegment(start: 0.5, end: 0.9, text: "hi", channel: .far)
         ]
         let clusters = [
-            DiarizedCluster(key: "A", ranges: [0.5...0.9], embedding: [0, 1, 0])
+            DiarizedCluster(key: "A", ranges: [0.5...0.9], embedding: [0, 1, 0], embeddingModel: EmbeddingModel.weSpeakerV2)
         ]
         let turns = TurnAttributor.attribute(
             near: near,
@@ -136,7 +136,7 @@ import Testing
         let near = [RawSegment(start: 0, end: 1, text: "near", channel: .near)]
         let far = [RawSegment(start: 0.5, end: 0.9, text: "far", channel: .far)]
         let clusters = [
-            DiarizedCluster(key: "A", ranges: [0.5...0.9], embedding: [1, 0, 0])
+            DiarizedCluster(key: "A", ranges: [0.5...0.9], embedding: [1, 0, 0], embeddingModel: EmbeddingModel.weSpeakerV2)
         ]
         let turns = TurnAttributor.attribute(
             near: near,
@@ -198,7 +198,7 @@ import Testing
     @Test func liveFarLabelsAreProvisional() {
         let far = [RawSegment(start: 0, end: 1, text: "live", channel: .far)]
         let clusters = [
-            DiarizedCluster(key: "A", ranges: [0...1], embedding: [0, 1, 0])
+            DiarizedCluster(key: "A", ranges: [0...1], embedding: [0, 1, 0], embeddingModel: EmbeddingModel.weSpeakerV2)
         ]
         let turns = TurnAttributor.attribute(
             near: [],
@@ -208,5 +208,21 @@ import Testing
             farLabelsAreProvisional: true
         )
         #expect(turns[0].isProvisional)
+    }
+
+    @Test func clusterFromAnotherEmbeddingModelRemainsUnassigned() {
+        let far = [RawSegment(start: 0, end: 1, text: "hello", channel: .far)]
+        let clusters = [
+            DiarizedCluster(key: "A", ranges: [0...1], embedding: [0, 1, 0], embeddingModel: "other_model")
+        ]
+        let turns = TurnAttributor.attribute(
+            near: [],
+            far: far,
+            clusters: clusters,
+            profiles: [owner, priya]
+        )
+
+        #expect(turns[0].speakerID == nil)
+        #expect(turns[0].speakerName == "Speaker 2")
     }
 }

@@ -5,11 +5,18 @@ public struct DiarizedCluster: Sendable, Equatable {
     public var key: String
     public var ranges: [ClosedRange<TimeInterval>]
     public var embedding: [Float]?
+    public var embeddingModel: String?
 
-    public init(key: String, ranges: [ClosedRange<TimeInterval>], embedding: [Float]? = nil) {
+    public init(
+        key: String,
+        ranges: [ClosedRange<TimeInterval>],
+        embedding: [Float]? = nil,
+        embeddingModel: String? = nil
+    ) {
         self.key = key
         self.ranges = ranges
         self.embedding = embedding
+        self.embeddingModel = embeddingModel
     }
 }
 

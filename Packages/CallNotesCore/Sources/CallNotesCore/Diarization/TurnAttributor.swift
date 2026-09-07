@@ -168,13 +168,16 @@ public enum TurnAttributor {
     ) -> [String: (profileID: UUID?, similarity: Float)] {
         var result: [String: (profileID: UUID?, similarity: Float)] = [:]
         for cluster in clusters {
-            guard let embedding = cluster.embedding, !embedding.isEmpty else {
+            guard let embedding = cluster.embedding,
+                !embedding.isEmpty,
+                let embeddingModel = cluster.embeddingModel
+            else {
                 result[cluster.key] = (nil, 0)
                 continue
             }
             let outcome = SpeakerIdentity.match(
                 embedding: embedding,
-                embeddingModel: EmbeddingModel.weSpeakerV2,
+                embeddingModel: embeddingModel,
                 against: profiles
             )
             switch outcome {
@@ -200,10 +203,13 @@ public enum TurnAttributor {
         var names: [String: String] = [:]
         for cluster in clusters {
             let outcome: SpeakerMatcher.Outcome
-            if let embedding = cluster.embedding, !embedding.isEmpty {
+            if let embedding = cluster.embedding,
+                !embedding.isEmpty,
+                let embeddingModel = cluster.embeddingModel
+            {
                 outcome = SpeakerIdentity.match(
                     embedding: embedding,
-                    embeddingModel: EmbeddingModel.weSpeakerV2,
+                    embeddingModel: embeddingModel,
                     against: profiles
                 )
             } else {
