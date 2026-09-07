@@ -21,6 +21,7 @@ final class AppModel {
     private let memoryStore = MemoryStore()
     private var liveSession: (any STTSession)?
     private var liveResultsTask: Task<Void, Never>?
+    private var isProcessingSample = false
 
     var selectedCall: Call? {
         calls.first { $0.id == selectedCallID }
@@ -32,7 +33,11 @@ final class AppModel {
     }
 
     var canProcessSampleCall: Bool {
-        isStoreInitialized && storeBackendName == "postgres"
+        isStoreInitialized
+            && storeBackendName == "postgres"
+            && recordingState == .idle
+            && liveSession == nil
+            && !isProcessingSample
     }
 
     init() {
@@ -96,13 +101,20 @@ final class AppModel {
                 : "Waiting for dedicated CallNotes Postgres and SpeechAnalyzer validation before loading the sample call..."
             return
         }
+        isProcessingSample = true
+        defer {
+            isProcessingSample = false
+            if recordingState == .processing {
+                recordingState = .idle
+            }
+        }
         recordingState = .processing
         statusMessage = "Processing sample call..."
         live.lastLine = "Processing sample call..."
 
         do {
             let fixture = try SampleCallFixture.materialize()
-            try await startLiveSession()
+            try await startLiveSession(forSamplePlayback: true)
             try await playFixture(cafURL: fixture.cafURL)
             let diarizer = FluidDiarizer()
             let priyaEmbedding = try await SampleCallFixture.priyaEmbedding(
@@ -182,8 +194,10 @@ final class AppModel {
         }
     }
 
-    func startLiveSession() async throws {
-        if liveSession != nil {
+    func startLiveSession(forSamplePlayback: Bool = false) async throws {
+        guard liveSession == nil,
+            recordingState == .idle || (forSamplePlayback && isProcessingSample)
+        else {
             return
         }
         let session = try await speech.startSession(config: STTSessionConfig())
