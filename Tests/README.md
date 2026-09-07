@@ -8,9 +8,8 @@ Cross-target test harnesses land here as the phases that need them arrive
   default output (stand-in for a live call) from the separate
   `Tests/CaptureHarnessPlayback` helper process - the global tap excludes the
   harness's own process, so in-process playback would be silent - and asserts
-  both CAF channels are non-silent and aligned within 50 ms. A real FaceTime / macOS Phone call from
-  a second device is the captain-run acceptance; the script documents that
-  path when it cannot be exercised here.
+  both CAF channels are non-silent and aligned within 50 ms from their capture
+  host timestamps.
 - golden-file provider tests and the diarization/identity accuracy harness
   (Phase 2),
 - Meta provider integration tests (Phase 4),
