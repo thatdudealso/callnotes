@@ -140,7 +140,7 @@ struct CallDetailView: View {
                     Text(call.startedAt.formatted(date: .abbreviated, time: .shortened))
                     Text(call.source.rawValue.replacingOccurrences(of: "_", with: " "))
                     Text(call.sttProvider == .appleSpeech ? "Local" : call.sttProvider.rawValue)
-                    if let der = model.lastDER {
+                    if model.lastDERCallID == call.id, let der = model.lastDER {
                         Text(String(format: "DER %.1f%%", der.der * 100))
                     }
                 }

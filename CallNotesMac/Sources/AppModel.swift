@@ -14,6 +14,7 @@ final class AppModel {
     var storeBackendName = "initializing"
     var isStoreInitialized = false
     var lastDER: DiarizationErrorRate.Result?
+    var lastDERCallID: UUID?
     var statusMessage: String?
 
     private var store: any CallStore
@@ -21,6 +22,7 @@ final class AppModel {
     private let memoryStore = MemoryStore()
     private var liveSession: (any STTSession)?
     private var liveResultsTask: Task<Void, Never>?
+    private var isStartingLiveSession = false
     private var isProcessingSample = false
 
     var selectedCall: Call? {
@@ -37,11 +39,15 @@ final class AppModel {
             && storeBackendName == "postgres"
             && recordingState == .idle
             && liveSession == nil
+            && !isStartingLiveSession
             && !isProcessingSample
     }
 
     var canStartLiveSession: Bool {
-        recordingState == .idle && liveSession == nil && !isProcessingSample
+        recordingState == .idle
+            && liveSession == nil
+            && !isStartingLiveSession
+            && !isProcessingSample
     }
 
     init() {
@@ -175,6 +181,7 @@ final class AppModel {
 
             turnsByCall[processed.call.id] = processed.turns
             lastDER = processed.der
+            lastDERCallID = processed.call.id
             live.engine = .appleSpeech
             live.elapsed = TimeInterval(processed.call.durationSec ?? 0)
             live.currentSpeakerName = processed.turns.last?.speakerName ?? "Me"
@@ -200,26 +207,34 @@ final class AppModel {
 
     func startLiveSession(forSamplePlayback: Bool = false) async throws {
         guard liveSession == nil,
+            !isStartingLiveSession,
             recordingState == .idle || (forSamplePlayback && isProcessingSample)
         else {
             return
         }
-        let session = try await speech.startSession(config: STTSessionConfig())
-        liveSession = session
-        recordingState = .recording
-        liveResultsTask = Task { [weak self] in
-            do {
-                for try await segment in session.results {
-                    guard !Task.isCancelled, let self else { return }
-                    live.elapsed = max(live.elapsed, segment.end)
-                    live.currentSpeakerName = segment.channel == .far ? "Speaker 2" : "Me"
-                    live.lastLine = segment.text
-                    live.isProvisionalSpeaker = segment.channel == .far || segment.isVolatile
+        isStartingLiveSession = true
+        do {
+            let session = try await speech.startSession(config: STTSessionConfig())
+            liveSession = session
+            recordingState = .recording
+            liveResultsTask = Task { [weak self] in
+                do {
+                    for try await segment in session.results {
+                        guard !Task.isCancelled, let self else { return }
+                        live.elapsed = max(live.elapsed, segment.end)
+                        live.currentSpeakerName = segment.channel == .far ? "Speaker 2" : "Me"
+                        live.lastLine = segment.text
+                        live.isProvisionalSpeaker = segment.channel == .far || segment.isVolatile
+                    }
+                } catch {
+                    guard let self, !Task.isCancelled else { return }
+                    statusMessage = error.localizedDescription
                 }
-            } catch {
-                guard let self, !Task.isCancelled else { return }
-                statusMessage = error.localizedDescription
             }
+            isStartingLiveSession = false
+        } catch {
+            isStartingLiveSession = false
+            throw error
         }
     }
 
