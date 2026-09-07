@@ -173,6 +173,8 @@ public struct LocalTranscriptionSpine: Sendable {
             try await store.replaceCallSpeakers(callID: working.id, speakers: mappings)
 
             working.status = .transcribed
+            working.error = nil
+            working.errorStage = nil
             working.endedAt = working.endedAt ?? Date()
             if working.durationSec == nil {
                 let last = turns.map(\.end).max() ?? 0

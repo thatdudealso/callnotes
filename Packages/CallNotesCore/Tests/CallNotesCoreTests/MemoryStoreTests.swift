@@ -129,7 +129,10 @@ import Testing
             startedAt: Date(),
             counterpartyName: "Priya",
             audioPath: url.path,
-            sttProvider: .appleSpeech
+            sttProvider: .appleSpeech,
+            status: .failed,
+            error: "Previous diarization failed",
+            errorStage: "diarization"
         )
         let processed = try await spine.process(
             cafURL: url,
@@ -139,13 +142,18 @@ import Testing
         )
 
         #expect(processed.call.status == .transcribed)
+        #expect(processed.call.error == nil)
+        #expect(processed.call.errorStage == nil)
         #expect(processed.call.diarizationProvider == "scripted")
         #expect(processed.turns.map(\.speakerName) == ["Me", "Priya"])
         #expect(processed.turns.map(\.text) == ["hello priya", "hi lets ship the pilot"])
         #expect(processed.der?.der == 0)
         let stored = try await store.fetchSegments(callID: call.id, provider: .appleSpeech)
         #expect(stored.map(\.text) == ["hello priya", "hi lets ship the pilot"])
-        #expect(try await store.fetchCall(id: call.id)?.status == .transcribed)
+        let persisted = try await store.fetchCall(id: call.id)
+        #expect(persisted?.status == .transcribed)
+        #expect(persisted?.error == nil)
+        #expect(persisted?.errorStage == nil)
     }
 
     @Test func committedFixtureCAFSplitsIntoNearAndFar() throws {
