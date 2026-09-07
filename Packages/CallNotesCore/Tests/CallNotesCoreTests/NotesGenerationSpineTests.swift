@@ -198,6 +198,40 @@ import Testing
         #expect(notes.title == "Priya - long call")
     }
 
+    @Test func mapReduceUsesBoundedHierarchicalReductions() async throws {
+        let long = FixtureTranscript.longTwoSpeaker(segmentCount: 80)
+        let mapper = NotesMapReduce(transcriptTokenBudget: 50, chunkTokenBudget: 80, reducePromptTokenBudget: 500)
+        let windows = mapper.windows(from: long)
+        let client = ScriptedOllamaClient(
+            tags: [OllamaModelTag(name: PinnedNotesModel.glimmer.name, digest: PinnedNotesModel.glimmer.digest)],
+            replies: Array(repeating: Self.validJSON, count: windows.count * 2)
+        )
+        let engine = OllamaNotesEngine(
+            id: .glimmer, model: .glimmer, client: client, prompt: .load(), validator: NotesSchemaValidator(), mapReduce: mapper, healthProbe: nil
+        )
+        _ = try await engine.generate(long, style: .deep)
+        let requests = await client.requests()
+        let reductionRequests = requests.filter { $0.messages.last?.content.contains("Merge these partial") == true }
+        #expect(reductionRequests.count > 1)
+        #expect(reductionRequests.allSatisfy {
+            NotesContextBudget.estimateTokens($0.messages.last?.content ?? "") <= mapper.reducePromptTokenBudget
+        })
+    }
+
+    @Test func repairRetrySizesContextFromItsCompletePayload() async throws {
+        let invalid = #"{"title":"","summary":"","extra":"# + String(repeating: "word ", count: 4_000) + #""}"#
+        let client = ScriptedOllamaClient(
+            tags: [OllamaModelTag(name: PinnedNotesModel.glimmer.name, digest: PinnedNotesModel.glimmer.digest)],
+            replies: [invalid, Self.validJSON]
+        )
+        let provider = OllamaGlimmerProvider(client: client)
+        _ = try await provider.generate(FixtureTranscript.twoSpeaker(), style: .deep)
+        let requests = await client.requests()
+        #expect(requests.count == 2)
+        #expect(requests[1].numCtx == NotesContextBudget.contextWindow(for: requests[1].messages.map(\.content).joined(separator: "\n")))
+        #expect(requests[1].numCtx > requests[0].numCtx)
+    }
+
     @Test func openaiChatResponseDecodesContent() throws {
         let data = Data(
             """
@@ -358,8 +392,8 @@ enum FixtureTranscript {
         )
     }
 
-    static func longTwoSpeaker(callID: UUID = UUID()) -> Transcript {
-        let segments = (0..<24).map { index in
+    static func longTwoSpeaker(callID: UUID = UUID(), segmentCount: Int = 24) -> Transcript {
+        let segments = (0..<segmentCount).map { index in
             Segment(
                 callID: callID,
                 seq: index,
@@ -411,8 +445,14 @@ final class ScriptedNotesProvider: NotesProvider, @unchecked Sendable {
 }
 
 actor ScriptedOllamaClient: OllamaServing {
+    struct Request: Sendable {
+        var messages: [OllamaChatMessage]
+        var numCtx: Int
+    }
+
     var tags: [OllamaModelTag]
     var replies: [String]
+    var recordedRequests: [Request] = []
 
     init(tags: [OllamaModelTag], replies: [String]) {
         self.tags = tags
@@ -421,9 +461,8 @@ actor ScriptedOllamaClient: OllamaServing {
 
     func chat(model: String, messages: [OllamaChatMessage], numCtx: Int, jsonSchema: String?) async throws -> String {
         _ = model
-        _ = messages
-        _ = numCtx
         _ = jsonSchema
+        recordedRequests.append(Request(messages: messages, numCtx: numCtx))
         guard !replies.isEmpty else {
             throw NotesGenerationError.ollamaUnavailable("scripted Ollama has no replies")
         }
@@ -432,5 +471,9 @@ actor ScriptedOllamaClient: OllamaServing {
 
     func listModels() async throws -> [OllamaModelTag] {
         tags
+    }
+
+    func requests() -> [Request] {
+        recordedRequests
     }
 }

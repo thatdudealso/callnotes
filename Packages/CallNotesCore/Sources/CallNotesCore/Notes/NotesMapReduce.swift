@@ -4,13 +4,16 @@ import Foundation
 public struct NotesMapReduce: Sendable {
     public var transcriptTokenBudget: Int
     public var chunkTokenBudget: Int
+    public var reducePromptTokenBudget: Int
 
     public init(
         transcriptTokenBudget: Int = NotesContextBudget.maxTranscriptTokens,
-        chunkTokenBudget: Int = NotesContextBudget.chunkTokens
+        chunkTokenBudget: Int = NotesContextBudget.chunkTokens,
+        reducePromptTokenBudget: Int = NotesContextBudget.maxTranscriptTokens
     ) {
         self.transcriptTokenBudget = transcriptTokenBudget
         self.chunkTokenBudget = chunkTokenBudget
+        self.reducePromptTokenBudget = reducePromptTokenBudget
     }
 
     public static let `default` = NotesMapReduce()

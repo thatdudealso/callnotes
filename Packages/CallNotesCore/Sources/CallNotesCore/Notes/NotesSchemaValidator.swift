@@ -15,6 +15,7 @@ public struct NotesSchemaValidator: Sendable {
     public static let formatSchemaJSON = """
         {
           "type": "object",
+          "additionalProperties": false,
           "required": ["title", "summary", "decisions", "action_items", "follow_ups", "open_questions", "entities"],
           "properties": {
             "title": {"type": "string"},
@@ -24,10 +25,11 @@ public struct NotesSchemaValidator: Sendable {
               "type": "array",
               "items": {
                 "type": "object",
+                "additionalProperties": false,
                 "required": ["text"],
                 "properties": {
                   "owner": {"type": ["string", "null"]},
-                  "text": {"type": "string"},
+                  "text": {"type": "string", "minLength": 1},
                   "due": {"type": ["string", "null"]}
                 }
               }
@@ -36,6 +38,7 @@ public struct NotesSchemaValidator: Sendable {
             "open_questions": {"type": "array", "items": {"type": "string"}},
             "entities": {
               "type": "object",
+              "additionalProperties": false,
               "required": ["people", "companies", "amounts", "dates"],
               "properties": {
                 "people": {"type": "array", "items": {"type": "string"}},
@@ -100,11 +103,16 @@ public struct NotesSchemaValidator: Sendable {
     }
 
     private func validateInstant(_ object: [String: Any]) throws {
+        try requireOnlyKeys(object, allowed: ["title", "summary"])
         try requireNonEmptyString(object, key: "title")
         try requireNonEmptyString(object, key: "summary")
     }
 
     private func validateDeep(_ object: [String: Any]) throws {
+        try requireOnlyKeys(
+            object,
+            allowed: ["title", "summary", "decisions", "action_items", "follow_ups", "open_questions", "entities"]
+        )
         try requireNonEmptyString(object, key: "title")
         try requireNonEmptyString(object, key: "summary")
         try requireStringArray(object, key: "decisions")
@@ -140,6 +148,7 @@ public struct NotesSchemaValidator: Sendable {
             guard let row = item as? [String: Any] else {
                 throw NotesGenerationError.schemaInvalid("action_items entries must be objects")
             }
+            try requireOnlyKeys(row, allowed: ["owner", "text", "due"])
             guard let text = row["text"] as? String,
                 !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             else {
@@ -158,8 +167,16 @@ public struct NotesSchemaValidator: Sendable {
         guard let entities = object["entities"] as? [String: Any] else {
             throw NotesGenerationError.schemaInvalid("missing object entities")
         }
+        try requireOnlyKeys(entities, allowed: ["people", "companies", "amounts", "dates"])
         for key in ["people", "companies", "amounts", "dates"] {
             try requireStringArray(entities, key: key)
+        }
+    }
+
+    private func requireOnlyKeys(_ object: [String: Any], allowed: Set<String>) throws {
+        let extra = Set(object.keys).subtracting(allowed)
+        guard extra.isEmpty else {
+            throw NotesGenerationError.schemaInvalid("unexpected properties: \(extra.sorted().joined(separator: ", "))")
         }
     }
 }

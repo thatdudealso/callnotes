@@ -41,6 +41,22 @@ import Testing
         }
     }
 
+    @Test(arguments: ["top_level", "action_item", "entities"])
+    func rejectsUnexpectedProperties(location: String) {
+        let json: String
+        switch location {
+        case "action_item":
+            json = Self.validJSON.replacingOccurrences(of: #""due": "2026-09-10""#, with: #""due": "2026-09-10", "extra": true"#)
+        case "entities":
+            json = Self.validJSON.replacingOccurrences(of: #""dates": []"#, with: #""dates": [], "extra": true"#)
+        default:
+            json = Self.validJSON.replacingOccurrences(of: #""title":"#, with: #""extra": true, "title":"#)
+        }
+        #expect(throws: NotesGenerationError.self) {
+            try validator.validate(json, kind: .deep)
+        }
+    }
+
     @Test func formatSchemaJSONIsConstrainedDecodingObject() throws {
         let data = Data(NotesSchemaValidator.formatSchemaJSON.utf8)
         let parsed = try JSONSerialization.jsonObject(with: data)

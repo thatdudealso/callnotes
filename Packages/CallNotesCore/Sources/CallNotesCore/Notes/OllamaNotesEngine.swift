@@ -62,45 +62,103 @@ struct OllamaNotesEngine: Sendable {
             )
             partials.append(String(data: try JSONEncoder().encode(notes), encoding: .utf8) ?? "{}")
         }
-        return try await completeValidated(
-            user: prompt.reducePrompt(partialJSON: partials, counterparty: transcript.counterpartyName)
-        )
+        return try await reduce(partials, counterparty: transcript.counterpartyName)
+    }
+
+    private func reduce(_ partials: [String], counterparty: String?) async throws -> CallNotes {
+        var pending = partials
+        while true {
+            let groups = try boundedReductionGroups(partialJSON: pending, counterparty: counterparty)
+            if groups.count == 1 {
+                return try await completeValidated(
+                    user: prompt.reducePrompt(partialJSON: groups[0], counterparty: counterparty)
+                )
+            }
+            pending = try await groups.asyncMap { group in
+                let notes = try await completeValidated(
+                    user: prompt.reducePrompt(partialJSON: group, counterparty: counterparty)
+                )
+                return String(data: try JSONEncoder().encode(notes), encoding: .utf8) ?? "{}"
+            }
+        }
+    }
+
+    private func boundedReductionGroups(partialJSON: [String], counterparty: String?) throws -> [[String]] {
+        var groups: [[String]] = []
+        var group: [String] = []
+        for partial in partialJSON {
+            let candidate = group + [partial]
+            let candidatePrompt = prompt.reducePrompt(partialJSON: candidate, counterparty: counterparty)
+            if NotesContextBudget.estimateTokens(candidatePrompt) <= mapReduce.reducePromptTokenBudget {
+                group = candidate
+                continue
+            }
+            guard !group.isEmpty else {
+                throw NotesGenerationError.schemaInvalid("partial notes exceed the reduction context budget")
+            }
+            groups.append(group)
+            let singlePrompt = prompt.reducePrompt(partialJSON: [partial], counterparty: counterparty)
+            guard NotesContextBudget.estimateTokens(singlePrompt) <= mapReduce.reducePromptTokenBudget else {
+                throw NotesGenerationError.schemaInvalid("partial notes exceed the reduction context budget")
+            }
+            group = [partial]
+        }
+        if !group.isEmpty {
+            groups.append(group)
+        }
+        return groups
     }
 
     private func completeValidated(user: String) async throws -> CallNotes {
         let system = "Return only valid call-notes JSON. Do not wrap it in markdown."
-        let numCtx = NotesContextBudget.contextWindow(for: user)
         let schema = NotesSchemaValidator.formatSchemaJSON
+        let firstMessages = [
+            OllamaChatMessage(role: "system", content: system),
+            OllamaChatMessage(role: "user", content: user),
+        ]
         let first = try await client.chat(
             model: model.name,
-            messages: [
-                OllamaChatMessage(role: "system", content: system),
-                OllamaChatMessage(role: "user", content: user),
-            ],
-            numCtx: numCtx,
+            messages: firstMessages,
+            numCtx: contextWindow(for: firstMessages),
             jsonSchema: schema
         )
         do {
             return try validator.validate(first, kind: .deep)
         } catch {
+            let repairMessages = [
+                OllamaChatMessage(role: "system", content: system),
+                OllamaChatMessage(role: "user", content: user),
+                OllamaChatMessage(role: "assistant", content: first),
+                OllamaChatMessage(
+                    role: "user",
+                    content: prompt.repairPrompt(
+                        invalidJSON: first,
+                        error: error.localizedDescription
+                    )
+                ),
+            ]
             let repaired = try await client.chat(
                 model: model.name,
-                messages: [
-                    OllamaChatMessage(role: "system", content: system),
-                    OllamaChatMessage(role: "user", content: user),
-                    OllamaChatMessage(role: "assistant", content: first),
-                    OllamaChatMessage(
-                        role: "user",
-                        content: prompt.repairPrompt(
-                            invalidJSON: first,
-                            error: error.localizedDescription
-                        )
-                    ),
-                ],
-                numCtx: numCtx,
+                messages: repairMessages,
+                numCtx: contextWindow(for: repairMessages),
                 jsonSchema: schema
             )
             return try validator.validate(repaired, kind: .deep)
         }
+    }
+
+    private func contextWindow(for messages: [OllamaChatMessage]) -> Int {
+        NotesContextBudget.contextWindow(for: messages.map(\.content).joined(separator: "\n"))
+    }
+}
+
+private extension Array {
+    func asyncMap<T: Sendable>(_ transform: @escaping @Sendable (Element) async throws -> T) async throws -> [T] {
+        var results: [T] = []
+        results.reserveCapacity(count)
+        for element in self {
+            results.append(try await transform(element))
+        }
+        return results
     }
 }
