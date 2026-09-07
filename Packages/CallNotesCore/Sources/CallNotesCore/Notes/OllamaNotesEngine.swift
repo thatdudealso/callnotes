@@ -73,6 +73,9 @@ struct OllamaNotesEngine: Sendable {
                     user: prompt.reducePrompt(partialJSON: groups[0], counterparty: counterparty)
                 )
             }
+            guard groups.count < pending.count else {
+                throw NotesGenerationError.schemaInvalid("reduction failed to make progress")
+            }
             pending = try await groups.asyncMap { group in
                 let notes = try await completeValidated(
                     user: prompt.reducePrompt(partialJSON: group, counterparty: counterparty)

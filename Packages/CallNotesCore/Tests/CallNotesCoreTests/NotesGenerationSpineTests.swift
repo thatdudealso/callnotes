@@ -218,6 +218,38 @@ import Testing
         })
     }
 
+    @Test func mapReduceRejectsNonProgressingReduction() async throws {
+        let prompt = NotesPromptTemplate.load()
+        let validator = NotesSchemaValidator()
+        let partial = String(data: try JSONEncoder().encode(validator.validate(Self.validJSON, kind: .deep)), encoding: .utf8)!
+        let singlePromptTokens = NotesContextBudget.estimateTokens(
+            prompt.reducePrompt(partialJSON: [partial], counterparty: "Priya")
+        )
+        #expect(
+            NotesContextBudget.estimateTokens(
+                prompt.reducePrompt(partialJSON: [partial, partial], counterparty: "Priya")
+            ) > singlePromptTokens
+        )
+        let mapper = NotesMapReduce(
+            transcriptTokenBudget: 50,
+            chunkTokenBudget: 80,
+            reducePromptTokenBudget: singlePromptTokens
+        )
+        let transcript = FixtureTranscript.longTwoSpeaker(segmentCount: 8)
+        let windows = mapper.windows(from: transcript)
+        let client = ScriptedOllamaClient(
+            tags: [OllamaModelTag(name: PinnedNotesModel.glimmer.name, digest: PinnedNotesModel.glimmer.digest)],
+            replies: Array(repeating: Self.validJSON, count: windows.count)
+        )
+        let engine = OllamaNotesEngine(
+            id: .glimmer, model: .glimmer, client: client, prompt: prompt, validator: validator, mapReduce: mapper, healthProbe: nil
+        )
+        await #expect(throws: NotesGenerationError.self) {
+            try await engine.generate(transcript, style: .deep)
+        }
+        #expect((await client.requests()).count == windows.count)
+    }
+
     @Test func repairRetrySizesContextFromItsCompletePayload() async throws {
         let invalid = #"{"title":"","summary":"","extra":"# + String(repeating: "word ", count: 4_000) + #""}"#
         let client = ScriptedOllamaClient(
@@ -421,6 +453,13 @@ import Testing
                 == "sha256:19e422b0231392335cfc49cfd172de7034bb1aeabb08aa307cce745c60b272fe"
         )
         #expect(PinnedNotesModel.glimmer.matches(digest: PinnedNotesModel.glimmer.digest))
+    }
+
+    @Test func rejectsIncompleteModelDigests() {
+        let model = PinnedNotesModel.glimmer
+        #expect(model.matches(digest: model.digest.replacingOccurrences(of: "sha256:", with: "")))
+        #expect(!model.matches(digest: ""))
+        #expect(!model.matches(digest: String(model.digest.suffix(16))))
     }
 
     @Test func contextWindowScalesWithPromptSize() {

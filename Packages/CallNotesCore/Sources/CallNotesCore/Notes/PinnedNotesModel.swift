@@ -31,7 +31,6 @@ public struct PinnedNotesModel: Sendable, Equatable {
         let actual = other.lowercased()
         return actual == expected
             || actual == expected.replacingOccurrences(of: "sha256:", with: "")
-            || expected.hasSuffix(actual)
     }
 }
 
