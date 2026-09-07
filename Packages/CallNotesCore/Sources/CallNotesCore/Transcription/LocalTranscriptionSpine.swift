@@ -25,11 +25,14 @@ public struct ProcessedCall: Sendable {
 
 public enum LocalTranscriptionSpineError: Error, LocalizedError {
     case emptyTranscript
+    case missingRequiredFarSpeaker
 
     public var errorDescription: String? {
         switch self {
         case .emptyTranscript:
             "No final transcript segments were produced."
+        case .missingRequiredFarSpeaker:
+            "The required far-channel speaker was not attributed."
         }
     }
 }
@@ -102,7 +105,8 @@ public struct LocalTranscriptionSpine: Sendable {
         cafURL: URL,
         call: Call,
         profiles: [SpeakerProfile],
-        referenceTurns: [DiarizationTurn] = []
+        referenceTurns: [DiarizationTurn] = [],
+        requiredFarSpeakerID: UUID? = nil
     ) async throws -> ProcessedCall {
         var working = call
         working.status = .transcribing
@@ -140,12 +144,18 @@ public struct LocalTranscriptionSpine: Sendable {
             try ChannelAudio.writeMonoCAF(pcm16: split.far, sampleRate: split.sampleRate, to: farURL)
             let clusters = try await diarizer.diarize(fileURL: farURL)
 
+            stage = "attribution"
             let turns = TurnAttributor.attribute(
                 near: near,
                 far: far,
                 clusters: clusters,
                 profiles: profiles
             )
+            if let requiredFarSpeakerID,
+                !turns.contains(where: { $0.channel == .far && $0.speakerID == requiredFarSpeakerID })
+            {
+                throw LocalTranscriptionSpineError.missingRequiredFarSpeaker
+            }
             let segments = TurnAttributor.toSegments(turns, callID: working.id, provider: speech.id)
             stage = "persistence"
             try await store.replaceSegments(callID: working.id, provider: speech.id, segments)

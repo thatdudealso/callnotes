@@ -233,6 +233,53 @@ import Testing
         #expect(persisted?.error?.isEmpty == false)
     }
 
+    @Test func missingRequiredFarSpeakerPersistsFailedCall() async throws {
+        let store = MemoryStore()
+        try await store.migrate()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-missing-far-\(UUID().uuidString).caf")
+        try ChannelAudio.writeStereoCAF(
+            near: Data(count: 3200),
+            far: Data(count: 3200),
+            sampleRate: 16_000,
+            to: url
+        )
+        let priya = SpeakerIdentity.enroll(
+            displayName: "Priya",
+            embedding: [0, 1, 0],
+            embeddingModel: EmbeddingModel.weSpeakerV2
+        )
+        let call = Call(
+            source: .fileImport,
+            startedAt: Date(),
+            audioPath: url.path,
+            sttProvider: .appleSpeech
+        )
+        let spine = LocalTranscriptionSpine(
+            speech: ScriptedPCMTranscriber(
+                near: [RawSegment(start: 0, end: 1, text: "hello", channel: .near)],
+                far: []
+            ),
+            diarizer: ScriptedDiarizer(clusters: []),
+            store: store
+        )
+
+        do {
+            _ = try await spine.process(
+                cafURL: url,
+                call: call,
+                profiles: [priya],
+                requiredFarSpeakerID: priya.id
+            )
+            Issue.record("Expected required far speaker failure")
+        } catch {}
+
+        let persisted = try await store.fetchCall(id: call.id)
+        #expect(persisted?.status == .failed)
+        #expect(persisted?.errorStage == "attribution")
+        #expect(persisted?.error?.isEmpty == false)
+    }
+
     @Test func spineUsesDecodedCAFSampleRate() async throws {
         let store = MemoryStore()
         try await store.migrate()

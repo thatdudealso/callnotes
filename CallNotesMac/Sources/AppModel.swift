@@ -254,15 +254,18 @@ final class AppModel {
             diarizer: diarizer,
             store: store
         )
+        guard let priyaProfileID = profiles.first(where: {
+            $0.contactIdentifier == SampleCallFixture.priyaContactIdentifier
+        })?.id else {
+            throw SampleCallError.missingPriyaProfile
+        }
         let processed = try await spine.process(
             cafURL: cafURL,
             call: call,
             profiles: profiles,
-            referenceTurns: SampleCallFixture.referenceTurns
+            referenceTurns: SampleCallFixture.referenceTurns,
+            requiredFarSpeakerID: priyaProfileID
         )
-        guard processed.turns.contains(where: { !$0.text.isEmpty }) else {
-            throw SampleCallError.emptyTranscription
-        }
         return processed
     }
 
@@ -333,8 +336,14 @@ enum SampleCallFixture {
 
 private enum SampleCallError: LocalizedError {
     case emptyTranscription
+    case missingPriyaProfile
 
     var errorDescription: String? {
-        "Apple SpeechAnalyzer or FluidAudio returned no sample results."
+        switch self {
+        case .emptyTranscription:
+            "Apple SpeechAnalyzer or FluidAudio returned no sample results."
+        case .missingPriyaProfile:
+            "The sample Priya profile is unavailable."
+        }
     }
 }
