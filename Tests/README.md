@@ -12,7 +12,8 @@ Cross-target test harnesses land here as the phases that need them arrive
   host timestamps.
 - golden-file provider tests and the diarization/identity accuracy harness
   (Phase 2),
-- Meta provider integration tests (Phase 4),
+- Meta live API integration tests (Phase 4) live in the package instead, as
+  `MetaLiveIntegrationTests` (opt-in `CALLNOTES_META=1`; see `AGENTS.md`),
 - live Ollama notes generation for both pinned models (`CALLNOTES_OLLAMA=1`),
 - backup/restore and failure-injection scenarios (Phase 7).
 
