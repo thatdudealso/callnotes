@@ -183,13 +183,29 @@ struct CaptureHarness {
         let written = try await capture.stop()
 
         let startTimes = capture.channelStartTimes
+        let timing = capture.debugTiming
+        let ioLatency = capture.ioLatency
+        print(ioLatency.summary)
+        print(formatTiming(timing))
         let channels = try StereoCAFReader.read(written)
         let analysis = CaptureAlignment.analyze(
             near: channels.near,
             far: channels.far,
             nearStartTime: startTimes.near,
-            farStartTime: startTimes.far
+            farStartTime: startTimes.far,
+            latency: capture.latencyCompensation
         )
+        func channelRMS(_ samples: [Int16]) -> Float {
+            guard !samples.isEmpty else { return 0 }
+            var sum: Float = 0
+            for sample in samples {
+                let v = Float(sample)
+                sum += v * v
+            }
+            return sqrt(sum / Float(samples.count))
+        }
+        print("  near RMS: \(channelRMS(channels.near))  far RMS: \(channelRMS(channels.far))  threshold: \(AudioConstants.silenceRMSThreshold)")
+        print("  mixer start near=\(startTimes.near.map { String(format: "%.4f", $0) } ?? "nil") far=\(startTimes.far.map { String(format: "%.4f", $0) } ?? "nil")")
         return CaptureHarnessResult(
             cafURL: written,
             farSource: capture.farSource.rawValue,
@@ -199,6 +215,39 @@ struct CaptureHarness {
             aligned: analysis.isAligned,
             frames: channels.near.count
         )
+    }
+
+    private func formatTiming(_ timing: AudioCapture.StreamTiming) -> String {
+        func ms(_ host: UInt64) -> Double { AVHostTimePublic.seconds(host) * 1_000 }
+        let origin = timing.tapStartedHost
+        func rel(_ host: UInt64?) -> String {
+            guard let host, origin != 0 else { return "n/a" }
+            return String(format: "%+.1f ms", ms(host) - ms(origin))
+        }
+        let rawLag: String
+        if let far = timing.firstFarHost, let near = timing.firstNearHost {
+            rawLag = String(format: "%.1f ms", ms(far) - ms(near))
+        } else {
+            rawLag = "n/a"
+        }
+        let callbackLag: String
+        if let far = timing.firstFarCallbackHost, let near = timing.firstNearCallbackHost {
+            callbackLag = String(format: "%.1f ms", ms(far) - ms(near))
+        } else {
+            callbackLag = "n/a"
+        }
+        return """
+        Stream timing (0 = tap start)
+          tap start: 0.0 ms
+          mic start: \(rel(timing.micStartedHost))
+          first far host: \(rel(timing.firstFarHost)) frames=\(timing.firstFarFrames)
+          first far callback: \(rel(timing.firstFarCallbackHost))
+          first near host: \(rel(timing.firstNearHost)) frames=\(timing.firstNearFrames)
+          first near callback: \(rel(timing.firstNearCallbackHost))
+          raw host lag (far-near): \(rawLag)
+          callback lag (far-near): \(callbackLag)
+          mixer shift: \(timing.alignShift) samples farTrim=\(timing.farTrimmed) farPad=\(timing.farPadded) nearPad=\(timing.nearPadded)
+        """
     }
 
     private func requestMicrophone() throws {
@@ -216,6 +265,15 @@ struct CaptureHarness {
                 """
             )
         }
+    }
+}
+
+private enum AVHostTimePublic {
+    static func seconds(_ hostTime: UInt64) -> TimeInterval {
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        let nanos = Double(hostTime) * Double(info.numer) / Double(info.denom)
+        return nanos / 1_000_000_000
     }
 }
 

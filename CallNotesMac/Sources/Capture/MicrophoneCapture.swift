@@ -19,6 +19,10 @@ final class MicrophoneCapture: @unchecked Sendable {
     private(set) var isRunning = false
     private(set) var voiceProcessingEnabled = false
 
+    var inputPresentationLatency: TimeInterval {
+        engine.inputNode.presentationLatency
+    }
+
     func start(enableVoiceProcessing: Bool = true) throws {
         guard !isRunning else { throw CaptureError.alreadyRunning }
         let input = engine.inputNode
@@ -39,6 +43,7 @@ final class MicrophoneCapture: @unchecked Sendable {
         }
         let format = input.outputFormat(forBus: 0)
         let channels = Int(max(1, format.channelCount))
+        logger.info("Mic format \(format.sampleRate, format: .fixed(precision: 0)) Hz \(channels) ch")
         input.removeTap(onBus: 0)
         input.installTap(onBus: 0, bufferSize: 1_024, format: format) { [weak self] buffer, time in
             self?.handle(buffer: buffer, time: time, channels: channels)
@@ -47,6 +52,7 @@ final class MicrophoneCapture: @unchecked Sendable {
         try engine.start()
         isRunning = true
         started = true
+        logger.info("Mic engine started")
     }
 
     func stop() {

@@ -27,5 +27,7 @@ public enum AudioConstants {
     /// Capture harness: near/far timestamps must agree within this window.
     public static let alignmentTolerance: TimeInterval = 0.050
     /// RMS below this Int16 amplitude is treated as a silent channel.
-    public static let silenceRMSThreshold: Float = 200
+    /// 80 is well above ADC idle noise and below typical speaker-to-mic
+    /// coupling of the capture harness tone (~150 on built-in hardware).
+    public static let silenceRMSThreshold: Float = 80
 }
