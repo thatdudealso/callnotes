@@ -93,7 +93,7 @@ public struct OllamaClient: OllamaServing, OllamaTokenCounting {
     }
 
     public func tokenCount(model: String, messages: [OllamaChatMessage]) async throws -> Int {
-        let prompt = try await renderedPrompt(model: model, messages: messages)
+        let rendered = try await renderedPrompt(model: model, messages: messages)
         let url = baseURL.appending(path: "/api/tokenize")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -101,14 +101,19 @@ public struct OllamaClient: OllamaServing, OllamaTokenCounting {
         request.timeoutInterval = 300
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": model,
-            "content": prompt,
+            "content": rendered.prompt,
         ])
-        let (data, response) = try await session.data(for: request)
-        try Self.throwIfHTTPError(response, data: data)
-        return try Self.decodeTokenCount(data)
+        do {
+            let (data, response) = try await session.data(for: request)
+            try Self.throwIfHTTPError(response, data: data)
+            return try Self.decodeTokenCount(data)
+        } catch {
+            guard let modelFile = rendered.modelFile else { throw error }
+            return try GGUFTokenizer(modelFile: modelFile).tokenCount(rendered.prompt)
+        }
     }
 
-    private func renderedPrompt(model: String, messages: [OllamaChatMessage]) async throws -> String {
+    private func renderedPrompt(model: String, messages: [OllamaChatMessage]) async throws -> RenderedPrompt {
         let url = baseURL.appending(path: "/api/show")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -117,8 +122,11 @@ public struct OllamaClient: OllamaServing, OllamaTokenCounting {
         request.httpBody = try JSONSerialization.data(withJSONObject: ["model": model])
         let (data, response) = try await session.data(for: request)
         try Self.throwIfHTTPError(response, data: data)
-        let template = try JSONDecoder().decode(ShowResponse.self, from: data).template
-        return try Self.render(messages: messages, with: template)
+        let show = try JSONDecoder().decode(ShowResponse.self, from: data)
+        return RenderedPrompt(
+            prompt: try Self.render(messages: messages, with: show.template),
+            modelFile: show.modelfile.flatMap(Self.ggufModelFile)
+        )
     }
 
     public func health(of model: PinnedNotesModel) async -> ProviderHealth {
@@ -202,6 +210,19 @@ public struct OllamaClient: OllamaServing, OllamaTokenCounting {
         return text
     }
 
+    private static func ggufModelFile(_ modelfile: String) -> URL? {
+        for line in modelfile.split(separator: "\n") {
+            guard line.hasPrefix("FROM ") else { continue }
+            let path = line.dropFirst("FROM ".count).trimmingCharacters(in: .whitespaces)
+            guard path.hasPrefix("/") else { continue }
+            let url = URL(fileURLWithPath: path)
+            if FileManager.default.fileExists(atPath: url.path) {
+                return url
+            }
+        }
+        return nil
+    }
+
     private static func throwIfHTTPError(_ response: URLResponse, data: Data) throws {
         guard let http = response as? HTTPURLResponse else { return }
         guard (200..<300).contains(http.statusCode) else {
@@ -242,5 +263,11 @@ public struct OllamaClient: OllamaServing, OllamaTokenCounting {
 
     private struct ShowResponse: Decodable {
         var template: String
+        var modelfile: String?
+    }
+
+    private struct RenderedPrompt {
+        var prompt: String
+        var modelFile: URL?
     }
 }

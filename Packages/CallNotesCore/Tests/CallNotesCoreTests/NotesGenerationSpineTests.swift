@@ -452,6 +452,25 @@ import Testing
         #expect(rendered == "System instructions\nTranscript content")
     }
 
+    @Test func localGGUFTokenizerCountsWhenNativeEndpointIsUnavailable() async throws {
+        let file = FileManager.default.temporaryDirectory.appending(path: "CallNotes-tokenizer-\(UUID().uuidString).gguf")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try GGUFTokenizerFixture.write(to: file)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [GGUFFallbackURLProtocol.self]
+        let client = OllamaClient(
+            baseURL: URL(string: "http://gguf-fallback.test")!,
+            session: URLSession(configuration: configuration)
+        )
+
+        let count = try await client.tokenCount(
+            model: file.path,
+            messages: [OllamaChatMessage(role: "user", content: "hello hello")]
+        )
+
+        #expect(count == 2)
+    }
+
     @Test func nativeChatResponseStripsTrailingStopToken() throws {
         let data = Data(
             """
@@ -711,7 +730,7 @@ private final class TokenizeOnlyURLProtocol: URLProtocol {
 
     override func stopLoading() {}
 
-    private static func requestBody(_ request: URLRequest) -> Data? {
+    fileprivate static func requestBody(_ request: URLRequest) -> Data? {
         if let body = request.httpBody {
             return body
         }
@@ -729,6 +748,79 @@ private final class TokenizeOnlyURLProtocol: URLProtocol {
         }
         return data
     }
+}
+
+private enum GGUFTokenizerFixture {
+    static func write(to url: URL) throws {
+        var data = Data("GGUF".utf8)
+        append(UInt32(3), to: &data)
+        append(UInt64(0), to: &data)
+        append(UInt64(3), to: &data)
+        append("tokenizer.ggml.tokens", to: &data)
+        append(UInt32(9), to: &data)
+        append(UInt32(8), to: &data)
+        let tokens = ["h", "e", "l", "o", "Ġ", "he", "hel", "hell", "hello", "Ġhello"]
+        append(UInt64(tokens.count), to: &data)
+        for token in tokens { append(token, to: &data) }
+        append("tokenizer.ggml.merges", to: &data)
+        append(UInt32(9), to: &data)
+        append(UInt32(8), to: &data)
+        let merges = ["h e", "he l", "hel l", "hell o", "Ġ hello"]
+        append(UInt64(merges.count), to: &data)
+        for merge in merges { append(merge, to: &data) }
+        append("tokenizer.ggml.add_bos_token", to: &data)
+        append(UInt32(7), to: &data)
+        data.append(0)
+        try data.write(to: url)
+    }
+
+    private static func append(_ string: String, to data: inout Data) {
+        append(UInt64(string.utf8.count), to: &data)
+        data.append(contentsOf: string.utf8)
+    }
+
+    private static func append<T: FixedWidthInteger>(_ value: T, to data: inout Data) {
+        var value = value.littleEndian
+        withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
+    }
+}
+
+private final class GGUFFallbackURLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.host == "gguf-fallback.test"
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        let status: Int
+        let body: Data
+        if request.url?.path == "/api/show",
+            let requestBody = TokenizeOnlyURLProtocol.requestBody(request),
+            let payload = try? JSONSerialization.jsonObject(with: requestBody) as? [String: Any],
+            let modelFile = payload["model"] as? String,
+            let data = try? JSONSerialization.data(withJSONObject: [
+                "template": "{{ .Prompt }}",
+                "modelfile": "FROM \(modelFile)",
+            ])
+        {
+            status = 200
+            body = data
+        } else {
+            status = 404
+            body = Data("page not found".utf8)
+        }
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
 
 actor ScriptedOllamaClient: OllamaServing, OllamaTokenCounting {
