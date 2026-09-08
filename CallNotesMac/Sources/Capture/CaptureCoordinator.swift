@@ -44,6 +44,14 @@ final class CaptureCoordinator {
         capture.onMixedPCM = handler
     }
 
+    func stopLiveCapture() async -> URL? {
+        if detector.latest.snapshot.isCapturing {
+            detector.manualStop()
+        }
+        await captureTransition?.value
+        return lastCaptureURL
+    }
+
     private func handle(_ status: CallDetector.Status) {
         let phase = status.snapshot.phase
         switch (previousPhase, phase) {
@@ -96,6 +104,7 @@ final class CaptureCoordinator {
         do {
             let callID = UUID()
             activeCallID = callID
+            lastCaptureURL = nil
             let url = try CallAudioPaths.cafURL(callID: callID)
             try await capture.start(
                 AudioCapture.Configuration(

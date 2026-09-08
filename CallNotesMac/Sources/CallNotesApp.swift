@@ -51,7 +51,6 @@ struct MenuBarContentView: View {
         Group {
             Button(model.recordingState == .recording ? "Stop" : "Record Now") {
                 if model.recordingState == .recording {
-                    coordinator.toggleManual()
                     Task { await model.stopLiveSession() }
                 } else {
                     Task {
@@ -108,6 +107,9 @@ struct MenuBarContentView: View {
                 Task { @MainActor in
                     try? await model.appendLivePCM(pcm)
                 }
+            }
+            model.setCaptureStopHandler {
+                await coordinator.stopLiveCapture()
             }
             coordinator.start()
         }

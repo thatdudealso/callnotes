@@ -159,6 +159,14 @@ struct CallDetailView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(call.counterpartyName ?? "Untitled call")
                     .font(.title2.weight(.semibold))
+                TextField(
+                    "Counterparty",
+                    text: Binding(
+                        get: { call.counterpartyName ?? "" },
+                        set: { model.updateCounterpartyName(for: call.id, name: $0) }
+                    )
+                )
+                .textFieldStyle(.roundedBorder)
                 HStack(spacing: 12) {
                     Text(call.startedAt.formatted(date: .abbreviated, time: .shortened))
                     Text(call.source.rawValue.replacingOccurrences(of: "_", with: " "))

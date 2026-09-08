@@ -27,6 +27,7 @@ final class AppModel {
     private var liveResultsTask: Task<Void, Never>?
     private var liveSegments: [RawSegment] = []
     private var instantCallAtHangUp: Call?
+    private var captureStopHandler: (@MainActor () async -> URL?)?
     private var isStartingLiveSession = false
     private var isProcessingSample = false
 
@@ -265,9 +266,11 @@ final class AppModel {
             live.engine = engine
             live.isOffDevice = engine == .metaMuse
             if !forSamplePlayback {
+                let counterpartyName = await suggestedCounterpartyName()
                 let call = Call(
                     source: .macManual,
                     startedAt: Date(),
+                    counterpartyName: counterpartyName,
                     audioPath: "",
                     sttProvider: engine
                 )
@@ -308,7 +311,7 @@ final class AppModel {
         try await liveSession?.append(pcm: pcm)
     }
 
-    func finishLiveSession() async {
+    func finishLiveSession(captureURL: URL? = nil) async {
         let finishedSession = liveSession
         defer {
             liveSession = nil
@@ -328,6 +331,7 @@ final class AppModel {
             call.metaBilledSec += billedSeconds
             call.endedAt = Date()
             call.durationSec = max(0, Int(call.endedAt!.timeIntervalSince(call.startedAt).rounded(.down)))
+            if let captureURL { call.audioPath = captureURL.path }
             call.status = .transcribed
             if let session = finishedSession as? MetaFallbackSession, await session.isUsingFallback() {
                 call.sttProvider = .appleSpeech
@@ -342,7 +346,37 @@ final class AppModel {
     }
 
     func stopLiveSession() async {
-        await finishLiveSession()
+        let captureURL = await captureStopHandler?()
+        await finishLiveSession(captureURL: captureURL)
+    }
+
+    func setCaptureStopHandler(_ handler: @escaping @MainActor () async -> URL?) {
+        captureStopHandler = handler
+    }
+
+    func updateCounterpartyName(for callID: UUID, name: String) {
+        guard let index = calls.firstIndex(where: { $0.id == callID }) else { return }
+        let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        calls[index].counterpartyName = normalized.isEmpty ? nil : normalized
+        let call = calls[index]
+        if instantCallAtHangUp?.id == callID {
+            instantCallAtHangUp = call
+        }
+        Task {
+            do {
+                try await store.upsertCall(call)
+            } catch {
+                statusMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func suggestedCounterpartyName() async -> String? {
+        guard let profiles = try? await store.fetchSpeakerProfiles() else { return nil }
+        let candidates = profiles.filter {
+            !$0.isOwner && !$0.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return candidates.count == 1 ? candidates[0].displayName : nil
     }
 
     /// The detail view uses this for "Re-transcribe with Meta". A Meta file
