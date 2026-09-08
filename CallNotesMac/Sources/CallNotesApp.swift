@@ -13,8 +13,7 @@ struct CallNotesApp: App {
         }
 
         Window("CallNotes", id: "main") {
-            HistorySplitView(model: model)
-                .frame(minWidth: 720, minHeight: 420)
+            OnboardingGate(model: model)
         }
 
         Window("Live", id: "pill") {
@@ -29,6 +28,13 @@ struct CallNotesApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
+
+        Settings {
+            TabView {
+                MetaEngineSettingsView(appModel: model)
+                    .tabItem { Label("Engines", systemImage: "cpu") }
+            }
+        }
     }
 
 }
@@ -37,6 +43,9 @@ struct MenuBarContentView: View {
     @Bindable var coordinator: CaptureCoordinator
     @Bindable var model: AppModel
     @Environment(\.openWindow) private var openWindow
+    @AppStorage("engine_for_next_call") private var engineForNextCall = "default"
+    @AppStorage("meta_privacy_acknowledged") private var privacyAcknowledged = false
+    @State private var showMetaDisclosure = false
 
     var body: some View {
         Group {
@@ -46,7 +55,12 @@ struct MenuBarContentView: View {
                 } else {
                     Task {
                         do {
-                            try await model.startLiveSession()
+                            let override: STTProviderID? = switch engineForNextCall {
+                            case "meta": .metaMuse
+                            case "local": .appleSpeech
+                            default: nil
+                            }
+                            try await model.startLiveSession(override: override)
                         } catch {
                             model.statusMessage = error.localizedDescription
                         }
@@ -62,6 +76,17 @@ struct MenuBarContentView: View {
                 Task { await model.processSampleCall() }
             }
             .disabled(!model.canProcessSampleCall)
+            Menu("Engine for next call") {
+                Button("Default") { engineForNextCall = "default" }
+                Button("Local") { engineForNextCall = "local" }
+                Button("Meta") {
+                    if privacyAcknowledged {
+                        engineForNextCall = "meta"
+                    } else {
+                        showMetaDisclosure = true
+                    }
+                }
+            }
             Button("Open CallNotes") {
                 openWindow(id: "main")
                 NSApp.activate()
@@ -77,6 +102,39 @@ struct MenuBarContentView: View {
         }
         .onAppear {
             coordinator.start()
+        }
+        .confirmationDialog(
+            "Send audio to Meta?",
+            isPresented: $showMetaDisclosure,
+            titleVisibility: .visible
+        ) {
+            Button("Use Meta") {
+                privacyAcknowledged = true
+                engineForNextCall = "meta"
+            }
+            Button("Keep Local", role: .cancel) {
+                engineForNextCall = "local"
+            }
+        } message: {
+            Text("Audio for this call will be sent to Meta for transcription. Local transcription remains available if Meta fails.")
+        }
+    }
+}
+
+struct OnboardingGate: View {
+    @Bindable var model: AppModel
+    @AppStorage("onboarding_complete") private var onboardingComplete = false
+
+    var body: some View {
+        Group {
+            if onboardingComplete {
+                HistorySplitView(model: model)
+                    .frame(minWidth: 720, minHeight: 420)
+            } else {
+                SetupWizardView {
+                    onboardingComplete = true
+                }
+            }
         }
     }
 }

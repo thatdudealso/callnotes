@@ -12,13 +12,24 @@
 //  removed Megaphone-specific legacy locale aliases.
 //
 
-import AVFoundation
+@preconcurrency import AVFoundation
 import Combine
 import Foundation
 import Speech
 import os.log
 
 private let speechLog = OSLog(subsystem: "com.thatdudealso.callnotes", category: "SpeechAnalyzer")
+
+/// AVAudioConverter invokes this source closure synchronously for one buffer.
+/// The wrapper confines the checked-externally Sendable boundary to that API.
+private final class SpeechServiceConversionInput: @unchecked Sendable {
+    let source: AVAudioPCMBuffer
+    var consumed = false
+
+    init(_ source: AVAudioPCMBuffer) {
+        self.source = source
+    }
+}
 
 // MARK: - Errors
 
@@ -464,16 +475,16 @@ public final class SpeechAnalyzerStreamingSession: @unchecked Sendable {
             return
         }
 
-        var consumed = false
+        let inputState = SpeechServiceConversionInput(sourceBuffer)
         var conversionError: NSError?
-        let status = converter.convert(to: converted, error: &conversionError) { _, outStatus in
-            if consumed {
+        let status = converter.convert(to: converted, error: &conversionError) { [inputState] _, outStatus in
+            if inputState.consumed {
                 outStatus.pointee = .noDataNow
                 return nil
             }
-            consumed = true
+            inputState.consumed = true
             outStatus.pointee = .haveData
-            return sourceBuffer
+            return inputState.source
         }
         if status == .error {
             os_log(.error, log: speechLog, "audio conversion failed: %{public}@",

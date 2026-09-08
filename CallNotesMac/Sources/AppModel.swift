@@ -48,6 +48,21 @@ final class AppModel {
         selectedCallID != nil && selectedCallID == notesGeneratingCallID
     }
 
+    var metaBilledSeconds: Int {
+        calls.reduce(0) { $0 + $1.metaBilledSec }
+    }
+
+    var metaBilledDuration: String {
+        let minutes = metaBilledSeconds / 60
+        let seconds = metaBilledSeconds % 60
+        return "\(minutes)m \(seconds)s"
+    }
+
+    var metaCost: String {
+        MetaCostMeter.costDollars(billedSeconds: metaBilledSeconds)
+            .formatted(.currency(code: "USD"))
+    }
+
     var canProcessSampleCall: Bool {
         isStoreInitialized
             && storeBackendName == "postgres"
@@ -156,7 +171,7 @@ final class AppModel {
             try await store.upsertCall(call)
             instantCallAtHangUp = nil
             instantCallAtHangUp = call
-            try await startLiveSession(forSamplePlayback: true)
+            try await startLiveSession(forSamplePlayback: true, override: .appleSpeech)
             try await playFixture(cafURL: fixture.cafURL)
             let diarizer = FluidDiarizer()
             let priyaEmbedding = try await SampleCallFixture.priyaEmbedding(
@@ -230,7 +245,10 @@ final class AppModel {
         }
     }
 
-    func startLiveSession(forSamplePlayback: Bool = false) async throws {
+    func startLiveSession(
+        forSamplePlayback: Bool = false,
+        override perCallOverride: STTProviderID? = nil
+    ) async throws {
         guard liveSession == nil,
             !isStartingLiveSession,
             recordingState == .idle || (forSamplePlayback && isProcessingSample)
@@ -239,14 +257,22 @@ final class AppModel {
         }
         isStartingLiveSession = true
         do {
-            let session = try await speech.startSession(config: STTSessionConfig())
+            let provider = try configuredProvider(override: perCallOverride)
+            let session = try await provider.provider.startSession(config: STTSessionConfig())
             liveSession = session
             liveSegments = []
+            live.engine = provider.requestedID
+            live.isOffDevice = provider.requestedID == .metaMuse && !(session is AppleSpeechSession)
             recordingState = .recording
             liveResultsTask = Task { [weak self] in
                 do {
                     for try await segment in session.results {
                         guard !Task.isCancelled, let self else { return }
+                        if let fallback = session as? MetaFallbackSession, await fallback.isUsingFallback() {
+                            live.engine = .appleSpeech
+                            live.isOffDevice = false
+                            statusMessage = "Meta became unavailable. Continuing with local transcription."
+                        }
                         live.elapsed = max(live.elapsed, segment.end)
                         live.currentSpeakerName = segment.channel == .far ? "Speaker 2" : "Me"
                         live.lastLine = segment.text
@@ -294,6 +320,53 @@ final class AppModel {
         await finishLiveSession()
     }
 
+    /// The detail view uses this for "Re-transcribe with Meta". A Meta file
+    /// failure intentionally falls back to the local provider and leaves a
+    /// non-blocking explanation rather than marking a captured call failed.
+    func retranscribeSelectedCall(withMeta: Bool) async {
+        guard var call = selectedCall else { return }
+        statusMessage = withMeta ? "Transcribing with Meta..." : "Transcribing locally..."
+        do {
+            if withMeta {
+                let configuration = try metaConfiguration()
+                let result = try await MetaFileProvider(configuration: configuration).transcribeWithReceipt(
+                    fileURL: URL(fileURLWithPath: call.audioPath),
+                    config: STTSessionConfig()
+                )
+                try await persistRetranscription(result.segments, provider: .metaMuse, call: &call)
+                call.metaBilledSec += result.billedSeconds
+                try await store.upsertCall(call)
+                statusMessage = "Re-transcribed with Meta. \(result.billedSeconds)s billed."
+            } else {
+                let segments = try await speech.transcribe(
+                    fileURL: URL(fileURLWithPath: call.audioPath),
+                    config: STTSessionConfig()
+                )
+                try await persistRetranscription(segments, provider: .appleSpeech, call: &call)
+                statusMessage = "Re-transcribed locally."
+            }
+            try await refresh()
+            await select(call)
+        } catch {
+            guard withMeta else {
+                statusMessage = error.localizedDescription
+                return
+            }
+            do {
+                let segments = try await speech.transcribe(
+                    fileURL: URL(fileURLWithPath: call.audioPath),
+                    config: STTSessionConfig()
+                )
+                try await persistRetranscription(segments, provider: .appleSpeech, call: &call)
+                try await refresh()
+                await select(call)
+                statusMessage = "Meta was unavailable. Re-transcribed locally instead."
+            } catch {
+                statusMessage = error.localizedDescription
+            }
+        }
+    }
+
     private func playFixture(cafURL: URL) async throws {
         do {
             let split = try ChannelAudio.splitStereoCAF(url: cafURL)
@@ -334,6 +407,61 @@ final class AppModel {
             requiredFarSpeakerID: priyaProfileID
         )
         return processed
+    }
+
+    private func configuredProvider(
+        override perCallOverride: STTProviderID?
+    ) throws -> (provider: any STTProvider, requestedID: STTProviderID) {
+        let storedDefault = UserDefaults.standard.string(forKey: "default_engine")
+        let configuredDefault: STTProviderID? = storedDefault == "meta" ? .metaMuse : .appleSpeech
+        let requestedID = EngineSelection.resolve(
+            override: perCallOverride,
+            configuredDefault: configuredDefault
+        )
+        guard requestedID == .metaMuse else { return (speech, .appleSpeech) }
+        do {
+            let meta = MetaRealtimeProvider(configuration: try metaConfiguration())
+            return (MetaFallbackProvider(meta: meta, local: speech), .metaMuse)
+        } catch {
+            statusMessage = "Meta is not configured. Continuing with local transcription."
+            return (speech, .appleSpeech)
+        }
+    }
+
+    private func metaConfiguration() throws -> MetaTranscriptionConfiguration {
+        guard let key = try MetaAPIKeyKeychain.load(), !key.isEmpty else {
+            throw MetaTranscriptionError.missingAPIKey
+        }
+        return MetaTranscriptionConfiguration(
+            apiKey: key,
+            zeroDataRetention: UserDefaults.standard.object(forKey: "meta_zdr_enabled") as? Bool ?? true
+        )
+    }
+
+    private func persistRetranscription(
+        _ rawSegments: [RawSegment],
+        provider: STTProviderID,
+        call: inout Call
+    ) async throws {
+        let segments = rawSegments.enumerated().map { index, raw in
+            Segment(
+                callID: call.id,
+                seq: index,
+                startSec: raw.start,
+                endSec: raw.end,
+                channel: raw.channel ?? .mixed,
+                clusterKey: raw.speakerTag,
+                text: raw.text,
+                words: raw.words,
+                provider: provider
+            )
+        }
+        try await store.replaceSegments(callID: call.id, provider: provider, segments)
+        call.sttProvider = provider
+        call.status = .transcribed
+        call.error = nil
+        call.errorStage = nil
+        try await store.upsertCall(call)
     }
 
     func regenerateNotes() async {

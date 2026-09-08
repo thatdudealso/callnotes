@@ -1,4 +1,4 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import CoreMedia
 import Foundation
 import Speech
@@ -208,16 +208,16 @@ public final class AppleSpeechSession: STTSession, @unchecked Sendable {
         ) else {
             return
         }
-        var consumed = false
+        let inputState = AppleSpeechConversionInput(sourceBuffer)
         var conversionError: NSError?
-        let status = converter.convert(to: converted, error: &conversionError) { _, outStatus in
-            if consumed {
+        let status = converter.convert(to: converted, error: &conversionError) { [inputState] _, outStatus in
+            if inputState.consumed {
                 outStatus.pointee = .noDataNow
                 return nil
             }
-            consumed = true
+            inputState.consumed = true
             outStatus.pointee = .haveData
-            return sourceBuffer
+            return inputState.source
         }
         if status == .error {
             os_log(
@@ -251,6 +251,17 @@ public final class AppleSpeechSession: STTSession, @unchecked Sendable {
             continuation.finish(throwing: error)
             throw error
         }
+    }
+}
+
+/// AVAudioConverter invokes this source closure synchronously for one buffer.
+/// The wrapper confines the checked-externally Sendable boundary to that API.
+private final class AppleSpeechConversionInput: @unchecked Sendable {
+    let source: AVAudioPCMBuffer
+    var consumed = false
+
+    init(_ source: AVAudioPCMBuffer) {
+        self.source = source
     }
 }
 

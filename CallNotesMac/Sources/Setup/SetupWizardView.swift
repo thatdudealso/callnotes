@@ -95,7 +95,13 @@ struct SetupWizardView: View {
     @StateObject private var model = SetupWizardModel()
     @State private var currentStep = SetupStep.welcome
     @AppStorage("default_engine") private var defaultEngine = "local"
+    @AppStorage("meta_zdr_enabled") private var metaZDREnabled = true
+    @AppStorage("meta_privacy_acknowledged") private var metaPrivacyAcknowledged = false
     @AppStorage("consent_policy") private var consentPolicy = "announce"
+    @State private var metaAPIKey = ""
+    @State private var metaKeyStored = false
+    @State private var showMetaDisclosure = false
+    @State private var metaKeyError: String?
 
     private let totalSteps: [SetupStep] = SetupStep.allCases
 
@@ -165,9 +171,25 @@ struct SetupWizardView: View {
         .onAppear {
             model.refreshMicPermission()
             model.refreshSystemAudioPermission()
+            metaKeyStored = (try? MetaAPIKeyKeychain.load()) != nil
         }
         .onDisappear {
             model.stopSystemAudioPolling()
+        }
+        .confirmationDialog(
+            "Send audio to Meta?",
+            isPresented: $showMetaDisclosure,
+            titleVisibility: .visible
+        ) {
+            Button("Use Meta") {
+                metaPrivacyAcknowledged = true
+                defaultEngine = "meta"
+            }
+            Button("Keep Local", role: .cancel) {
+                defaultEngine = "local"
+            }
+        } message: {
+            Text("Audio for this call will be sent to Meta for transcription. Local transcription remains available if Meta fails.")
         }
     }
 
@@ -336,7 +358,7 @@ struct SetupWizardView: View {
                 .font(.title)
                 .fontWeight(.bold)
 
-            Text("Choose which engine CallNotes uses for transcription and summaries. You can change this later in Settings.")
+            Text("Choose which engine CallNotes uses for transcription. You can change this later in Settings.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -352,14 +374,58 @@ struct SetupWizardView: View {
                 }
                 SetupChoiceRow(
                     title: "Meta",
-                    subtitle: "Uses the Meta engine for transcription and summaries.",
+                    subtitle: "Cloud transcription with Meta. Local transcription automatically takes over if Meta fails.",
                     icon: "cloud.fill",
                     isSelected: defaultEngine == "meta"
                 ) {
-                    defaultEngine = "meta"
+                    if metaPrivacyAcknowledged {
+                        defaultEngine = "meta"
+                    } else {
+                        showMetaDisclosure = true
+                    }
                 }
             }
             .padding(.top, 6)
+
+            if defaultEngine == "meta" {
+                VStack(alignment: .leading, spacing: 8) {
+                    SecureField(metaKeyStored ? "New Meta Model API key (stored key is hidden)" : "Meta Model API key", text: $metaAPIKey)
+                    HStack {
+                        Button(metaKeyStored ? "Replace key" : "Save key") {
+                            saveMetaKey()
+                        }
+                        .disabled(metaAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        if metaKeyStored {
+                            Text("Stored in Keychain")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Toggle("Zero-data retention", isOn: $metaZDREnabled)
+                    Text("CallNotes enables ZDR on every Meta realtime session.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let metaKeyError {
+                        Text(metaKeyError)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
+                .padding(12)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .cornerRadius(8)
+            }
+        }
+    }
+
+    private func saveMetaKey() {
+        do {
+            try MetaAPIKeyKeychain.save(metaAPIKey.trimmingCharacters(in: .whitespacesAndNewlines))
+            metaAPIKey = ""
+            metaKeyStored = true
+            metaKeyError = nil
+        } catch {
+            metaKeyError = error.localizedDescription
         }
     }
 
