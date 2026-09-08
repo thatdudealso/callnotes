@@ -11,13 +11,16 @@ public struct MetaRealtimeProvider: STTProvider {
 
     public let configuration: MetaTranscriptionConfiguration
     public let endpoint: URL
+    public let speakerStitching: MetaRealtimeSpeakerStitching?
 
     public init(
         configuration: MetaTranscriptionConfiguration,
-        endpoint: URL = URL(string: "wss://api.meta.ai/v1/asr/realtime")!
+        endpoint: URL = URL(string: "wss://api.meta.ai/v1/asr/realtime")!,
+        speakerStitching: MetaRealtimeSpeakerStitching? = nil
     ) {
         self.configuration = configuration
         self.endpoint = endpoint
+        self.speakerStitching = speakerStitching
     }
 
     public func healthCheck() async -> ProviderHealth {
@@ -30,10 +33,11 @@ public struct MetaRealtimeProvider: STTProvider {
         guard !configuration.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw MetaTranscriptionError.missingAPIKey
         }
-        let session = MetaRealtimeSession(
+        let session = try MetaRealtimeSession(
             configuration: configuration,
             sessionConfig: config,
-            endpoint: endpoint
+            endpoint: endpoint,
+            speakerStitching: speakerStitching
         )
         try await session.start()
         return session
@@ -52,6 +56,7 @@ public actor MetaRealtimeSession: STTSession {
     private let configuration: MetaTranscriptionConfiguration
     private let sessionConfig: STTSessionConfig
     private let endpoint: URL
+    private let speakerStitching: MetaRealtimeSpeakerStitching?
 
     private var socket: URLSessionWebSocketTask?
     private var receiverTask: Task<Void, Never>?
@@ -65,6 +70,10 @@ public actor MetaRealtimeSession: STTSession {
     private var replayBuffer: [Data] = []
     private var replayBufferBytes = 0
     private var eventReducer = MetaRealtimeEventReducer(timelineOffset: 0)
+    private var finalizedHistory: [RawSegment] = []
+    private var resampler: MetaPCMResampler
+    private var sessionSpeakerTags: [String: String] = [:]
+    private var crossSessionSpeakerEmbeddings: [UUID: [Float]] = [:]
     private var finished = false
 
     /// Reconnect before Meta's 60-minute limit, preserving five seconds of
@@ -75,11 +84,14 @@ public actor MetaRealtimeSession: STTSession {
     init(
         configuration: MetaTranscriptionConfiguration,
         sessionConfig: STTSessionConfig,
-        endpoint: URL
-    ) {
+        endpoint: URL,
+        speakerStitching: MetaRealtimeSpeakerStitching? = nil
+    ) throws {
         self.configuration = configuration
         self.sessionConfig = sessionConfig
         self.endpoint = endpoint
+        self.speakerStitching = speakerStitching
+        self.resampler = try MetaPCMResampler(inputSampleRate: sessionConfig.sampleRate)
         let stream = AsyncThrowingStream<RawSegment, Error>.makeStream()
         self.results = stream.stream
         self.continuation = stream.continuation
@@ -96,12 +108,14 @@ public actor MetaRealtimeSession: STTSession {
 
     public func append(pcm: Data) async throws {
         guard !finished, !pcm.isEmpty else { return }
-        if sessionAudioBytes + pcm.count > Self.reconnectAudioBytes {
+        let metaPCM = resampler.convert(pcm)
+        guard !metaPCM.isEmpty else { return }
+        if sessionAudioBytes + metaPCM.count > Self.reconnectAudioBytes {
             try await reconnect()
         }
-        logicalAudioBytes += pcm.count
-        try await sendPaced(pcm)
-        retainForReplay(pcm)
+        logicalAudioBytes += metaPCM.count
+        try await sendPaced(metaPCM)
+        retainForReplay(metaPCM)
     }
 
     /// Capture feeds zero PCM during live silence. This explicit helper makes
@@ -156,7 +170,9 @@ public actor MetaRealtimeSession: STTSession {
         sessionAudioBytes = 0
         sessionMaximumProcessedMilliseconds = 0
         sessionStartedAt = ContinuousClock.now
-        eventReducer = MetaRealtimeEventReducer(timelineOffset: timelineOffset)
+        finalizedHistory.removeAll { $0.end <= timelineOffset - 5 }
+        eventReducer = MetaRealtimeEventReducer(timelineOffset: timelineOffset, finalized: finalizedHistory)
+        sessionSpeakerTags.removeAll(keepingCapacity: true)
 
         let handshake = MetaRealtimeHandshake(
             authorization: .init(accessToken: "Bearer \(configuration.apiKey)"),
@@ -243,7 +259,7 @@ public actor MetaRealtimeSession: STTSession {
             while !Task.isCancelled {
                 let message = try await socket.receive()
                 guard case let .string(text) = message else { continue }
-                try handle(event: MetaRealtimeEvent.decode(text))
+                try await handle(event: MetaRealtimeEvent.decode(text))
             }
         } catch is CancellationError {
             return
@@ -254,14 +270,56 @@ public actor MetaRealtimeSession: STTSession {
         }
     }
 
-    private func handle(event: MetaRealtimeEvent) throws {
-        if let segment = try eventReducer.consume(event: event) {
+    private func handle(event: MetaRealtimeEvent) async throws {
+        var resolvedEvent = event
+        if event.type == "speaker", let label = event.label,
+            let stitching = speakerStitching
+        {
+            if let stitched = sessionSpeakerTags[label] {
+                resolvedEvent.label = stitched
+            } else if let speakerTag = await stitchedSpeakerTag(
+                using: stitching,
+                pcm: Data(replayBuffer.joined())
+            )
+            {
+                sessionSpeakerTags[label] = speakerTag
+                resolvedEvent.label = speakerTag
+            }
+        }
+        if let segment = try eventReducer.consume(event: resolvedEvent) {
+            if !segment.isVolatile { finalizedHistory.append(segment) }
             continuation.yield(segment)
         }
         sessionMaximumProcessedMilliseconds = max(
             sessionMaximumProcessedMilliseconds,
             eventReducer.maximumAudioProcessedMilliseconds
         )
+    }
+
+    private func stitchedSpeakerTag(
+        using stitching: MetaRealtimeSpeakerStitching,
+        pcm: Data
+    ) async -> String? {
+        guard let embedding = await stitching.embedding(for: pcm) else { return nil }
+        if let profileID = stitching.profileID(for: embedding) {
+            return profileID.uuidString
+        }
+        let existingProfiles = crossSessionSpeakerEmbeddings.map { id, centroid in
+            SpeakerProfile(
+                id: id,
+                displayName: id.uuidString,
+                centroid: centroid,
+                embeddingModel: EmbeddingModel.weSpeakerV2
+            )
+        }
+        switch SpeakerMatcher.match(embedding: embedding, against: existingProfiles) {
+        case let .autoLabel(profileID, _), let .suggest(profileID, _):
+            return profileID.uuidString
+        case .unknown:
+            let id = UUID()
+            crossSessionSpeakerEmbeddings[id] = embedding
+            return id.uuidString
+        }
     }
 
     private func closeCurrentAccounting() {
@@ -314,7 +372,7 @@ struct MetaRealtimeEvent: Decodable {
     let transcript: String?
     let final: Bool?
     let audioProcessedMs: Int?
-    let label: String?
+    var label: String?
     let message: String?
 
     static func decode(_ text: String) throws -> MetaRealtimeEvent {
@@ -337,8 +395,9 @@ public struct MetaRealtimeEventReducer: Sendable {
     private var finalized: [RawSegment] = []
     public private(set) var maximumAudioProcessedMilliseconds = 0
 
-    public init(timelineOffset: TimeInterval) {
+    public init(timelineOffset: TimeInterval, finalized: [RawSegment] = []) {
         self.timelineOffset = timelineOffset
+        self.finalized = finalized
     }
 
     public mutating func consume(json: String) throws -> RawSegment? {
@@ -359,19 +418,20 @@ public struct MetaRealtimeEventReducer: Sendable {
             latestTurnID = turnID
             return nil
         case "speaker":
-            if let turnID = latestTurnID, let label = event.label { turnSpeakers[turnID] = label }
+            if let turnID = event.turnId ?? latestTurnID, let label = event.label { turnSpeakers[turnID] = label }
             return nil
         case "transcript":
             guard let text = event.transcript?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
                 return nil
             }
-            let start = latestTurnID.flatMap { turnStarts[$0] } ?? timelineOffset
+            let turnID = event.turnId ?? latestTurnID
+            let start = turnID.flatMap { turnStarts[$0] } ?? timelineOffset
             let end = timelineOffset + Double(event.audioProcessedMs ?? 0) / 1_000
             return RawSegment(
                 start: start,
                 end: max(start, end),
                 text: text,
-                speakerTag: latestTurnID.flatMap { turnSpeakers[$0] },
+                speakerTag: turnID.flatMap { turnSpeakers[$0] },
                 channel: .mixed,
                 isVolatile: event.final != true
             )

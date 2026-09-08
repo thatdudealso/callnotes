@@ -21,6 +21,16 @@ import Testing
         ))
     }
 
+    @Test func realtimeResamplingConvertsOnlyTheMetaIngressFormat() throws {
+        var resampler = try MetaPCMResampler(inputSampleRate: 16_000)
+        let input = Data.int16LittleEndian([0, Int16.max, 0, Int16.min])
+
+        let output = resampler.convert(input)
+
+        #expect(output.count == 12)
+        #expect(MetaPCMResampler.samples(from: output).count == 6)
+    }
+
     @Test func costIsRoundedDownToWholeSeconds() {
         #expect(MetaCostMeter.billedSeconds(audioProcessedMilliseconds: 1_999) == 1)
         #expect(MetaCostMeter.billedSeconds(audioProcessedMilliseconds: 2_000) == 2)
@@ -105,6 +115,11 @@ import Testing
 
         // Turn 2 begins before turn 1 completes, as the API permits.
         #expect(try reducer.consume(json: #"{"type":"speechStart","turnId":2,"audioProcessedMs":1500}"#) == nil)
+        #expect(try reducer.consume(json: #"{"type":"speaker","turnId":1,"label":"A","audioProcessedMs":1550}"#) == nil)
+        let attributedPartialResult = try reducer.consume(json: #"{"type":"transcript","turnId":1,"transcript":"hello there","final":false,"audioProcessedMs":1560}"#)
+        let attributedPartial = try #require(attributedPartialResult)
+        #expect(attributedPartial.start == 601)
+        #expect(attributedPartial.speakerTag == "A")
         let firstFinalResult = try reducer.consume(json: #"{"type":"speechComplete","turnId":1,"transcript":"Hello there.","audioProcessedMs":1600}"#)
         let firstFinal = try #require(firstFinalResult)
         #expect(firstFinal.start == 601)
@@ -146,6 +161,27 @@ import Testing
         let isUsingFallback = await session.isUsingFallback()
         #expect(isUsingFallback)
         #expect(results.map(\.text) == ["Local transcript", "Continues locally"])
+    }
+
+    @Test func primaryFailureDoesNotRepeatAlreadyEmittedTranscript() async throws {
+        let primary = ProbeSession()
+        let fallback = ProbeSession()
+        let session = MetaFallbackSession(primary: primary, fallback: fallback)
+        await session.start()
+        let collector = Task<[RawSegment], Error> {
+            var result: [RawSegment] = []
+            for try await segment in session.results { result.append(segment) }
+            return result
+        }
+        await primary.emit(RawSegment(start: 0, end: 1, text: "Already delivered", channel: .mixed))
+        await fallback.emit(RawSegment(start: 0, end: 1, text: "Already delivered", channel: .mixed))
+        await primary.fail()
+        await Task.yield()
+        await fallback.emit(RawSegment(start: 1, end: 2, text: "New local speech", channel: .mixed))
+        try await session.finish()
+
+        let results = try await collector.value
+        #expect(results.map(\.text) == ["Already delivered", "New local speech"])
     }
 }
 

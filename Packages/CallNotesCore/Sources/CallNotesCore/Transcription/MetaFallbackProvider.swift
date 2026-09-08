@@ -61,6 +61,7 @@ public actor MetaFallbackSession: STTSession {
     private var primaryTask: Task<Void, Never>?
     private var fallbackTask: Task<Void, Never>?
     private var bufferedFallback: [RawSegment] = []
+    private var emittedPrimary: [RawSegment] = []
     private var usingFallback = false
     private var finished = false
 
@@ -133,8 +134,14 @@ public actor MetaFallbackSession: STTSession {
 
     public func isUsingFallback() -> Bool { usingFallback }
 
+    public func billedSeconds() async -> Int {
+        guard let primary = primary as? MetaRealtimeSession else { return 0 }
+        return await primary.billedSeconds()
+    }
+
     private func receivePrimary(_ segment: RawSegment) {
         guard !usingFallback else { return }
+        emittedPrimary.append(segment)
         continuation.yield(segment)
     }
 
@@ -149,9 +156,22 @@ public actor MetaFallbackSession: STTSession {
     private func activateFallback() {
         guard !usingFallback else { return }
         usingFallback = true
-        bufferedFallback.forEach { continuation.yield($0) }
+        bufferedFallback
+            .filter { !duplicatesEmittedPrimary($0) }
+            .forEach { continuation.yield($0) }
         bufferedFallback.removeAll(keepingCapacity: false)
         primaryTask?.cancel()
+    }
+
+    private func duplicatesEmittedPrimary(_ candidate: RawSegment) -> Bool {
+        emittedPrimary.contains { existing in
+            existing.start < candidate.end && candidate.start < existing.end
+                && normalized(existing.text) == normalized(candidate.text)
+        }
+    }
+
+    private func normalized(_ text: String) -> String {
+        text.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
     }
 
     private func fallbackFailed(_ error: Error) {

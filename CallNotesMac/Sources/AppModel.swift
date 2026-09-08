@@ -257,7 +257,7 @@ final class AppModel {
         }
         isStartingLiveSession = true
         do {
-            let provider = try configuredProvider(override: perCallOverride)
+            let provider = try await configuredProvider(override: perCallOverride)
             let session = try await provider.provider.startSession(config: STTSessionConfig())
             liveSession = session
             liveSegments = []
@@ -298,6 +298,7 @@ final class AppModel {
     }
 
     func finishLiveSession() async {
+        let finishedSession = liveSession
         defer {
             liveSession = nil
             liveResultsTask = nil
@@ -310,8 +311,17 @@ final class AppModel {
             liveResultsTask?.cancel()
             statusMessage = error.localizedDescription
         }
-        if let call = instantCallAtHangUp {
+        if var call = instantCallAtHangUp {
             instantCallAtHangUp = nil
+            let billedSeconds = await realtimeMetaBilledSeconds(for: finishedSession)
+            if billedSeconds > 0 {
+                call.metaBilledSec += billedSeconds
+                do {
+                    try await store.upsertCall(call)
+                } catch {
+                    statusMessage = error.localizedDescription
+                }
+            }
             await generateInstantNotes(for: call, rawSegments: liveSegments)
         }
     }
@@ -411,7 +421,7 @@ final class AppModel {
 
     private func configuredProvider(
         override perCallOverride: STTProviderID?
-    ) throws -> (provider: any STTProvider, requestedID: STTProviderID) {
+    ) async throws -> (provider: any STTProvider, requestedID: STTProviderID) {
         let storedDefault = UserDefaults.standard.string(forKey: "default_engine")
         let configuredDefault: STTProviderID? = storedDefault == "meta" ? .metaMuse : .appleSpeech
         let requestedID = EngineSelection.resolve(
@@ -420,12 +430,30 @@ final class AppModel {
         )
         guard requestedID == .metaMuse else { return (speech, .appleSpeech) }
         do {
-            let meta = MetaRealtimeProvider(configuration: try metaConfiguration())
+            let profiles = try await store.fetchSpeakerProfiles()
+            let diarizer = FluidDiarizer()
+            let stitching = MetaRealtimeSpeakerStitching(profiles: profiles) { pcm in
+                try await diarizer.enrollEmbedding(samples: MetaPCMResampler.samples(from: pcm))
+            }
+            let meta = MetaRealtimeProvider(
+                configuration: try metaConfiguration(),
+                speakerStitching: stitching
+            )
             return (MetaFallbackProvider(meta: meta, local: speech), .metaMuse)
         } catch {
             statusMessage = "Meta is not configured. Continuing with local transcription."
             return (speech, .appleSpeech)
         }
+    }
+
+    private func realtimeMetaBilledSeconds(for session: (any STTSession)?) async -> Int {
+        if let session = session as? MetaFallbackSession {
+            return await session.billedSeconds()
+        }
+        if let session = session as? MetaRealtimeSession {
+            return await session.billedSeconds()
+        }
+        return 0
     }
 
     private func metaConfiguration() throws -> MetaTranscriptionConfiguration {

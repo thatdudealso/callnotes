@@ -9,6 +9,65 @@ public enum MetaAudioFormat: Sendable {
     public var byteRate: Int { sampleRate * bytesPerSample }
 }
 
+public struct MetaPCMResampler: Sendable {
+    private let inputSampleRate: Int
+    private var pendingSample: Int16?
+
+    public init(inputSampleRate: Int) throws {
+        guard [16_000, MetaAudioFormat.pcm24KHz.sampleRate].contains(inputSampleRate) else {
+            throw MetaTranscriptionError.streamingPolicy("Meta realtime audio must be mono PCM at 16 kHz or 24 kHz")
+        }
+        self.inputSampleRate = inputSampleRate
+    }
+
+    public mutating func convert(_ pcm: Data) -> Data {
+        guard inputSampleRate != MetaAudioFormat.pcm24KHz.sampleRate else { return pcm }
+        let samples = pcm.int16LittleEndianSamples()
+        var converted: [Int16] = []
+        converted.reserveCapacity(samples.count * 3 / 2 + 3)
+        for sample in samples {
+            guard let previous = pendingSample else {
+                pendingSample = sample
+                continue
+            }
+            let midpoint = Int16((Int32(previous) + Int32(sample)) / 2)
+            converted.append(previous)
+            converted.append(midpoint)
+            converted.append(sample)
+            pendingSample = nil
+        }
+        return Data.int16LittleEndian(converted)
+    }
+
+    public static func samples(from pcm: Data) -> [Float] {
+        PCMResampler.int16ToFloat(pcm.int16LittleEndianSamples())
+    }
+}
+
+public struct MetaRealtimeSpeakerStitching: Sendable {
+    public typealias EmbeddingProvider = @Sendable (Data) async throws -> [Float]?
+
+    public let profiles: [SpeakerProfile]
+    public let embeddingProvider: EmbeddingProvider
+
+    public init(profiles: [SpeakerProfile], embeddingProvider: @escaping EmbeddingProvider) {
+        self.profiles = profiles
+        self.embeddingProvider = embeddingProvider
+    }
+
+    public func embedding(for pcm: Data) async -> [Float]? {
+        guard let embedding = try? await embeddingProvider(pcm), !embedding.isEmpty else {
+            return nil
+        }
+        return embedding
+    }
+
+    public func profileID(for embedding: [Float]) -> UUID? {
+        return MetaSpeakerSessionStitcher(profiles: profiles)
+            .stitch([.init(sessionID: "current", label: "current", embedding: embedding)])["current:current"]
+    }
+}
+
 /// Errors surfaced by the Meta provider. These stay client-safe because the
 /// remote API intentionally returns a single safe message for HTTP failures.
 public enum MetaTranscriptionError: Error, LocalizedError, Sendable, Equatable {
@@ -116,6 +175,17 @@ public struct MetaFileChunk: Sendable, Equatable {
     }
 }
 
+public enum MetaFileLimits {
+    public static let maximumInputBytes = 512 * 1_024 * 1_024
+    public static let maximumNormalizedBytes = 128 * 1_024 * 1_024
+    public static let maximumChunkBytes = 32 * 1_024 * 1_024
+    public static let maximumMultipartBytes = maximumChunkBytes + 128 * 1_024
+
+    public static func validate(_ byteCount: Int, maximum: Int, message: String) throws {
+        guard byteCount <= maximum else { throw MetaTranscriptionError.invalidWAV(message) }
+    }
+}
+
 /// Plans uploads below Meta's 10-minute hard cap and carries a five-second
 /// overlap so endpointing does not drop speech spanning a chunk boundary.
 public enum MetaFileChunker {
@@ -207,6 +277,31 @@ public struct MetaSpeakerSessionStitcher: Sendable {
                 nil
             }
         })
+    }
+}
+
+extension Data {
+    func int16LittleEndianSamples() -> [Int16] {
+        var samples: [Int16] = []
+        samples.reserveCapacity(count / 2)
+        var offset = 0
+        while offset + 1 < count {
+            let bits = UInt16(self[offset]) | UInt16(self[offset + 1]) << 8
+            samples.append(Int16(bitPattern: bits))
+            offset += 2
+        }
+        return samples
+    }
+
+    static func int16LittleEndian(_ samples: [Int16]) -> Data {
+        var result = Data()
+        result.reserveCapacity(samples.count * 2)
+        for sample in samples {
+            let bits = UInt16(bitPattern: sample)
+            result.append(UInt8(bits & 0xFF))
+            result.append(UInt8(bits >> 8))
+        }
+        return result
     }
 }
 

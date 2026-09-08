@@ -43,12 +43,22 @@ public struct MetaFileProvider: STTProvider {
         guard !configuration.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw MetaTranscriptionError.missingAPIKey
         }
+        try MetaFileLimits.validate(
+            try fileSize(of: fileURL),
+            maximum: MetaFileLimits.maximumInputBytes,
+            message: "The selected audio file exceeds Meta's import limit"
+        )
         let normalized = try MetaWAVNormalizer.normalizedWAV(from: fileURL)
         defer {
             if normalized.isTemporary {
                 try? FileManager.default.removeItem(at: normalized.url)
             }
         }
+        try MetaFileLimits.validate(
+            try fileSize(of: normalized.url),
+            maximum: MetaFileLimits.maximumNormalizedBytes,
+            message: "The normalized audio exceeds Meta's import limit"
+        )
         let wav = try MetaWAV.read(fileURL: normalized.url)
         let plans = MetaFileChunker.plan(totalFrames: wav.frameCount, sampleRate: wav.sampleRate)
         var segments: [RawSegment] = []
@@ -56,6 +66,11 @@ public struct MetaFileProvider: STTProvider {
 
         for chunk in plans {
             let chunkWAV = try wav.data(for: chunk)
+            try MetaFileLimits.validate(
+                chunkWAV.count,
+                maximum: MetaFileLimits.maximumChunkBytes,
+                message: "A Meta upload chunk exceeds the request limit"
+            )
             let response = try await upload(wavData: chunkWAV, config: config)
             billedSeconds += MetaCostMeter.billedSeconds(audioProcessedMilliseconds: response.audioDurationMs)
             let offset = Double(chunk.startFrame) / Double(wav.sampleRate)
@@ -90,7 +105,7 @@ public struct MetaFileProvider: STTProvider {
         request.setValue("Bearer \(configuration.apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        request.httpBody = multipartBody(boundary: boundary, wavData: wavData, config: config)
+        request.httpBody = try multipartBody(boundary: boundary, wavData: wavData, config: config)
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -128,7 +143,7 @@ public struct MetaFileProvider: STTProvider {
         }
     }
 
-    private func multipartBody(boundary: String, wavData: Data, config: STTSessionConfig) -> Data {
+    private func multipartBody(boundary: String, wavData: Data, config: STTSessionConfig) throws -> Data {
         struct RequestSettings: Encodable {
             let model: String
             let audioEncoding: String
@@ -155,7 +170,26 @@ public struct MetaFileProvider: STTProvider {
         append("Content-Type: audio/wav\r\n\r\n")
         body.append(wavData)
         append("\r\n--\(boundary)--\r\n")
+        try MetaFileLimits.validate(
+            body.count,
+            maximum: MetaFileLimits.maximumMultipartBytes,
+            message: "The Meta multipart request exceeds the request limit"
+        )
         return body
+    }
+
+    private func fileSize(of url: URL) throws -> Int {
+        do {
+            let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+            guard values.isRegularFile == true, let size = values.fileSize else {
+                throw MetaTranscriptionError.invalidWAV("The selected audio file could not be read")
+            }
+            return size
+        } catch let error as MetaTranscriptionError {
+            throw error
+        } catch {
+            throw MetaTranscriptionError.invalidWAV("The selected audio file could not be read")
+        }
     }
 }
 
