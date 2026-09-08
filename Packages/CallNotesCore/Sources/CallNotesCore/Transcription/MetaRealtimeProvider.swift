@@ -135,6 +135,7 @@ public actor MetaRealtimeSession: STTSession {
     private var turnAudioStarts: [Int: Int] = [:]
     private var latestTurnID: Int?
     private var crossSessionSpeakerEmbeddings: [UUID: [Float]] = [:]
+    private var ingress: Task<Void, Error>?
     private var finished = false
 
     /// Reconnect before Meta's 60-minute limit, preserving five seconds of
@@ -167,10 +168,23 @@ public actor MetaRealtimeSession: STTSession {
         try await connect(timelineOffset: 0, replay: [])
     }
 
+    /// PCM ingress is serialized through a chained task because the capture
+    /// path issues overlapping appends; an append must never interleave with
+    /// another append or with a reconnect handshake and its replay.
     public func append(pcm: Data) async throws {
         guard !finished, !pcm.isEmpty else { return }
         let metaPCM = resampler.convert(pcm)
         guard !metaPCM.isEmpty else { return }
+        let previous = ingress
+        let task = Task {
+            try? await previous?.value
+            try await self.ingest(metaPCM)
+        }
+        ingress = task
+        try await task.value
+    }
+
+    private func ingest(_ metaPCM: Data) async throws {
         if sessionAudioBytes + metaPCM.count > Self.reconnectAudioBytes {
             try await reconnect()
         }
@@ -190,6 +204,7 @@ public actor MetaRealtimeSession: STTSession {
     public func finish() async throws {
         guard !finished else { return }
         finished = true
+        try? await ingress?.value
         do {
             try await socket?.send(.string("{\"type\":\"endStream\"}"))
             await receiverTask?.value

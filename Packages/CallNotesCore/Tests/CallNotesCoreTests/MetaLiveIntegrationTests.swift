@@ -24,7 +24,7 @@ import Testing
         guard let fixtureURL = fixtureURL, let apiKey = environment["META_MODEL_API_KEY"] else { return }
         let wav = try MetaWAV.read(fileURL: fixtureURL)
         let provider = MetaRealtimeProvider(configuration: MetaTranscriptionConfiguration(apiKey: apiKey))
-        let session = try await provider.startSession(config: STTSessionConfig())
+        let session = try await provider.startSession(config: STTSessionConfig(sampleRate: wav.sampleRate))
         let collector = Task<[RawSegment], Error> {
             var output: [RawSegment] = []
             for try await segment in session.results { output.append(segment) }

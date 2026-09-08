@@ -336,10 +336,12 @@ final class AppModel {
             if let captureURL {
                 call.audioPath = captureURL.path
                 call.status = .transcribed
-            } else {
+            } else if call.source == .macManual {
                 call.status = .failed
                 call.error = "Audio capture did not produce a recording"
                 call.errorStage = "capture"
+            } else {
+                call.status = .transcribed
             }
             if let session = finishedSession as? MetaFallbackSession, await session.isUsingFallback() {
                 call.sttProvider = .appleSpeech
