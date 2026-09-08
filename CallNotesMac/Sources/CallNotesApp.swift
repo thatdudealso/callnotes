@@ -110,6 +110,9 @@ struct MenuBarContentView: View {
             model.setCaptureStopHandler {
                 await coordinator.stopLiveCapture()
             }
+            coordinator.setCaptureFailureHandler { message in
+                await model.failLiveSessionForCapture(message)
+            }
             coordinator.start()
         }
         .confirmationDialog(

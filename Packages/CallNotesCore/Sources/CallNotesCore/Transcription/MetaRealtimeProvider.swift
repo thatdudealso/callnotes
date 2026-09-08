@@ -48,6 +48,62 @@ public struct MetaRealtimeProvider: STTProvider {
     }
 }
 
+struct MetaRealtimeSpeakerAudioWindow: Sendable {
+    private struct Frame: Sendable {
+        let startByte: Int
+        let data: Data
+    }
+
+    private let byteLimit: Int
+    private var frames: [Frame] = []
+    private var byteCount = 0
+
+    init(byteLimit: Int) {
+        self.byteLimit = byteLimit
+    }
+
+    mutating func reset() {
+        frames.removeAll(keepingCapacity: true)
+        byteCount = 0
+    }
+
+    mutating func append(_ data: Data, endingAt endByte: Int) {
+        guard !data.isEmpty else { return }
+        let frame = Frame(startByte: endByte - data.count, data: data)
+        frames.append(frame)
+        byteCount += data.count
+        trimToLimit()
+    }
+
+    func data(from startByte: Int, to endByte: Int) -> Data {
+        guard endByte > startByte else { return Data() }
+        var selected = Data()
+        for frame in frames {
+            let frameEnd = frame.startByte + frame.data.count
+            let lower = max(startByte, frame.startByte)
+            let upper = min(endByte, frameEnd)
+            guard upper > lower else { continue }
+            let offset = lower - frame.startByte
+            selected.append(frame.data.subdata(in: offset..<(offset + upper - lower)))
+        }
+        return selected
+    }
+
+    private mutating func trimToLimit() {
+        while byteCount > byteLimit, let first = frames.first {
+            let overflow = byteCount - byteLimit
+            if first.data.count <= overflow {
+                frames.removeFirst()
+                byteCount -= first.data.count
+            } else {
+                let retained = first.data.subdata(in: overflow..<first.data.count)
+                frames[0] = Frame(startByte: first.startByte + overflow, data: retained)
+                byteCount -= overflow
+            }
+        }
+    }
+}
+
 /// A real-time session maintains protocol state by `turnId`, because the API
 /// permits a later turn to begin before an earlier speechComplete arrives.
 public actor MetaRealtimeSession: STTSession {
@@ -73,6 +129,11 @@ public actor MetaRealtimeSession: STTSession {
     private var finalizedHistory: [RawSegment] = []
     private var resampler: MetaPCMResampler
     private var sessionSpeakerTags: [String: String] = [:]
+    private var speakerAudio = MetaRealtimeSpeakerAudioWindow(
+        byteLimit: 30 * MetaAudioFormat.pcm24KHz.byteRate
+    )
+    private var turnAudioStarts: [Int: Int] = [:]
+    private var latestTurnID: Int?
     private var crossSessionSpeakerEmbeddings: [UUID: [Float]] = [:]
     private var finished = false
 
@@ -173,6 +234,9 @@ public actor MetaRealtimeSession: STTSession {
         finalizedHistory.removeAll { $0.end <= timelineOffset - 5 }
         eventReducer = MetaRealtimeEventReducer(timelineOffset: timelineOffset, finalized: finalizedHistory)
         sessionSpeakerTags.removeAll(keepingCapacity: true)
+        speakerAudio.reset()
+        turnAudioStarts.removeAll(keepingCapacity: true)
+        latestTurnID = nil
 
         let handshake = MetaRealtimeHandshake(
             authorization: .init(accessToken: "Bearer \(configuration.apiKey)"),
@@ -242,6 +306,7 @@ public actor MetaRealtimeSession: STTSession {
         }
         try await socket.send(.data(pcm))
         sessionAudioBytes = prospectiveBytes
+        speakerAudio.append(pcm, endingAt: sessionAudioBytes)
     }
 
     private func retainForReplay(_ pcm: Data) {
@@ -271,19 +336,28 @@ public actor MetaRealtimeSession: STTSession {
     }
 
     private func handle(event: MetaRealtimeEvent) async throws {
+        if event.type == "speechStart", let turnID = event.turnId {
+            latestTurnID = turnID
+            turnAudioStarts[turnID] = audioByteOffset(for: event.audioProcessedMs)
+        }
         var resolvedEvent = event
         if event.type == "speaker", let label = event.label,
             let stitching = speakerStitching
         {
             if let stitched = sessionSpeakerTags[label] {
                 resolvedEvent.label = stitched
-            } else if let speakerTag = await stitchedSpeakerTag(
-                using: stitching,
-                pcm: Data(replayBuffer.joined())
-            )
-            {
-                sessionSpeakerTags[label] = speakerTag
-                resolvedEvent.label = speakerTag
+            } else {
+                let turnID = event.turnId ?? latestTurnID
+                let startByte = turnID.flatMap { turnAudioStarts[$0] }
+                    ?? max(0, sessionAudioBytes - 30 * MetaAudioFormat.pcm24KHz.byteRate)
+                let pcm = speakerAudio.data(
+                    from: startByte,
+                    to: audioByteOffset(for: event.audioProcessedMs)
+                )
+                if let speakerTag = await stitchedSpeakerTag(using: stitching, pcm: pcm) {
+                    sessionSpeakerTags[label] = speakerTag
+                    resolvedEvent.label = speakerTag
+                }
             }
         }
         if let segment = try eventReducer.consume(event: resolvedEvent) {
@@ -294,6 +368,12 @@ public actor MetaRealtimeSession: STTSession {
             sessionMaximumProcessedMilliseconds,
             eventReducer.maximumAudioProcessedMilliseconds
         )
+    }
+
+    private func audioByteOffset(for processedMilliseconds: Int?) -> Int {
+        guard let processedMilliseconds else { return sessionAudioBytes }
+        let bytes = processedMilliseconds * MetaAudioFormat.pcm24KHz.byteRate / 1_000
+        return min(sessionAudioBytes, max(0, bytes))
     }
 
     private func stitchedSpeakerTag(

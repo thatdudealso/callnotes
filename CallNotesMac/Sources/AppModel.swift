@@ -372,6 +372,37 @@ final class AppModel {
         captureStopHandler = handler
     }
 
+    func failLiveSessionForCapture(_ message: String) async {
+        guard let session = liveSession else { return }
+        let resultsTask = liveResultsTask
+        liveSession = nil
+        liveResultsTask = nil
+        liveSegments = []
+        resultsTask?.cancel()
+        try? await session.finish()
+        recordingState = .idle
+        live.isOffDevice = false
+
+        guard var call = instantCallAtHangUp else {
+            statusMessage = "Audio capture could not start: \(message)"
+            return
+        }
+        instantCallAtHangUp = nil
+        call.endedAt = Date()
+        call.durationSec = max(0, Int(call.endedAt!.timeIntervalSince(call.startedAt).rounded(.down)))
+        call.status = .failed
+        call.error = message
+        call.errorStage = "capture"
+        do {
+            try await store.upsertCall(call)
+            try await refresh()
+        } catch {
+            statusMessage = error.localizedDescription
+            return
+        }
+        statusMessage = "Audio capture could not start: \(message)"
+    }
+
     func updateCounterpartyName(for callID: UUID, name: String) {
         guard let index = calls.firstIndex(where: { $0.id == callID }) else { return }
         let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)

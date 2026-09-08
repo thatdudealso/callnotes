@@ -31,6 +31,15 @@ import Testing
         #expect(output.map { Int(($0 * Float(Int16.max)).rounded()) } == [0, 2_000, 4_000, 6_000, 8_000])
     }
 
+    @Test func speakerStitchingUsesAudioFromTheLabeledTurnRange() {
+        var audio = MetaRealtimeSpeakerAudioWindow(byteLimit: 24)
+        audio.append(Data([1, 1, 1, 1]), endingAt: 4)
+        audio.append(Data([2, 2, 2, 2]), endingAt: 8)
+
+        #expect(audio.data(from: 0, to: 4) == Data([1, 1, 1, 1]))
+        #expect(audio.data(from: 4, to: 8) == Data([2, 2, 2, 2]))
+    }
+
     @Test func costIsRoundedDownToWholeSeconds() {
         #expect(MetaCostMeter.billedSeconds(audioProcessedMilliseconds: 1_999) == 1)
         #expect(MetaCostMeter.billedSeconds(audioProcessedMilliseconds: 2_000) == 2)
