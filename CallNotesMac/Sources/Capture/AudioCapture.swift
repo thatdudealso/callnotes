@@ -269,6 +269,8 @@ final class AudioCapture: @unchecked Sendable {
                 let pads = CaptureAlignment.leadingAdjustments(shift: shift)
                 if pads.farPad > 0 {
                     state.far.insert(contentsOf: repeatElement(0, count: pads.farPad), at: 0)
+                    let paddedSeconds = Double(pads.farPad) / sampleRate
+                    state.farHost = AVHostTime.adding(farHost, seconds: -paddedSeconds)
                 }
                 if pads.nearPad > 0 {
                     state.near.insert(contentsOf: repeatElement(0, count: pads.nearPad), at: 0)

@@ -134,6 +134,22 @@ import Testing
         #expect(abs(compensation.lagSeconds(farStart: rebasedFar, nearStart: nearStart)) < 0.000_5)
     }
 
+    @Test func delayingFarStartByPositivePadCancelsCompensatedLag() {
+        let compensation = CaptureAlignment.LatencyCompensation(
+            farRenderToPresentationSeconds: 0.020,
+            nearNodeToCapsuleSeconds: 0
+        )
+        let farStart = 1.010
+        let nearStart = 1.000
+        let sampleRate = 16_000.0
+        let shift = compensation.sampleShift(farStart: farStart, nearStart: nearStart, sampleRate: sampleRate)
+        #expect(shift > 0)
+        let pads = CaptureAlignment.leadingAdjustments(shift: shift)
+        #expect(pads.farPad == shift)
+        let rebasedFar = farStart - Double(pads.farPad) / sampleRate
+        #expect(abs(compensation.lagSeconds(farStart: rebasedFar, nearStart: nearStart)) < 0.000_5)
+    }
+
     @Test func callAppNameMatcherObservesDisplayNamesNotBundleIDs() {
         #expect(CallAppNameMatcher.isCallAppDisplayName("FaceTime"))
         #expect(CallAppNameMatcher.isCallAppDisplayName("Phone"))
