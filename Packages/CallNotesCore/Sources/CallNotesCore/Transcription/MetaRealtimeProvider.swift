@@ -338,6 +338,7 @@ public actor MetaRealtimeSession: STTSession {
         do {
             while !Task.isCancelled {
                 let message = try await socket.receive()
+                guard !Task.isCancelled, socket === self.socket else { return }
                 guard case let .string(text) = message else { continue }
                 try await handle(event: MetaRealtimeEvent.decode(text))
             }
