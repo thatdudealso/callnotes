@@ -68,21 +68,25 @@ public struct MetaFileProvider: STTProvider {
         var billedSeconds = 0
 
         for chunk in plans {
-            let chunkWAV = try wav.data(for: chunk)
-            try MetaFileLimits.validate(
-                chunkWAV.count,
-                maximum: MetaFileLimits.maximumChunkBytes,
-                message: "A Meta upload chunk exceeds the request limit"
-            )
-            let response = try await upload(wavData: chunkWAV, config: config)
-            billedSeconds += MetaCostMeter.billedSeconds(audioProcessedMilliseconds: response.audioDurationMs)
-            let offset = Double(chunk.startFrame) / Double(wav.sampleRate)
-            let translated = response.rawSegments(offset: offset)
-            segments = MetaTranscriptOverlapDeduper.merge(
-                previous: segments,
-                incoming: translated,
-                incomingOffset: 0
-            )
+            do {
+                let chunkWAV = try wav.data(for: chunk)
+                try MetaFileLimits.validate(
+                    chunkWAV.count,
+                    maximum: MetaFileLimits.maximumChunkBytes,
+                    message: "A Meta upload chunk exceeds the request limit"
+                )
+                let response = try await upload(wavData: chunkWAV, config: config)
+                billedSeconds += MetaCostMeter.billedSeconds(audioProcessedMilliseconds: response.audioDurationMs)
+                let offset = Double(chunk.startFrame) / Double(wav.sampleRate)
+                let translated = response.rawSegments(offset: offset)
+                segments = MetaTranscriptOverlapDeduper.merge(
+                    previous: segments,
+                    incoming: translated,
+                    incomingOffset: 0
+                )
+            } catch where billedSeconds > 0 {
+                throw MetaFileTranscriptionFailure(billedSeconds: billedSeconds, underlying: error)
+            }
         }
         return MetaFileTranscriptionResult(segments: segments, billedSeconds: billedSeconds)
     }
@@ -203,6 +207,22 @@ public struct MetaFileTranscriptionResult: Sendable, Equatable {
     public init(segments: [RawSegment], billedSeconds: Int) {
         self.segments = segments
         self.billedSeconds = billedSeconds
+    }
+}
+
+/// Thrown when a later chunk fails after earlier chunks already accrued Meta
+/// billing, so callers can persist `calls.meta_billed_sec` before falling back.
+public struct MetaFileTranscriptionFailure: Error, LocalizedError, Sendable {
+    public let billedSeconds: Int
+    public let underlying: any Error
+
+    public init(billedSeconds: Int, underlying: any Error) {
+        self.billedSeconds = billedSeconds
+        self.underlying = underlying
+    }
+
+    public var errorDescription: String? {
+        underlying.localizedDescription
     }
 }
 

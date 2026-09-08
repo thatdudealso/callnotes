@@ -333,8 +333,14 @@ final class AppModel {
             call.metaBilledSec += billedSeconds
             call.endedAt = Date()
             call.durationSec = max(0, Int(call.endedAt!.timeIntervalSince(call.startedAt).rounded(.down)))
-            if let captureURL { call.audioPath = captureURL.path }
-            call.status = .transcribed
+            if let captureURL {
+                call.audioPath = captureURL.path
+                call.status = .transcribed
+            } else {
+                call.status = .failed
+                call.error = "Audio capture did not produce a recording"
+                call.errorStage = "capture"
+            }
             if let session = finishedSession as? MetaFallbackSession, await session.isUsingFallback() {
                 call.sttProvider = .appleSpeech
             }
@@ -357,6 +363,10 @@ final class AppModel {
                 try await refresh()
             } catch {
                 statusMessage = error.localizedDescription
+                return
+            }
+            guard call.status == .transcribed else {
+                statusMessage = "Audio capture failed. The live transcript was kept without a recording."
                 return
             }
             await generateInstantNotes(for: call, rawSegments: liveSegments)
@@ -470,6 +480,14 @@ final class AppModel {
             guard withMeta else {
                 statusMessage = error.localizedDescription
                 return
+            }
+            if let partial = error as? MetaFileTranscriptionFailure, partial.billedSeconds > 0 {
+                call.metaBilledSec += partial.billedSeconds
+                do {
+                    try await store.upsertCall(call)
+                } catch {
+                    statusMessage = error.localizedDescription
+                }
             }
             do {
                 let segments = try await speech.transcribe(
