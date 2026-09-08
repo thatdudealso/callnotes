@@ -263,6 +263,16 @@ final class AppModel {
             liveSegments = []
             live.engine = provider.requestedID
             live.isOffDevice = provider.requestedID == .metaMuse && !(session is AppleSpeechSession)
+            if !forSamplePlayback {
+                let call = Call(
+                    source: .macManual,
+                    startedAt: Date(),
+                    audioPath: "",
+                    sttProvider: provider.requestedID
+                )
+                try await store.upsertCall(call)
+                instantCallAtHangUp = call
+            }
             recordingState = .recording
             liveResultsTask = Task { [weak self] in
                 do {
@@ -314,13 +324,17 @@ final class AppModel {
         if var call = instantCallAtHangUp {
             instantCallAtHangUp = nil
             let billedSeconds = await realtimeMetaBilledSeconds(for: finishedSession)
-            if billedSeconds > 0 {
-                call.metaBilledSec += billedSeconds
-                do {
-                    try await store.upsertCall(call)
-                } catch {
-                    statusMessage = error.localizedDescription
-                }
+            call.metaBilledSec += billedSeconds
+            call.endedAt = Date()
+            call.durationSec = max(0, Int(call.endedAt!.timeIntervalSince(call.startedAt).rounded(.down)))
+            call.status = .transcribed
+            if let session = finishedSession as? MetaFallbackSession, await session.isUsingFallback() {
+                call.sttProvider = .appleSpeech
+            }
+            do {
+                try await store.upsertCall(call)
+            } catch {
+                statusMessage = error.localizedDescription
             }
             await generateInstantNotes(for: call, rawSegments: liveSegments)
         }

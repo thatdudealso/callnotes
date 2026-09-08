@@ -122,7 +122,7 @@ public actor MetaRealtimeSession: STTSession {
     /// that requirement discoverable and keeps an otherwise idle socket alive.
     public func appendSilence(milliseconds: Int) async throws {
         guard milliseconds > 0 else { return }
-        let bytes = MetaAudioFormat.pcm24KHz.byteRate * milliseconds / 1_000
+        let bytes = sessionConfig.sampleRate * MetaAudioFormat.pcm24KHz.bytesPerSample * milliseconds / 1_000
         try await append(pcm: Data(count: bytes - (bytes % 2)))
     }
 

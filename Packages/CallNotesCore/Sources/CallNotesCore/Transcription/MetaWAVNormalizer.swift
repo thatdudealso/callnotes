@@ -4,8 +4,12 @@ import Foundation
 /// Converts captured CAF/m4a input into the narrowly supported WAV format the
 /// Meta file endpoint accepts. Already-valid WAV is passed through untouched.
 public enum MetaWAVNormalizer {
-    public static func normalizedWAV(from inputURL: URL) throws -> (url: URL, isTemporary: Bool) {
-        if (try? MetaWAV.read(fileURL: inputURL)) != nil {
+    public static func normalizedWAV(
+        from inputURL: URL,
+        maximumOutputBytes: Int = .max
+    ) throws -> (url: URL, isTemporary: Bool) {
+        let inputBytes = (try? inputURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? .max
+        if inputBytes <= maximumOutputBytes, (try? MetaWAV.read(fileURL: inputURL)) != nil {
             return (inputURL, false)
         }
         let input: AVAudioFile
@@ -25,6 +29,12 @@ public enum MetaWAVNormalizer {
         }
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("callnotes-meta-\(UUID().uuidString).wav")
+        var completed = false
+        defer {
+            if !completed {
+                try? FileManager.default.removeItem(at: outputURL)
+            }
+        }
         let output: AVAudioFile
         do {
             output = try AVAudioFile(
@@ -68,9 +78,14 @@ public enum MetaWAVNormalizer {
                 )
             }
             if converted.frameLength > 0 {
+                let projectedBytes = Int(output.framePosition + Int64(converted.frameLength)) * 2 + 44
+                guard projectedBytes <= maximumOutputBytes else {
+                    throw MetaTranscriptionError.invalidWAV("The normalized audio exceeds Meta's import limit")
+                }
                 try output.write(from: converted)
             }
         }
+        completed = true
         return (outputURL, true)
     }
 }

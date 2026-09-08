@@ -147,7 +147,9 @@ public actor MetaFallbackSession: STTSession {
 
     private func receiveFallback(_ segment: RawSegment) {
         if usingFallback {
-            continuation.yield(segment)
+            if !duplicatesEmittedPrimary(segment) {
+                continuation.yield(segment)
+            }
         } else {
             bufferedFallback.append(segment)
         }

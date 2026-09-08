@@ -183,6 +183,27 @@ import Testing
         let results = try await collector.value
         #expect(results.map(\.text) == ["Already delivered", "New local speech"])
     }
+
+    @Test func delayedFallbackDoesNotRepeatAlreadyEmittedTranscript() async throws {
+        let primary = ProbeSession()
+        let fallback = ProbeSession()
+        let session = MetaFallbackSession(primary: primary, fallback: fallback)
+        await session.start()
+        let collector = Task<[RawSegment], Error> {
+            var result: [RawSegment] = []
+            for try await segment in session.results { result.append(segment) }
+            return result
+        }
+        await primary.emit(RawSegment(start: 0, end: 1, text: "Already delivered", channel: .mixed))
+        await primary.fail()
+        await Task.yield()
+        await fallback.emit(RawSegment(start: 0, end: 1, text: "Already delivered", channel: .mixed))
+        await fallback.emit(RawSegment(start: 1, end: 2, text: "New local speech", channel: .mixed))
+        try await session.finish()
+
+        let results = try await collector.value
+        #expect(results.map(\.text) == ["Already delivered", "New local speech"])
+    }
 }
 
 private enum ProbeError: Error { case induced }

@@ -48,7 +48,10 @@ public struct MetaFileProvider: STTProvider {
             maximum: MetaFileLimits.maximumInputBytes,
             message: "The selected audio file exceeds Meta's import limit"
         )
-        let normalized = try MetaWAVNormalizer.normalizedWAV(from: fileURL)
+        let normalized = try MetaWAVNormalizer.normalizedWAV(
+            from: fileURL,
+            maximumOutputBytes: MetaFileLimits.maximumNormalizedBytes
+        )
         defer {
             if normalized.isTemporary {
                 try? FileManager.default.removeItem(at: normalized.url)
