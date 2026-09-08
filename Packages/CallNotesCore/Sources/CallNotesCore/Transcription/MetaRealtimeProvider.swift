@@ -340,7 +340,7 @@ public actor MetaRealtimeSession: STTSession {
                 let message = try await socket.receive()
                 guard !Task.isCancelled, socket === self.socket else { return }
                 guard case let .string(text) = message else { continue }
-                try await handle(event: MetaRealtimeEvent.decode(text))
+                try await handle(event: MetaRealtimeEvent.decode(text), from: socket)
             }
         } catch is CancellationError {
             return
@@ -351,7 +351,7 @@ public actor MetaRealtimeSession: STTSession {
         }
     }
 
-    private func handle(event: MetaRealtimeEvent) async throws {
+    private func handle(event: MetaRealtimeEvent, from socket: URLSessionWebSocketTask) async throws {
         if event.type == "speechStart", let turnID = event.turnId {
             latestTurnID = turnID
             turnAudioStarts[turnID] = audioByteOffset(for: event.audioProcessedMs)
@@ -370,7 +370,9 @@ public actor MetaRealtimeSession: STTSession {
                     from: startByte,
                     to: audioByteOffset(for: event.audioProcessedMs)
                 )
-                if let speakerTag = await stitchedSpeakerTag(using: stitching, pcm: pcm) {
+                let speakerTag = await stitchedSpeakerTag(using: stitching, pcm: pcm)
+                guard !Task.isCancelled, socket === self.socket else { return }
+                if let speakerTag {
                     sessionSpeakerTags[label] = speakerTag
                     resolvedEvent.label = speakerTag
                 }

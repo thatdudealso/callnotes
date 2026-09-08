@@ -562,7 +562,11 @@ final class AppModel {
             let profiles = try await store.fetchSpeakerProfiles()
             let diarizer = FluidDiarizer()
             let stitching = MetaRealtimeSpeakerStitching(profiles: profiles) { pcm in
-                try await diarizer.enrollEmbedding(samples: MetaPCMResampler.samples(from: pcm))
+                let samples = PCMResampler.resampleMono(
+                    input: MetaPCMResampler.samples(from: pcm),
+                    inputSampleRate: Double(MetaAudioFormat.pcm24KHz.sampleRate)
+                )
+                return try await diarizer.enrollEmbedding(samples: samples)
             }
             let meta = MetaRealtimeProvider(
                 configuration: try metaConfiguration(),
