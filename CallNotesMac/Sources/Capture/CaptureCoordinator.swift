@@ -40,6 +40,10 @@ final class CaptureCoordinator {
         }
     }
 
+    func setPCMHandler(_ handler: @escaping @Sendable (Data) -> Void) {
+        capture.onMixedPCM = handler
+    }
+
     private func handle(_ status: CallDetector.Status) {
         let phase = status.snapshot.phase
         switch (previousPhase, phase) {

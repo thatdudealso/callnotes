@@ -259,16 +259,17 @@ final class AppModel {
         do {
             let provider = try await configuredProvider(override: perCallOverride)
             let session = try await provider.provider.startSession(config: STTSessionConfig())
+            let engine = session is AppleSpeechSession ? STTProviderID.appleSpeech : provider.requestedID
             liveSession = session
             liveSegments = []
-            live.engine = provider.requestedID
-            live.isOffDevice = provider.requestedID == .metaMuse && !(session is AppleSpeechSession)
+            live.engine = engine
+            live.isOffDevice = engine == .metaMuse
             if !forSamplePlayback {
                 let call = Call(
                     source: .macManual,
                     startedAt: Date(),
                     audioPath: "",
-                    sttProvider: provider.requestedID
+                    sttProvider: engine
                 )
                 try await store.upsertCall(call)
                 instantCallAtHangUp = call

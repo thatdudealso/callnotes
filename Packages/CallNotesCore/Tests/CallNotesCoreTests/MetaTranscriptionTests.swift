@@ -21,14 +21,14 @@ import Testing
         ))
     }
 
-    @Test func realtimeResamplingConvertsOnlyTheMetaIngressFormat() throws {
+    @Test func realtimeResamplingPreservesPhaseAcrossIngressBuffers() throws {
         var resampler = try MetaPCMResampler(inputSampleRate: 16_000)
-        let input = Data.int16LittleEndian([0, Int16.max, 0, Int16.min])
+        let first = resampler.convert(Data.int16LittleEndian([0, 3_000]))
+        let second = resampler.convert(Data.int16LittleEndian([6_000, 9_000]))
 
-        let output = resampler.convert(input)
+        let output = MetaPCMResampler.samples(from: first + second)
 
-        #expect(output.count == 12)
-        #expect(MetaPCMResampler.samples(from: output).count == 6)
+        #expect(output.map { Int(($0 * Float(Int16.max)).rounded()) } == [0, 2_000, 4_000, 6_000, 8_000])
     }
 
     @Test func costIsRoundedDownToWholeSeconds() {

@@ -51,6 +51,7 @@ struct MenuBarContentView: View {
         Group {
             Button(model.recordingState == .recording ? "Stop" : "Record Now") {
                 if model.recordingState == .recording {
+                    coordinator.toggleManual()
                     Task { await model.stopLiveSession() }
                 } else {
                     Task {
@@ -60,8 +61,10 @@ struct MenuBarContentView: View {
                             case "local": .appleSpeech
                             default: nil
                             }
+                            coordinator.toggleManual()
                             try await model.startLiveSession(override: override)
                         } catch {
+                            coordinator.toggleManual()
                             model.statusMessage = error.localizedDescription
                         }
                     }
@@ -101,6 +104,11 @@ struct MenuBarContentView: View {
             }
         }
         .onAppear {
+            coordinator.setPCMHandler { pcm in
+                Task { @MainActor in
+                    try? await model.appendLivePCM(pcm)
+                }
+            }
             coordinator.start()
         }
         .confirmationDialog(

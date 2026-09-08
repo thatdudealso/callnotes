@@ -11,7 +11,9 @@ public enum MetaAudioFormat: Sendable {
 
 public struct MetaPCMResampler: Sendable {
     private let inputSampleRate: Int
-    private var pendingSample: Int16?
+    private var previousSample: Int16?
+    private var sourceFramesProcessed: Int64 = 0
+    private var nextOutputFrame: Int64 = 0
 
     public init(inputSampleRate: Int) throws {
         guard [16_000, MetaAudioFormat.pcm24KHz.sampleRate].contains(inputSampleRate) else {
@@ -23,20 +25,42 @@ public struct MetaPCMResampler: Sendable {
     public mutating func convert(_ pcm: Data) -> Data {
         guard inputSampleRate != MetaAudioFormat.pcm24KHz.sampleRate else { return pcm }
         let samples = pcm.int16LittleEndianSamples()
+        guard !samples.isEmpty else { return Data() }
         var converted: [Int16] = []
-        converted.reserveCapacity(samples.count * 3 / 2 + 3)
-        for sample in samples {
-            guard let previous = pendingSample else {
-                pendingSample = sample
-                continue
+        converted.reserveCapacity(samples.count * 3 / 2)
+        let firstFrame = sourceFramesProcessed
+        let lastFrame = firstFrame + Int64(samples.count - 1)
+        let inputRate = Int64(inputSampleRate)
+        let outputRate = Int64(MetaAudioFormat.pcm24KHz.sampleRate)
+
+        while true {
+            let numerator = nextOutputFrame * inputRate
+            let lowerFrame = numerator / outputRate
+            let remainder = numerator % outputRate
+            let requiresNextFrame = remainder != 0
+            guard lowerFrame < lastFrame || (!requiresNextFrame && lowerFrame == lastFrame) else { break }
+            guard let lowerSample = sample(at: lowerFrame, firstFrame: firstFrame, samples: samples) else { break }
+            if remainder == 0 {
+                converted.append(lowerSample)
+            } else if let upperSample = sample(at: lowerFrame + 1, firstFrame: firstFrame, samples: samples) {
+                let fraction = Float(remainder) / Float(outputRate)
+                let value = Float(lowerSample) * (1 - fraction) + Float(upperSample) * fraction
+                converted.append(Int16(value.rounded()))
+            } else {
+                break
             }
-            let midpoint = Int16((Int32(previous) + Int32(sample)) / 2)
-            converted.append(previous)
-            converted.append(midpoint)
-            converted.append(sample)
-            pendingSample = nil
+            nextOutputFrame += 1
         }
+        previousSample = samples.last
+        sourceFramesProcessed += Int64(samples.count)
         return Data.int16LittleEndian(converted)
+    }
+
+    private func sample(at frame: Int64, firstFrame: Int64, samples: [Int16]) -> Int16? {
+        if frame == firstFrame - 1 { return previousSample }
+        let index = frame - firstFrame
+        guard index >= 0, index < Int64(samples.count) else { return nil }
+        return samples[Int(index)]
     }
 
     public static func samples(from pcm: Data) -> [Float] {

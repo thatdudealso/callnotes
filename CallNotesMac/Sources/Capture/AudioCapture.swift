@@ -53,6 +53,7 @@ final class AudioCapture: @unchecked Sendable {
     private(set) var isRunning = false
     private(set) var farSource: FarSource = .none
     private(set) var outputURL: URL?
+    var onMixedPCM: (@Sendable (Data) -> Void)?
 
     var ringSnapshot: [Int16] { ring.snapshot() }
 
@@ -213,6 +214,15 @@ final class AudioCapture: @unchecked Sendable {
         }
         guard let pair else { return }
         ring.write(near: pair.near, far: pair.far)
+        var mixed = Data()
+        mixed.reserveCapacity(pair.near.count * 2)
+        for (near, far) in zip(pair.near, pair.far) {
+            let average = Int16((Int32(near) + Int32(far)) / 2)
+            let bits = UInt16(bitPattern: average)
+            mixed.append(UInt8(bits & 0xFF))
+            mixed.append(UInt8(bits >> 8))
+        }
+        onMixedPCM?(mixed)
         if writing {
             try? writer?.write(near: pair.near, far: pair.far)
         }
