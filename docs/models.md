@@ -11,5 +11,5 @@ manifest digest against the expected value.
 
 The manifest digests were resolved from the Ollama registry on 2026-09-06.
 The fallback is Qwen3 30B Instruct because it is an established instruction
-model in the requested 27-32B range. Health checks in later phases will verify
-both pinned references before reporting deep-note generation as ready.
+model in the requested 27-32B range. Runtime health checks verify each pinned
+reference against these digests before deep-note generation uses it.
