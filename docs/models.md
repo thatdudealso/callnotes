@@ -1,9 +1,8 @@
 # Pinned local models
 
-This file is the source of truth for the pinned notes-model references. The
-notes phase will pull the named model tags and verify each local manifest
-digest against the expected value; Phase 2's `Scripts/bootstrap.sh` does not
-download any Ollama models.
+This file is the source of truth for the pinned notes-model references.
+`Scripts/bootstrap.sh` pulls each named model tag and verifies the local
+manifest digest against the expected value.
 
 | Purpose | Model reference | Manifest digest | Why it is present |
 | --- | --- | --- | --- |
@@ -12,5 +11,5 @@ download any Ollama models.
 
 The manifest digests were resolved from the Ollama registry on 2026-09-06.
 The fallback is Qwen3 30B Instruct because it is an established instruction
-model in the requested 27-32B range. Health checks in later phases will verify
-both pinned references before reporting deep-note generation as ready.
+model in the requested 27-32B range. Runtime health checks verify each pinned
+reference against these digests before deep-note generation uses it.

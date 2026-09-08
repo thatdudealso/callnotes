@@ -1,5 +1,7 @@
+import AppKit
 import CallNotesCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct HistorySplitView: View {
     @Bindable var model: AppModel
@@ -11,7 +13,7 @@ struct HistorySplitView: View {
                     empty
                 } else {
                     ForEach(model.calls) { call in
-                        HistoryRow(call: call)
+                        HistoryRow(call: call, notesTitle: model.notesByCall[call.id]?.body.title)
                             .tag(call.id)
                     }
                 }
@@ -64,10 +66,11 @@ struct HistorySplitView: View {
 
 struct HistoryRow: View {
     var call: Call
+    var notesTitle: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(call.counterpartyName ?? "Untitled call")
+            Text(notesTitle ?? call.counterpartyName ?? "Untitled call")
                 .font(.headline)
             HStack {
                 Text(call.startedAt.formatted(date: .abbreviated, time: .shortened))
@@ -91,6 +94,7 @@ struct CallDetailView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             header
+            notes
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
                     ForEach(model.selectedTurns) { turn in
@@ -148,6 +152,99 @@ struct CallDetailView: View {
                 .foregroundStyle(.secondary)
             }
         }
+    }
+
+    @ViewBuilder
+    private var notes: some View {
+        if let record = model.selectedNotes {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(record.body.title)
+                    .font(.title3.weight(.semibold))
+                Text(record.body.summary)
+                    .foregroundStyle(.secondary)
+                if model.isGeneratingNotes {
+                    Text("Notes generating...")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                notesLists(record.body)
+                HStack(spacing: 12) {
+                    Button("Regenerate") {
+                        Task { await model.regenerateNotes() }
+                    }
+                    .disabled(model.isGeneratingNotes)
+                    Button("Export Markdown") {
+                        exportMarkdown()
+                    }
+                }
+                .buttonStyle(.bordered)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(CallNotesStyle.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        } else if model.isGeneratingNotes {
+            Text("Notes generating...")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func notesLists(_ notes: CallNotes) -> some View {
+        if !notes.decisions.isEmpty {
+            labeledList("Decisions", notes.decisions)
+        }
+        if !notes.actionItems.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Action items")
+                    .font(.caption.weight(.semibold))
+                ForEach(Array(notes.actionItems.enumerated()), id: \.offset) { _, item in
+                    Text(actionLine(item))
+                        .font(.caption)
+                }
+            }
+        }
+        if !notes.followUps.isEmpty {
+            labeledList("Follow-ups", notes.followUps)
+        }
+        if !notes.openQuestions.isEmpty {
+            labeledList("Open questions", notes.openQuestions)
+        }
+    }
+
+    private func labeledList(_ title: String, _ items: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                Text("• \(item)")
+                    .font(.caption)
+            }
+        }
+    }
+
+    private func actionLine(_ item: CallNotes.ActionItem) -> String {
+        var line = "• "
+        if let owner = item.owner, !owner.isEmpty {
+            line += "\(owner): "
+        }
+        line += item.text
+        if let due = item.due, !due.isEmpty {
+            line += " (due \(due))"
+        }
+        return line
+    }
+
+    private func exportMarkdown() {
+        guard let call = model.selectedCall,
+            let markdown = model.notesMarkdown(for: call.id)
+        else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
+        panel.nameFieldStringValue = "\(call.counterpartyName ?? "call")-notes.md"
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        try? markdown.write(to: url, atomically: true, encoding: .utf8)
     }
 
     private func timestamp(_ time: TimeInterval) -> String {

@@ -10,7 +10,9 @@ CallNotes is in early development. Phase 1 adds Mac call detection and local,
 two-channel capture. Phase 2 provides a thin local proof path: a synthetic
 two-channel sample call is transcribed with Apple SpeechAnalyzer, diarized and
 speaker-labeled with FluidAudio, then stored in the dedicated local Postgres
-database for the Mac history and detail views. Notes and phone sync remain
+database for the Mac history and detail views. Phase 3 adds instant hang-up
+title/tl;dr via Apple Foundation Models and deep structured notes via local
+Ollama (Muse Glimmer 30B, with a Qwen3 Instruct fallback). Phone sync remains
 later-phase work.
 
 Some docs and code comments cite "plan section" numbers. These refer to the
@@ -22,10 +24,11 @@ and is never part of the public repository.
 
 The Mac app processes the bundled sample call locally, with shared Swift domain
 models and provider protocols in `Packages/CallNotesCore`. The core package
-uses Apple SpeechAnalyzer and FluidAudio locally and Postgres for the Mac-side
-store; Hummingbird and Ollama support are planned for later phases. The iPhone
-app and Share Extension are intentionally minimal Phase 0 shells that will
-later upload recordings to the paired Mac.
+uses Apple SpeechAnalyzer and FluidAudio locally, Postgres for the Mac-side
+store, Apple Foundation Models for instant notes, and Ollama for deep notes.
+Hummingbird remains planned for the phone-sync phase. The iPhone app and Share
+Extension are intentionally minimal Phase 0 shells that will later upload
+recordings to the paired Mac.
 
 ## Capture harness
 
@@ -51,11 +54,11 @@ xcodebuild -project CallNotes.xcodeproj -scheme CallNotesMac \
 `project.yml` is the source of truth for the Xcode project. Run `xcodegen
 generate` whenever it changes; the generated project is deliberately ignored.
 
-For the dedicated local Postgres instance, review then run
-`Scripts/bootstrap.sh`. Use `Scripts/bootstrap.sh --check` to see the
-operations without making changes. Ollama and the pinned notes models are not
-downloaded in this phase; see [docs/models.md](docs/models.md) for the
-immutable model references that the notes phase will install.
+For the dedicated local Postgres instance and the pinned Ollama notes models,
+review then run `Scripts/bootstrap.sh`. Use `Scripts/bootstrap.sh --check` to
+see the operations without making changes. The script pull-then-verifies each
+model digest in [docs/models.md](docs/models.md). Live notes generation against
+those models is gated on `CALLNOTES_OLLAMA=1`.
 
 ## License and attribution
 

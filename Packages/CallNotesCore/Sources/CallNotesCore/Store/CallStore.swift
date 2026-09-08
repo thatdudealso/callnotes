@@ -19,6 +19,14 @@ public protocol CallStore: Sendable {
         callID: UUID?,
         positive: Bool
     ) async throws
+    func upsertNotes(_ record: NotesRecord) async throws
+    func fetchNotes(callID: UUID) async throws -> [NotesRecord]
+}
+
+extension CallStore {
+    public func fetchPreferredNotes(callID: UUID) async throws -> NotesRecord? {
+        NotesRecord.preferred(in: try await fetchNotes(callID: callID))
+    }
 }
 
 enum VectorCodec {

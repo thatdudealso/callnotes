@@ -13,6 +13,7 @@ Cross-target test harnesses land here as the phases that need them arrive
 - golden-file provider tests and the diarization/identity accuracy harness
   (Phase 2),
 - Meta provider integration tests (Phase 4),
+- live Ollama notes generation for both pinned models (`CALLNOTES_OLLAMA=1`),
 - backup/restore and failure-injection scenarios (Phase 7).
 
 Unit tests for pure logic live inside the package:

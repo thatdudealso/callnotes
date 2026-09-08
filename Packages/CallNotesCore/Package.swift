@@ -24,7 +24,9 @@ let package = Package(
                 .product(name: "Hummingbird", package: "hummingbird"),
             ],
             resources: [
-                .process("Store/Migrations")
+                .process("Store/Migrations"),
+                .process("Notes/Prompts"),
+                .process("Notes/Schema"),
             ]
         ),
         .testTarget(

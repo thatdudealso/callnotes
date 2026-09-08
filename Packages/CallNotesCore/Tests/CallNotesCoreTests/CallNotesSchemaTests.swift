@@ -22,6 +22,16 @@ import Testing
         #expect(notes.entities.companies == ["Acme"])
     }
 
+    @Test func decodesInstantTitleAndSummary() throws {
+        let json = """
+            {"title":"Priya call","summary":"Confirmed the meeting time."}
+            """
+        let notes = try JSONDecoder().decode(CallNotes.self, from: Data(json.utf8))
+        #expect(notes.title == "Priya call")
+        #expect(notes.summary == "Confirmed the meeting time.")
+        #expect(notes.actionItems.isEmpty)
+    }
+
     @Test func roundTripsThroughJSON() throws {
         let notes = CallNotes(
             title: "Weekly sync",

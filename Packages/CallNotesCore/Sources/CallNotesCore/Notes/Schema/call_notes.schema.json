@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "callnotes://notes/call_notes.schema.json",
+  "title": "CallNotes",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "title",
+    "summary",
+    "decisions",
+    "action_items",
+    "follow_ups",
+    "open_questions",
+    "entities"
+  ],
+  "properties": {
+    "title": { "type": "string", "minLength": 1 },
+    "summary": { "type": "string", "minLength": 1 },
+    "decisions": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "action_items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["text"],
+        "properties": {
+          "owner": { "type": ["string", "null"] },
+          "text": { "type": "string", "minLength": 1 },
+          "due": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "follow_ups": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "open_questions": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "entities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["people", "companies", "amounts", "dates"],
+      "properties": {
+        "people": { "type": "array", "items": { "type": "string" } },
+        "companies": { "type": "array", "items": { "type": "string" } },
+        "amounts": { "type": "array", "items": { "type": "string" } },
+        "dates": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}
