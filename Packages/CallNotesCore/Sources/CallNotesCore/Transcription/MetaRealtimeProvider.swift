@@ -344,7 +344,7 @@ public actor MetaRealtimeSession: STTSession {
         } catch is CancellationError {
             return
         } catch {
-            guard !finished else { return }
+            guard !finished, !Task.isCancelled, socket === self.socket else { return }
             let wrapped = classifySocketError(error)
             continuation.finish(throwing: wrapped)
         }
