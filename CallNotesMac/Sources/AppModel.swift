@@ -291,7 +291,9 @@ final class AppModel {
                         live.currentSpeakerName = segment.channel == .far ? "Speaker 2" : "Me"
                         live.lastLine = segment.text
                         live.isProvisionalSpeaker = segment.channel == .far || segment.isVolatile
-                        liveSegments.append(segment)
+                        if !segment.isVolatile {
+                            retainFinalLiveSegment(segment)
+                        }
                     }
                 } catch {
                     guard let self, !Task.isCancelled else { return }
@@ -337,9 +339,25 @@ final class AppModel {
                 call.sttProvider = .appleSpeech
             }
             do {
+                let segments = liveSegments.enumerated().map { index, raw in
+                    Segment(
+                        callID: call.id,
+                        seq: index,
+                        startSec: raw.start,
+                        endSec: raw.end,
+                        channel: raw.channel ?? .mixed,
+                        clusterKey: raw.speakerTag,
+                        text: raw.text,
+                        words: raw.words,
+                        provider: call.sttProvider
+                    )
+                }
+                try await store.replaceSegments(callID: call.id, provider: call.sttProvider, segments)
                 try await store.upsertCall(call)
+                try await refresh()
             } catch {
                 statusMessage = error.localizedDescription
+                return
             }
             await generateInstantNotes(for: call, rawSegments: liveSegments)
         }
@@ -377,6 +395,17 @@ final class AppModel {
             !$0.isOwner && !$0.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         return candidates.count == 1 ? candidates[0].displayName : nil
+    }
+
+    private func retainFinalLiveSegment(_ candidate: RawSegment) {
+        let normalized = candidate.text.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .joined()
+        guard !liveSegments.contains(where: {
+            $0.start < candidate.end && candidate.start < $0.end
+                && $0.text.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).joined() == normalized
+        }) else { return }
+        liveSegments.append(candidate)
     }
 
     /// The detail view uses this for "Re-transcribe with Meta". A Meta file

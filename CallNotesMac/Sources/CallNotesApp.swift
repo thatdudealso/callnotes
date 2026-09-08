@@ -60,10 +60,9 @@ struct MenuBarContentView: View {
                             case "local": .appleSpeech
                             default: nil
                             }
-                            coordinator.toggleManual()
                             try await model.startLiveSession(override: override)
-                        } catch {
                             coordinator.toggleManual()
+                        } catch {
                             model.statusMessage = error.localizedDescription
                         }
                     }
