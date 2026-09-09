@@ -19,7 +19,7 @@ public struct ScriptedDiarizer: DiarizationService {
 
 /// Deterministic PCM transcriber used by the fixture spine in CI.
 public struct ScriptedPCMTranscriber: PCMTranscriber {
-    public let id: STTProviderID = .appleSpeech
+    public var id: STTProviderID
     public var dualInstanceMode: DualInstanceMode
     public var near: [RawSegment]
     public var far: [RawSegment]
@@ -27,8 +27,10 @@ public struct ScriptedPCMTranscriber: PCMTranscriber {
     public init(
         near: [RawSegment],
         far: [RawSegment],
+        id: STTProviderID = .appleSpeech,
         dualInstanceMode: DualInstanceMode = .concurrentLive
     ) {
+        self.id = id
         self.near = near
         self.far = far
         self.dualInstanceMode = dualInstanceMode

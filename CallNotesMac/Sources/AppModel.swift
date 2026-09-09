@@ -1,3 +1,4 @@
+import AppKit
 import CallNotesCore
 import Foundation
 import Observation
@@ -18,6 +19,8 @@ final class AppModel {
     var statusMessage: String?
     var notesByCall: [UUID: NotesRecord] = [:]
     var notesGeneratingCallID: UUID?
+    var importProgress = ImportProgress()
+    var inboxURL: URL?
 
     private var store: any CallStore
     private var notesSpine: NotesGenerationSpine?
@@ -30,6 +33,10 @@ final class AppModel {
     private var captureStopHandler: (@MainActor () async -> URL?)?
     private var isStartingLiveSession = false
     private var isProcessingSample = false
+    private var inboxWatcher: InboxWatcher?
+    private var importDuplicates: InboxDuplicateIndex?
+    private var pendingInboxFiles: [URL] = []
+    private var isImporting = false
 
     var selectedCall: Call? {
         calls.first { $0.id == selectedCallID }
@@ -109,6 +116,7 @@ final class AppModel {
         isStoreInitialized = true
         notesSpine = NotesGenerationSpine(client: OllamaClient(), store: postgres)
         statusMessage = nil
+        startInboxWatcher()
         do {
             try await refresh()
         } catch {
@@ -451,14 +459,15 @@ final class AppModel {
         liveSegments.append(candidate)
     }
 
-    /// The detail view uses this for "Re-transcribe with Meta". A Meta file
+    /// The detail view uses this for "Re-transcribe with...". A Meta file
     /// failure intentionally falls back to the local provider and leaves a
     /// non-blocking explanation rather than marking a captured call failed.
-    func retranscribeSelectedCall(withMeta: Bool) async {
+    func retranscribeSelectedCall(with provider: STTProviderID) async {
         guard var call = selectedCall else { return }
-        statusMessage = withMeta ? "Transcribing with Meta..." : "Transcribing locally..."
+        statusMessage = "Transcribing with \(retranscribeLabel(provider))..."
         do {
-            if withMeta {
+            switch provider {
+            case .metaMuse:
                 let configuration = try metaConfiguration()
                 let result = try await MetaFileProvider(configuration: configuration).transcribeWithReceipt(
                     fileURL: URL(fileURLWithPath: call.audioPath),
@@ -468,7 +477,14 @@ final class AppModel {
                 call.metaBilledSec += result.billedSeconds
                 try await store.upsertCall(call)
                 statusMessage = "Re-transcribed with Meta. \(result.billedSeconds)s billed."
-            } else {
+            case .fluidParakeet:
+                let segments = try await FluidParakeetProvider().transcribe(
+                    fileURL: URL(fileURLWithPath: call.audioPath),
+                    config: STTSessionConfig()
+                )
+                try await persistRetranscription(segments, provider: .fluidParakeet, call: &call)
+                statusMessage = "Re-transcribed with Parakeet."
+            case .appleSpeech:
                 let segments = try await speech.transcribe(
                     fileURL: URL(fileURLWithPath: call.audioPath),
                     config: STTSessionConfig()
@@ -479,7 +495,7 @@ final class AppModel {
             try await refresh()
             await select(call)
         } catch {
-            guard withMeta else {
+            guard provider == .metaMuse else {
                 statusMessage = error.localizedDescription
                 return
             }
@@ -503,6 +519,129 @@ final class AppModel {
             } catch {
                 statusMessage = error.localizedDescription
             }
+        }
+    }
+
+    func revealInbox() {
+        let url = inboxURL ?? (try? InboxPaths.resolvedInbox())
+        guard let url else { return }
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    func startInboxWatcher() {
+        guard isStoreInitialized else { return }
+        inboxWatcher?.stop()
+        do {
+            let directory = try InboxPaths.resolvedInbox()
+            inboxURL = directory
+            let seen = try InboxPaths.seenIndexURL()
+            let duplicates = InboxDuplicateIndex(storageURL: seen)
+            importDuplicates = duplicates
+            let iCloud = InboxPaths.iCloudDriveInbox()?.standardizedFileURL
+            let source: CallSource =
+                iCloud == directory.standardizedFileURL ? .iphoneRecording : .fileImport
+            let watcher = InboxWatcher(directory: directory, sourceForDirectory: source)
+            watcher.onSettled = { [weak self] url in
+                Task { @MainActor in
+                    await self?.enqueueInboxImport(url, source: source)
+                }
+            }
+            inboxWatcher = watcher
+            watcher.start()
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    func enqueueInboxImport(_ url: URL, source: CallSource) async {
+        pendingInboxFiles.append(url)
+        await drainInboxQueue(source: source)
+    }
+
+    private func drainInboxQueue(source: CallSource) async {
+        guard !isImporting else { return }
+        isImporting = true
+        defer { isImporting = false }
+        while !pendingInboxFiles.isEmpty {
+            let url = pendingInboxFiles.removeFirst()
+            await importInboxFile(url, source: source)
+        }
+    }
+
+    private func importInboxFile(_ url: URL, source: CallSource) async {
+        guard isStoreInitialized else { return }
+        var job = ImportJob(fileName: url.lastPathComponent, sourceURL: url, stage: .settling)
+        upsertImportJob(job)
+        let storedDefault = UserDefaults.standard.string(forKey: "default_engine")
+        let configuredDefault: STTProviderID? = storedDefault == "meta" ? .metaMuse : .appleSpeech
+        var engine = EngineSelection.resolve(override: nil, configuredDefault: configuredDefault)
+        if engine == .appleSpeech, await FluidParakeetProvider().healthCheck().isUsable {
+            engine = .fluidParakeet
+        }
+        let duplicates = importDuplicates ?? InboxDuplicateIndex()
+        var meta: (any MetaFileTranscribing)?
+        if engine == .metaMuse {
+            do {
+                meta = MetaFileProvider(configuration: try metaConfiguration())
+            } catch {
+                statusMessage = "Meta is not configured. Importing with local transcription."
+                engine = .appleSpeech
+            }
+        }
+        let speech: any PCMTranscriber = engine == .fluidParakeet ? FluidParakeetProvider() : self.speech
+        let spine = FileTranscriptionSpine(
+            speech: speech,
+            diarizer: FluidDiarizer(),
+            store: store,
+            meta: meta
+        )
+        let pipeline = ImportPipeline(
+            store: store,
+            spine: spine,
+            notes: notesSpine,
+            duplicates: duplicates,
+            onProgress: { [weak self] update in
+                Task { @MainActor in
+                    self?.upsertImportJob(update)
+                }
+            }
+        )
+        do {
+            let processed = try await pipeline.`import`(url, engine: engine, source: source)
+            job.callID = processed.call.id
+            job.stage = .completed
+            job.fractionComplete = 1
+            upsertImportJob(job)
+            turnsByCall[processed.call.id] = processed.turns
+            selectedCallID = processed.call.id
+            try await refresh()
+            statusMessage = "Imported \(url.lastPathComponent)."
+        } catch FileImportError.duplicate {
+            job.stage = .duplicate
+            job.fractionComplete = 1
+            upsertImportJob(job)
+        } catch {
+            job.stage = .failed
+            job.error = error.localizedDescription
+            upsertImportJob(job)
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    private func upsertImportJob(_ job: ImportJob) {
+        if let index = importProgress.jobs.firstIndex(where: { $0.id == job.id || $0.sourceURL == job.sourceURL }) {
+            importProgress.jobs[index] = job
+        } else {
+            importProgress.jobs.append(job)
+        }
+    }
+
+    private func retranscribeLabel(_ provider: STTProviderID) -> String {
+        switch provider {
+        case .appleSpeech: "Local"
+        case .fluidParakeet: "Parakeet"
+        case .metaMuse: "Meta"
         }
     }
 

@@ -85,6 +85,60 @@ public enum TurnAttributor {
         }
     }
 
+    /// Mixed/mono imports have no near/far split. Clusters that match the
+    /// enrolled owner are labeled as Me; everyone else is a far speaker.
+    public static func attributeMono(
+        segments: [RawSegment],
+        clusters: [DiarizedCluster],
+        profiles: [SpeakerProfile]
+    ) -> [AttributedTurn] {
+        let owner = profiles.first(where: \.isOwner)
+        let clusterMatches = matchClusters(clusters, profiles: profiles)
+        let unknownNames = speakerNumbers(for: clusters, profiles: profiles)
+        let tagged = segments.map { segment -> RawSegment in
+            var copy = snapToWords(segment)
+            if copy.channel == nil { copy.channel = .mixed }
+            if copy.speakerTag == nil {
+                copy.speakerTag = ClusterAssigner.assign(segment: copy, clusters: clusters)
+            }
+            return copy
+        }
+        let merged = SegmentMerger.mergeAndCollapse(tagged)
+        return merged.enumerated().map { index, segment in
+            let assigned = segment.speakerTag
+                ?? ClusterAssigner.assign(segment: segment, clusters: clusters)
+            let match = assigned.flatMap { clusterMatches[$0] }
+            let isOwner = match?.profileID != nil && match?.profileID == owner?.id
+            let profile: SpeakerProfile?
+            if let profileID = match?.profileID {
+                profile = profiles.first { $0.id == profileID }
+            } else {
+                profile = nil
+            }
+            let speakerName: String
+            if isOwner {
+                speakerName = owner?.displayName ?? "Me"
+            } else if let profile {
+                speakerName = profile.displayName
+            } else if let assigned {
+                speakerName = unknownNames[assigned] ?? "Speaker \(index + 2)"
+            } else {
+                speakerName = "Speaker \(index + 2)"
+            }
+            return AttributedTurn(
+                start: segment.start,
+                end: segment.end,
+                channel: isOwner ? .near : (segment.channel ?? .mixed),
+                clusterKey: isOwner ? ownerClusterKey : assigned,
+                speakerID: isOwner ? owner?.id : profile?.id,
+                speakerName: speakerName,
+                isProvisional: false,
+                text: segment.text,
+                words: segment.words
+            )
+        }
+    }
+
     /// Rebuilds attributed turns from persisted segments and the per-call
     /// cluster -> profile mapping. Far-channel `cluster_key` is the diarizer
     /// id (e.g. "A"), not a profile UUID.

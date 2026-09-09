@@ -17,4 +17,15 @@ public enum CallAudioPaths: Sendable {
         try audioDirectory(fileManager: fileManager)
             .appendingPathComponent("\(callID.uuidString).caf")
     }
+
+    public static func importedAudioURL(
+        callID: UUID,
+        sourceExtension: String,
+        fileManager: FileManager = .default
+    ) throws -> URL {
+        let ext = sourceExtension.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
+        let resolved = ext.isEmpty ? "caf" : ext
+        return try audioDirectory(fileManager: fileManager)
+            .appendingPathComponent("\(callID.uuidString).\(resolved)")
+    }
 }
