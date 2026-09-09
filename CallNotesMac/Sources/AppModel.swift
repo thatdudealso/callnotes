@@ -27,6 +27,7 @@ final class AppModel {
     private var liveResultsTask: Task<Void, Never>?
     private var liveSegments: [RawSegment] = []
     private var instantCallAtHangUp: Call?
+    private var captureStopHandler: (@MainActor () async -> URL?)?
     private var isStartingLiveSession = false
     private var isProcessingSample = false
 
@@ -46,6 +47,21 @@ final class AppModel {
 
     var isGeneratingNotes: Bool {
         selectedCallID != nil && selectedCallID == notesGeneratingCallID
+    }
+
+    var metaBilledSeconds: Int {
+        calls.reduce(0) { $0 + $1.metaBilledSec }
+    }
+
+    var metaBilledDuration: String {
+        let minutes = metaBilledSeconds / 60
+        let seconds = metaBilledSeconds % 60
+        return "\(minutes)m \(seconds)s"
+    }
+
+    var metaCost: String {
+        MetaCostMeter.costDollars(billedSeconds: metaBilledSeconds)
+            .formatted(.currency(code: "USD"))
     }
 
     var canProcessSampleCall: Bool {
@@ -156,7 +172,7 @@ final class AppModel {
             try await store.upsertCall(call)
             instantCallAtHangUp = nil
             instantCallAtHangUp = call
-            try await startLiveSession(forSamplePlayback: true)
+            try await startLiveSession(forSamplePlayback: true, override: .appleSpeech)
             try await playFixture(cafURL: fixture.cafURL)
             let diarizer = FluidDiarizer()
             let priyaEmbedding = try await SampleCallFixture.priyaEmbedding(
@@ -230,7 +246,10 @@ final class AppModel {
         }
     }
 
-    func startLiveSession(forSamplePlayback: Bool = false) async throws {
+    func startLiveSession(
+        forSamplePlayback: Bool = false,
+        override perCallOverride: STTProviderID? = nil
+    ) async throws {
         guard liveSession == nil,
             !isStartingLiveSession,
             recordingState == .idle || (forSamplePlayback && isProcessingSample)
@@ -239,19 +258,42 @@ final class AppModel {
         }
         isStartingLiveSession = true
         do {
-            let session = try await speech.startSession(config: STTSessionConfig())
+            let provider = try await configuredProvider(override: perCallOverride)
+            let session = try await provider.provider.startSession(config: STTSessionConfig())
+            let engine = session is AppleSpeechSession ? STTProviderID.appleSpeech : provider.requestedID
             liveSession = session
             liveSegments = []
+            live.engine = engine
+            live.isOffDevice = engine == .metaMuse
+            if !forSamplePlayback {
+                let counterpartyName = await suggestedCounterpartyName()
+                let call = Call(
+                    source: .macManual,
+                    startedAt: Date(),
+                    counterpartyName: counterpartyName,
+                    audioPath: "",
+                    sttProvider: engine
+                )
+                try await store.upsertCall(call)
+                instantCallAtHangUp = call
+            }
             recordingState = .recording
             liveResultsTask = Task { [weak self] in
                 do {
                     for try await segment in session.results {
                         guard !Task.isCancelled, let self else { return }
+                        if let fallback = session as? MetaFallbackSession, await fallback.isUsingFallback() {
+                            live.engine = .appleSpeech
+                            live.isOffDevice = false
+                            statusMessage = "Meta became unavailable. Continuing with local transcription."
+                        }
                         live.elapsed = max(live.elapsed, segment.end)
                         live.currentSpeakerName = segment.channel == .far ? "Speaker 2" : "Me"
                         live.lastLine = segment.text
                         live.isProvisionalSpeaker = segment.channel == .far || segment.isVolatile
-                        liveSegments.append(segment)
+                        if !segment.isVolatile {
+                            retainFinalLiveSegment(segment)
+                        }
                     }
                 } catch {
                     guard let self, !Task.isCancelled else { return }
@@ -271,7 +313,8 @@ final class AppModel {
         try await liveSession?.append(pcm: pcm)
     }
 
-    func finishLiveSession() async {
+    func finishLiveSession(captureURL: URL? = nil) async {
+        let finishedSession = liveSession
         defer {
             liveSession = nil
             liveResultsTask = nil
@@ -284,14 +327,183 @@ final class AppModel {
             liveResultsTask?.cancel()
             statusMessage = error.localizedDescription
         }
-        if let call = instantCallAtHangUp {
+        if var call = instantCallAtHangUp {
             instantCallAtHangUp = nil
+            let billedSeconds = await realtimeMetaBilledSeconds(for: finishedSession)
+            call.metaBilledSec += billedSeconds
+            call.endedAt = Date()
+            call.durationSec = max(0, Int(call.endedAt!.timeIntervalSince(call.startedAt).rounded(.down)))
+            if let captureURL {
+                call.audioPath = captureURL.path
+                call.status = .transcribed
+            } else if call.source == .macManual {
+                call.status = .failed
+                call.error = "Audio capture did not produce a recording"
+                call.errorStage = "capture"
+            } else {
+                call.status = .transcribed
+            }
+            if let session = finishedSession as? MetaFallbackSession, await session.isUsingFallback() {
+                call.sttProvider = .appleSpeech
+            }
+            do {
+                let segments = liveSegments.enumerated().map { index, raw in
+                    Segment(
+                        callID: call.id,
+                        seq: index,
+                        startSec: raw.start,
+                        endSec: raw.end,
+                        channel: raw.channel ?? .mixed,
+                        clusterKey: raw.speakerTag,
+                        text: raw.text,
+                        words: raw.words,
+                        provider: call.sttProvider
+                    )
+                }
+                try await store.replaceSegments(callID: call.id, provider: call.sttProvider, segments)
+                try await store.upsertCall(call)
+                try await refresh()
+            } catch {
+                statusMessage = error.localizedDescription
+                return
+            }
+            guard call.status == .transcribed else {
+                statusMessage = "Audio capture failed. The live transcript was kept without a recording."
+                return
+            }
             await generateInstantNotes(for: call, rawSegments: liveSegments)
         }
     }
 
     func stopLiveSession() async {
-        await finishLiveSession()
+        let captureURL = await captureStopHandler?()
+        await finishLiveSession(captureURL: captureURL)
+    }
+
+    func setCaptureStopHandler(_ handler: @escaping @MainActor () async -> URL?) {
+        captureStopHandler = handler
+    }
+
+    func failLiveSessionForCapture(_ message: String) async {
+        guard let session = liveSession else { return }
+        let resultsTask = liveResultsTask
+        liveSession = nil
+        liveResultsTask = nil
+        liveSegments = []
+        resultsTask?.cancel()
+        try? await session.finish()
+        recordingState = .idle
+        live.isOffDevice = false
+
+        guard var call = instantCallAtHangUp else {
+            statusMessage = "Audio capture could not start: \(message)"
+            return
+        }
+        instantCallAtHangUp = nil
+        call.endedAt = Date()
+        call.durationSec = max(0, Int(call.endedAt!.timeIntervalSince(call.startedAt).rounded(.down)))
+        call.status = .failed
+        call.error = message
+        call.errorStage = "capture"
+        do {
+            try await store.upsertCall(call)
+            try await refresh()
+        } catch {
+            statusMessage = error.localizedDescription
+            return
+        }
+        statusMessage = "Audio capture could not start: \(message)"
+    }
+
+    func updateCounterpartyName(for callID: UUID, name: String) {
+        guard let index = calls.firstIndex(where: { $0.id == callID }) else { return }
+        let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        calls[index].counterpartyName = normalized.isEmpty ? nil : normalized
+        let call = calls[index]
+        if instantCallAtHangUp?.id == callID {
+            instantCallAtHangUp = call
+        }
+        Task {
+            do {
+                try await store.upsertCall(call)
+            } catch {
+                statusMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func suggestedCounterpartyName() async -> String? {
+        guard let profiles = try? await store.fetchSpeakerProfiles() else { return nil }
+        let candidates = profiles.filter {
+            !$0.isOwner && !$0.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return candidates.count == 1 ? candidates[0].displayName : nil
+    }
+
+    private func retainFinalLiveSegment(_ candidate: RawSegment) {
+        let normalized = candidate.text.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .joined()
+        guard !liveSegments.contains(where: {
+            $0.start < candidate.end && candidate.start < $0.end
+                && $0.text.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).joined() == normalized
+        }) else { return }
+        liveSegments.append(candidate)
+    }
+
+    /// The detail view uses this for "Re-transcribe with Meta". A Meta file
+    /// failure intentionally falls back to the local provider and leaves a
+    /// non-blocking explanation rather than marking a captured call failed.
+    func retranscribeSelectedCall(withMeta: Bool) async {
+        guard var call = selectedCall else { return }
+        statusMessage = withMeta ? "Transcribing with Meta..." : "Transcribing locally..."
+        do {
+            if withMeta {
+                let configuration = try metaConfiguration()
+                let result = try await MetaFileProvider(configuration: configuration).transcribeWithReceipt(
+                    fileURL: URL(fileURLWithPath: call.audioPath),
+                    config: STTSessionConfig()
+                )
+                try await persistRetranscription(result.segments, provider: .metaMuse, call: &call)
+                call.metaBilledSec += result.billedSeconds
+                try await store.upsertCall(call)
+                statusMessage = "Re-transcribed with Meta. \(result.billedSeconds)s billed."
+            } else {
+                let segments = try await speech.transcribe(
+                    fileURL: URL(fileURLWithPath: call.audioPath),
+                    config: STTSessionConfig()
+                )
+                try await persistRetranscription(segments, provider: .appleSpeech, call: &call)
+                statusMessage = "Re-transcribed locally."
+            }
+            try await refresh()
+            await select(call)
+        } catch {
+            guard withMeta else {
+                statusMessage = error.localizedDescription
+                return
+            }
+            if let partial = error as? MetaFileTranscriptionFailure, partial.billedSeconds > 0 {
+                call.metaBilledSec += partial.billedSeconds
+                do {
+                    try await store.upsertCall(call)
+                } catch {
+                    statusMessage = error.localizedDescription
+                }
+            }
+            do {
+                let segments = try await speech.transcribe(
+                    fileURL: URL(fileURLWithPath: call.audioPath),
+                    config: STTSessionConfig()
+                )
+                try await persistRetranscription(segments, provider: .appleSpeech, call: &call)
+                try await refresh()
+                await select(call)
+                statusMessage = "Meta was unavailable. Re-transcribed locally instead."
+            } catch {
+                statusMessage = error.localizedDescription
+            }
+        }
     }
 
     private func playFixture(cafURL: URL) async throws {
@@ -334,6 +546,83 @@ final class AppModel {
             requiredFarSpeakerID: priyaProfileID
         )
         return processed
+    }
+
+    private func configuredProvider(
+        override perCallOverride: STTProviderID?
+    ) async throws -> (provider: any STTProvider, requestedID: STTProviderID) {
+        let storedDefault = UserDefaults.standard.string(forKey: "default_engine")
+        let configuredDefault: STTProviderID? = storedDefault == "meta" ? .metaMuse : .appleSpeech
+        let requestedID = EngineSelection.resolve(
+            override: perCallOverride,
+            configuredDefault: configuredDefault
+        )
+        guard requestedID == .metaMuse else { return (speech, .appleSpeech) }
+        do {
+            let profiles = try await store.fetchSpeakerProfiles()
+            let diarizer = FluidDiarizer()
+            let stitching = MetaRealtimeSpeakerStitching(profiles: profiles) { pcm in
+                let samples = PCMResampler.resampleMono(
+                    input: MetaPCMResampler.samples(from: pcm),
+                    inputSampleRate: Double(MetaAudioFormat.pcm24KHz.sampleRate)
+                )
+                return try await diarizer.enrollEmbedding(samples: samples)
+            }
+            let meta = MetaRealtimeProvider(
+                configuration: try metaConfiguration(),
+                speakerStitching: stitching
+            )
+            return (MetaFallbackProvider(meta: meta, local: speech), .metaMuse)
+        } catch {
+            statusMessage = "Meta is not configured. Continuing with local transcription."
+            return (speech, .appleSpeech)
+        }
+    }
+
+    private func realtimeMetaBilledSeconds(for session: (any STTSession)?) async -> Int {
+        if let session = session as? MetaFallbackSession {
+            return await session.billedSeconds()
+        }
+        if let session = session as? MetaRealtimeSession {
+            return await session.billedSeconds()
+        }
+        return 0
+    }
+
+    private func metaConfiguration() throws -> MetaTranscriptionConfiguration {
+        guard let key = try MetaAPIKeyKeychain.load(), !key.isEmpty else {
+            throw MetaTranscriptionError.missingAPIKey
+        }
+        return MetaTranscriptionConfiguration(
+            apiKey: key,
+            zeroDataRetention: UserDefaults.standard.object(forKey: "meta_zdr_enabled") as? Bool ?? true
+        )
+    }
+
+    private func persistRetranscription(
+        _ rawSegments: [RawSegment],
+        provider: STTProviderID,
+        call: inout Call
+    ) async throws {
+        let segments = rawSegments.enumerated().map { index, raw in
+            Segment(
+                callID: call.id,
+                seq: index,
+                startSec: raw.start,
+                endSec: raw.end,
+                channel: raw.channel ?? .mixed,
+                clusterKey: raw.speakerTag,
+                text: raw.text,
+                words: raw.words,
+                provider: provider
+            )
+        }
+        try await store.replaceSegments(callID: call.id, provider: provider, segments)
+        call.sttProvider = provider
+        call.status = .transcribed
+        call.error = nil
+        call.errorStage = nil
+        try await store.upsertCall(call)
     }
 
     func regenerateNotes() async {

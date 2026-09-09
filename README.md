@@ -12,8 +12,12 @@ two-channel sample call is transcribed with Apple SpeechAnalyzer, diarized and
 speaker-labeled with FluidAudio, then stored in the dedicated local Postgres
 database for the Mac history and detail views. Phase 3 adds instant hang-up
 title/tl;dr via Apple Foundation Models and deep structured notes via local
-Ollama (Muse Glimmer 30B, with a Qwen3 Instruct fallback). Phone sync remains
-later-phase work.
+Ollama (Muse Glimmer 30B, with a Qwen3 Instruct fallback). Phase 4 adds an
+optional Meta Muse cloud transcription engine: local transcription stays the
+default, the default engine is chosen in Settings (Engines) or onboarding,
+each call can override it or be re-transcribed with Meta, billed Meta seconds
+are tracked per call, and any Meta failure falls back to local transcription
+without losing the call. Phone sync remains later-phase work.
 
 Some docs and code comments cite "plan section" numbers. These refer to the
 private implementation plan that maintainers keep locally at
@@ -26,6 +30,9 @@ The Mac app processes the bundled sample call locally, with shared Swift domain
 models and provider protocols in `Packages/CallNotesCore`. The core package
 uses Apple SpeechAnalyzer and FluidAudio locally, Postgres for the Mac-side
 store, Apple Foundation Models for instant notes, and Ollama for deep notes.
+The optional Meta Muse cloud transcription engine sits behind the same
+provider seams, with the API key kept in the Keychain and local providers as
+the automatic fallback.
 Hummingbird remains planned for the phone-sync phase. The iPhone app and Share
 Extension are intentionally minimal Phase 0 shells that will later upload
 recordings to the paired Mac.

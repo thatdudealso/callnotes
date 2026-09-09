@@ -18,6 +18,7 @@ final class CaptureCoordinator {
     private var activeCallID: UUID?
     private var previousPhase: CallDetectionPhase = .idle
     private var captureTransition: Task<Void, Never>?
+    private var captureFailureHandler: (@MainActor (String) async -> Void)?
 
     init() {
         Task { @MainActor in
@@ -38,6 +39,22 @@ final class CaptureCoordinator {
         } else {
             detector.manualStart()
         }
+    }
+
+    func setPCMHandler(_ handler: @escaping @Sendable (Data) -> Void) {
+        capture.onMixedPCM = handler
+    }
+
+    func setCaptureFailureHandler(_ handler: @escaping @MainActor (String) async -> Void) {
+        captureFailureHandler = handler
+    }
+
+    func stopLiveCapture() async -> URL? {
+        if detector.latest.snapshot.isCapturing {
+            detector.manualStop()
+        }
+        await captureTransition?.value
+        return lastCaptureURL
     }
 
     private func handle(_ status: CallDetector.Status) {
@@ -92,6 +109,7 @@ final class CaptureCoordinator {
         do {
             let callID = UUID()
             activeCallID = callID
+            lastCaptureURL = nil
             let url = try CallAudioPaths.cafURL(callID: callID)
             try await capture.start(
                 AudioCapture.Configuration(
@@ -106,8 +124,14 @@ final class CaptureCoordinator {
             lastError = nil
             logger.info("capture started \(url.path, privacy: .public) far=\(self.capture.farSource.rawValue, privacy: .public)")
         } catch {
-            lastError = error.localizedDescription
-            logger.error("capture start failed: \(error.localizedDescription, privacy: .public)")
+            let message = error.localizedDescription
+            lastError = message
+            logger.error("capture start failed: \(message, privacy: .public)")
+            activeCallID = nil
+            await captureFailureHandler?(message)
+            if status.snapshot.isManual {
+                detector.manualStop()
+            }
             recordingState = .idle
             previousPhase = .idle
         }

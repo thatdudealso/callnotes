@@ -77,6 +77,10 @@ struct HistoryRow: View {
                 if let duration = call.durationSec {
                     Text("\(duration)s")
                 }
+                if call.sttProvider == .metaMuse {
+                    Image(systemName: "cloud")
+                        .accessibilityLabel("Cloud transcription")
+                }
                 Text(call.sttProvider == .metaMuse ? "Meta" : "Local")
                     .foregroundStyle(CallNotesStyle.primary)
                 Text(call.status.rawValue.replacingOccurrences(of: "_", with: " "))
@@ -90,6 +94,8 @@ struct HistoryRow: View {
 
 struct CallDetailView: View {
     var model: AppModel
+    @AppStorage("meta_privacy_acknowledged") private var privacyAcknowledged = false
+    @State private var showMetaDisclosure = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -132,6 +138,19 @@ struct CallDetailView: View {
         }
         .padding(20)
         .frame(minWidth: 520, minHeight: 360)
+        .confirmationDialog(
+            "Send audio to Meta?",
+            isPresented: $showMetaDisclosure,
+            titleVisibility: .visible
+        ) {
+            Button("Re-transcribe with Meta") {
+                privacyAcknowledged = true
+                Task { await model.retranscribeSelectedCall(withMeta: true) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Audio for this call will be sent to Meta for transcription. Local transcription remains available if Meta fails.")
+        }
     }
 
     @ViewBuilder
@@ -140,16 +159,39 @@ struct CallDetailView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(call.counterpartyName ?? "Untitled call")
                     .font(.title2.weight(.semibold))
+                TextField(
+                    "Counterparty",
+                    text: Binding(
+                        get: { call.counterpartyName ?? "" },
+                        set: { model.updateCounterpartyName(for: call.id, name: $0) }
+                    )
+                )
+                .textFieldStyle(.roundedBorder)
                 HStack(spacing: 12) {
                     Text(call.startedAt.formatted(date: .abbreviated, time: .shortened))
                     Text(call.source.rawValue.replacingOccurrences(of: "_", with: " "))
-                    Text(call.sttProvider == .appleSpeech ? "Local" : call.sttProvider.rawValue)
+                    Label(
+                        call.sttProvider == .appleSpeech ? "Local" : "Meta (cloud)",
+                        systemImage: call.sttProvider == .metaMuse ? "cloud" : "desktopcomputer"
+                    )
                     if model.lastDERCallID == call.id, let der = model.lastDER {
                         Text(String(format: "DER %.1f%%", der.der * 100))
                     }
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                Menu("Re-transcribe with") {
+                    Button("Local") {
+                        Task { await model.retranscribeSelectedCall(withMeta: false) }
+                    }
+                    Button("Meta") {
+                        if privacyAcknowledged {
+                            Task { await model.retranscribeSelectedCall(withMeta: true) }
+                        } else {
+                            showMetaDisclosure = true
+                        }
+                    }
+                }
             }
         }
     }
