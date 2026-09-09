@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS calls (
   audio_channels int DEFAULT 2,
   sample_rate int DEFAULT 16000,
   stt_provider text NOT NULL,
+  transcription_providers jsonb NOT NULL DEFAULT '[]'::jsonb,
   diarization_provider text,
   notes_provider text,
   status text CHECK (status IN ('recording','uploaded','transcribing','transcribed','notes_ready','failed')),
@@ -89,6 +90,15 @@ CREATE TABLE IF NOT EXISTS segments (
   UNIQUE (call_id, provider, seq)
 );
 CREATE INDEX IF NOT EXISTS segments_text_trgm ON segments USING gin (text gin_trgm_ops);
+
+ALTER TABLE calls
+  ADD COLUMN IF NOT EXISTS transcription_providers jsonb NOT NULL DEFAULT '[]'::jsonb;
+UPDATE calls
+SET transcription_providers = COALESCE(
+  (SELECT jsonb_agg(DISTINCT provider) FROM segments WHERE call_id = calls.id),
+  jsonb_build_array(stt_provider)
+)
+WHERE transcription_providers = '[]'::jsonb;
 
 CREATE TABLE IF NOT EXISTS notes (
   id uuid PRIMARY KEY,

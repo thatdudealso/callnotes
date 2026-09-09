@@ -26,8 +26,11 @@ public struct DashboardCall: Identifiable, Sendable, Equatable {
     public var id: UUID { call.id }
     public var counterpartyName: String { DashboardAnalytics.contactName(for: call.counterpartyName) }
     public var engine: DashboardEngine {
-        if call.sttProvider == .metaMuse { return .meta }
-        return call.metaBilledSec > 0 ? .mixed : .local
+        let providers = call.transcriptionProviders + [call.sttProvider]
+        let usesMeta = call.metaBilledSec > 0 || providers.contains(.metaMuse)
+        let usesLocal = providers.contains { $0 != .metaMuse }
+        if usesMeta && usesLocal { return .mixed }
+        return usesMeta ? .meta : .local
     }
 
     init(call: Call, durationSec: Int) {

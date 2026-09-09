@@ -53,6 +53,10 @@ public actor PostgresStore: CallStore {
     public func upsertCall(_ call: Call) async throws {
         let source = call.source.rawValue
         let stt = call.sttProvider.rawValue
+        let transcriptionProviders = try String(
+            decoding: JSONEncoder().encode(call.transcriptionProviders.map(\.rawValue)),
+            as: UTF8.self
+        )
         let status = call.status.rawValue
         let diarization = call.diarizationProvider
         let notes = call.notesProvider?.rawValue
@@ -61,12 +65,13 @@ public actor PostgresStore: CallStore {
             INSERT INTO calls (
               id, source, started_at, ended_at, duration_sec, counterparty_name, counterparty_number,
               audio_path, audio_channels, sample_rate, stt_provider, diarization_provider, notes_provider,
-              status, consent_announced, meta_billed_sec, error, error_stage, updated_at
+              transcription_providers, status, consent_announced, meta_billed_sec, error, error_stage, updated_at
             ) VALUES (
               \(call.id), \(source), \(call.startedAt), \(call.endedAt), \(call.durationSec),
               \(call.counterpartyName), \(call.counterpartyNumber), \(call.audioPath),
               \(call.audioChannels), \(call.sampleRate), \(stt), \(diarization), \(notes),
-              \(status), \(call.consentAnnounced), \(call.metaBilledSec), \(call.error), \(call.errorStage), now()
+              CAST(\(transcriptionProviders) AS jsonb), \(status), \(call.consentAnnounced),
+              \(call.metaBilledSec), \(call.error), \(call.errorStage), now()
             )
             ON CONFLICT (id) DO UPDATE SET
               source = EXCLUDED.source,
@@ -79,6 +84,7 @@ public actor PostgresStore: CallStore {
               audio_channels = EXCLUDED.audio_channels,
               sample_rate = EXCLUDED.sample_rate,
               stt_provider = EXCLUDED.stt_provider,
+              transcription_providers = EXCLUDED.transcription_providers,
               diarization_provider = EXCLUDED.diarization_provider,
               notes_provider = EXCLUDED.notes_provider,
               status = EXCLUDED.status,
@@ -98,7 +104,7 @@ public actor PostgresStore: CallStore {
             """
             SELECT id, source, started_at, ended_at, duration_sec, counterparty_name, counterparty_number,
                    audio_path, audio_channels, sample_rate, stt_provider, diarization_provider, notes_provider,
-                   status, consent_announced, meta_billed_sec, error, error_stage
+                   status, consent_announced, meta_billed_sec, error, error_stage, transcription_providers::text
             FROM calls
             ORDER BY started_at DESC
             """,
@@ -116,7 +122,7 @@ public actor PostgresStore: CallStore {
             """
             SELECT id, source, started_at, ended_at, duration_sec, counterparty_name, counterparty_number,
                    audio_path, audio_channels, sample_rate, stt_provider, diarization_provider, notes_provider,
-                   status, consent_announced, meta_billed_sec, error, error_stage
+                   status, consent_announced, meta_billed_sec, error, error_stage, transcription_providers::text
             FROM calls WHERE id = \(id)
             """,
             logger: logger
@@ -420,9 +426,13 @@ public actor PostgresStore: CallStore {
         let decoded = try row.decode(
             (
                 UUID, String, Date, Date?, Int?, String?, String?, String, Int, Int, String,
-                String?, String?, String, Bool, Int, String?, String?
+                String?, String?, String, Bool, Int, String?, String?, String
             ).self
         )
+        let transcriptionProviders = (try? JSONDecoder().decode(
+            [String].self,
+            from: Data(decoded.18.utf8)
+        ))?.compactMap(STTProviderID.init(rawValue:)) ?? []
         return Call(
             id: decoded.0,
             source: CallSource(rawValue: decoded.1) ?? .fileImport,
@@ -435,6 +445,7 @@ public actor PostgresStore: CallStore {
             audioChannels: decoded.8,
             sampleRate: decoded.9,
             sttProvider: STTProviderID(rawValue: decoded.10) ?? .appleSpeech,
+            transcriptionProviders: transcriptionProviders,
             diarizationProvider: decoded.11,
             notesProvider: decoded.12.flatMap(NotesProviderID.init(rawValue:)),
             status: CallStatus(rawValue: decoded.13) ?? .transcribed,
@@ -502,7 +513,8 @@ public actor PostgresStore: CallStore {
           source text CHECK (source IN ('mac_facetime','mac_phone','mac_manual','iphone_recording','iphone_meeting','iphone_speaker','import')),
           device_id uuid REFERENCES devices, started_at timestamptz NOT NULL, ended_at timestamptz, duration_sec int,
           counterparty_name text, counterparty_number text, audio_path text NOT NULL, audio_channels int DEFAULT 2,
-          sample_rate int DEFAULT 16000, stt_provider text NOT NULL, diarization_provider text, notes_provider text,
+          sample_rate int DEFAULT 16000, stt_provider text NOT NULL,
+          transcription_providers jsonb NOT NULL DEFAULT '[]'::jsonb, diarization_provider text, notes_provider text,
           status text CHECK (status IN ('recording','uploaded','transcribing','transcribed','notes_ready','failed')),
           consent_announced bool DEFAULT false, meta_billed_sec int DEFAULT 0, error text, error_stage text,
           created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now());
@@ -517,6 +529,13 @@ public actor PostgresStore: CallStore {
           start_sec real NOT NULL, end_sec real NOT NULL, channel text CHECK (channel IN ('near','far','mixed')),
           cluster_key text, text text NOT NULL, words jsonb, provider text NOT NULL,
           UNIQUE (call_id, provider, seq));
+        ALTER TABLE calls
+          ADD COLUMN IF NOT EXISTS transcription_providers jsonb NOT NULL DEFAULT '[]'::jsonb;
+        UPDATE calls
+        SET transcription_providers = COALESCE(
+          (SELECT jsonb_agg(DISTINCT provider) FROM segments WHERE call_id = calls.id),
+          jsonb_build_array(stt_provider))
+        WHERE transcription_providers = '[]'::jsonb;
         CREATE TABLE IF NOT EXISTS notes (
           id uuid PRIMARY KEY, call_id uuid REFERENCES calls ON DELETE CASCADE, provider text NOT NULL,
           model_digest text, prompt_version text NOT NULL, body jsonb NOT NULL,

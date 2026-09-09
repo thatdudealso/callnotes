@@ -100,6 +100,24 @@ import Testing
         #expect(abs(analytics.totals.metaCostDollars - 0.003) < 0.000_000_1)
     }
 
+    @Test func retranscriptionPersistsBothEnginesForMixedDashboardReporting() async throws {
+        let store = MemoryStore()
+        var call = fixtureCall(counterparty: "Avery", startedAt: now, duration: 60)
+        try await store.upsertCall(call)
+
+        call.sttProvider = .metaMuse
+        call.metaBilledSec = 60
+        try await store.upsertCall(call)
+
+        let persisted = try #require(await store.fetchCall(id: call.id))
+        let analytics = try await store.fetchDashboardAnalytics(asOf: now)
+
+        #expect(persisted.transcriptionProviders == [.appleSpeech, .metaMuse])
+        #expect(analytics.calls[0].engine == .mixed)
+        #expect(analytics.totals.mixedCallCount == 1)
+        #expect(abs(analytics.calls[0].costDollars - 0.003) < 0.000_000_1)
+    }
+
     @Test func storePublishesAnInsertedCallWithoutARefreshPoll() async throws {
         let store = MemoryStore()
         let changes = await store.dashboardChanges()
@@ -131,6 +149,21 @@ import Testing
         #expect(contact.totalDurationSec == 300)
         #expect(seededCalls.reduce(0) { $0 + $1.durationSec } == 300)
         #expect(abs(seededCalls.reduce(0) { $0 + $1.costDollars } - 0.003) < 0.000_000_1)
+
+        var retranscribed = fixtureCall(
+            counterparty: "\(fixtureName) reprocessed",
+            startedAt: now,
+            duration: 60
+        )
+        try await store.upsertCall(retranscribed)
+        retranscribed.sttProvider = .metaMuse
+        retranscribed.metaBilledSec = 60
+        try await store.upsertCall(retranscribed)
+
+        let refreshed = try await store.fetchDashboardAnalytics(asOf: now)
+        let mixed = try #require(refreshed.calls.first { $0.id == retranscribed.id })
+        #expect(mixed.engine == .mixed)
+        #expect(abs(mixed.costDollars - 0.003) < 0.000_000_1)
     }
 
     private func fixtureCall(

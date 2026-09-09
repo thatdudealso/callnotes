@@ -33,7 +33,14 @@ public struct Call: Identifiable, Codable, Sendable, Equatable {
     public var audioPath: String
     public var audioChannels: Int
     public var sampleRate: Int
-    public var sttProvider: STTProviderID
+    public var sttProvider: STTProviderID {
+        didSet {
+            if !transcriptionProviders.contains(sttProvider) {
+                transcriptionProviders.append(sttProvider)
+            }
+        }
+    }
+    public var transcriptionProviders: [STTProviderID]
     public var diarizationProvider: String?
     public var notesProvider: NotesProviderID?
     public var status: CallStatus
@@ -54,6 +61,7 @@ public struct Call: Identifiable, Codable, Sendable, Equatable {
         audioChannels: Int = 2,
         sampleRate: Int = 16_000,
         sttProvider: STTProviderID,
+        transcriptionProviders: [STTProviderID] = [],
         diarizationProvider: String? = nil,
         notesProvider: NotesProviderID? = nil,
         status: CallStatus = .recording,
@@ -73,6 +81,10 @@ public struct Call: Identifiable, Codable, Sendable, Equatable {
         self.audioChannels = audioChannels
         self.sampleRate = sampleRate
         self.sttProvider = sttProvider
+        self.transcriptionProviders = transcriptionProviders
+        if !self.transcriptionProviders.contains(sttProvider) {
+            self.transcriptionProviders.append(sttProvider)
+        }
         self.diarizationProvider = diarizationProvider
         self.notesProvider = notesProvider
         self.status = status
@@ -80,5 +92,52 @@ public struct Call: Identifiable, Codable, Sendable, Equatable {
         self.metaBilledSec = metaBilledSec
         self.error = error
         self.errorStage = errorStage
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case source
+        case startedAt
+        case endedAt
+        case durationSec
+        case counterpartyName
+        case counterpartyNumber
+        case audioPath
+        case audioChannels
+        case sampleRate
+        case sttProvider
+        case transcriptionProviders
+        case diarizationProvider
+        case notesProvider
+        case status
+        case consentAnnounced
+        case metaBilledSec
+        case error
+        case errorStage
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            id: container.decode(UUID.self, forKey: .id),
+            source: container.decode(CallSource.self, forKey: .source),
+            startedAt: container.decode(Date.self, forKey: .startedAt),
+            endedAt: container.decodeIfPresent(Date.self, forKey: .endedAt),
+            durationSec: container.decodeIfPresent(Int.self, forKey: .durationSec),
+            counterpartyName: container.decodeIfPresent(String.self, forKey: .counterpartyName),
+            counterpartyNumber: container.decodeIfPresent(String.self, forKey: .counterpartyNumber),
+            audioPath: container.decode(String.self, forKey: .audioPath),
+            audioChannels: container.decode(Int.self, forKey: .audioChannels),
+            sampleRate: container.decode(Int.self, forKey: .sampleRate),
+            sttProvider: container.decode(STTProviderID.self, forKey: .sttProvider),
+            transcriptionProviders: container.decodeIfPresent([STTProviderID].self, forKey: .transcriptionProviders) ?? [],
+            diarizationProvider: container.decodeIfPresent(String.self, forKey: .diarizationProvider),
+            notesProvider: container.decodeIfPresent(NotesProviderID.self, forKey: .notesProvider),
+            status: container.decode(CallStatus.self, forKey: .status),
+            consentAnnounced: container.decode(Bool.self, forKey: .consentAnnounced),
+            metaBilledSec: container.decode(Int.self, forKey: .metaBilledSec),
+            error: container.decodeIfPresent(String.self, forKey: .error),
+            errorStage: container.decodeIfPresent(String.self, forKey: .errorStage)
+        )
     }
 }
