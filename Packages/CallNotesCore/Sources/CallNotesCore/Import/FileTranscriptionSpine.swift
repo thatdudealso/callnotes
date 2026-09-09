@@ -31,6 +31,7 @@ public struct FileTranscriptionSpine: Sendable {
     ) async throws -> ProcessedCall {
         var working = call
         var progress = job
+        let metaBilling = MetaImportBilling()
         working.status = .transcribing
         working.audioPath = fileURL.path
         try await store.upsertCall(working)
@@ -43,7 +44,8 @@ public struct FileTranscriptionSpine: Sendable {
                     call: working,
                     profiles: profiles,
                     job: progress,
-                    meta: meta
+                    meta: meta,
+                    billing: metaBilling
                 )
             }
 
@@ -147,8 +149,9 @@ public struct FileTranscriptionSpine: Sendable {
             )
         } catch {
             if let metaFailure = error as? MetaFileTranscriptionFailure {
-                working.metaBilledSec += metaFailure.billedSeconds
+                await metaBilling.add(metaFailure.billedSeconds)
             }
+            working.metaBilledSec += await metaBilling.value
             working.status = .failed
             working.error = error.localizedDescription
             working.errorStage = stage
@@ -163,13 +166,15 @@ public struct FileTranscriptionSpine: Sendable {
         call: Call,
         profiles: [SpeakerProfile],
         job: ImportJob,
-        meta: any MetaFileTranscribing
+        meta: any MetaFileTranscribing,
+        billing: MetaImportBilling
     ) async throws -> ProcessedCall {
         var working = call
         var progress = job
         progress.stage = .transcribing
         emit(progress)
         let result = try await meta.transcribeWithReceipt(fileURL: fileURL, config: STTSessionConfig())
+        await billing.add(result.billedSeconds)
         working.metaBilledSec += result.billedSeconds
         working.sttProvider = .metaMuse
         guard !result.segments.isEmpty else { throw FileImportError.emptyTranscript }
@@ -274,4 +279,14 @@ public struct FileTranscriptionSpine: Sendable {
     private func emit(_ job: ImportJob) {
         onProgress?(job)
     }
+}
+
+private actor MetaImportBilling {
+    private var seconds = 0
+
+    func add(_ seconds: Int) {
+        self.seconds += seconds
+    }
+
+    var value: Int { seconds }
 }

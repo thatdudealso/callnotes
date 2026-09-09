@@ -81,8 +81,7 @@ public enum ImportTranscriptOverlapDeduper {
     }
 
     private static func compatible(_ lhs: RawSegment, _ rhs: RawSegment) -> Bool {
-        (lhs.channel == nil || rhs.channel == nil || lhs.channel == rhs.channel)
-            && (lhs.speakerTag == nil || rhs.speakerTag == nil || lhs.speakerTag == rhs.speakerTag)
+        lhs.channel == nil || rhs.channel == nil || lhs.channel == rhs.channel
     }
 
     private static func offset(_ segment: RawSegment, by offset: TimeInterval) -> RawSegment {

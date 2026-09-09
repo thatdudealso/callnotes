@@ -124,6 +124,32 @@ import Testing
         #expect(merged.map(\.text).joined(separator: " ") == "I agree with that plan")
     }
 
+    @Test func overlapDeduperTrimsResegmentedMetaSeamWordsAcrossTags() {
+        let merged = ImportTranscriptOverlapDeduper.merge(
+            previous: [
+                RawSegment(
+                    start: 564,
+                    end: 570,
+                    text: "I agree with",
+                    speakerTag: "speaker_0",
+                    channel: .mixed
+                ),
+            ],
+            incoming: [
+                RawSegment(
+                    start: 0,
+                    end: 2,
+                    text: "with that plan",
+                    speakerTag: "speaker_1",
+                    channel: .mixed
+                ),
+            ],
+            incomingOffset: 565
+        )
+
+        #expect(merged.map(\.text).joined(separator: " ") == "I agree with that plan")
+    }
+
     @Test func fileSpineChunksATenMinuteImportAndStitchesWithoutDupOrDrop() async throws {
         let store = MemoryStore()
         let pcm = Data(count: 16_000 * 601 * 2)
@@ -354,6 +380,34 @@ import Testing
         )
 
         await #expect(throws: MetaFileTranscriptionFailure.self) {
+            try await spine.process(fileURL: url, call: call, profiles: [])
+        }
+        let persisted = try await store.fetchCall(id: call.id)
+        #expect(persisted?.status == .failed)
+        #expect(persisted?.metaBilledSec == 570)
+    }
+
+    @Test func emptyMetaTranscriptPersistsAccruedBilling() async throws {
+        let store = MemoryStore()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-meta-empty-\(UUID().uuidString).caf")
+        try ChannelAudio.writeMonoCAF(pcm16: Data(count: 3_200), sampleRate: 16_000, to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let call = Call(
+            source: .fileImport,
+            startedAt: Date(),
+            audioPath: url.path,
+            sttProvider: .metaMuse,
+            status: .uploaded
+        )
+        let spine = FileTranscriptionSpine(
+            speech: ScriptedPCMTranscriber(near: [], far: []),
+            diarizer: ScriptedDiarizer(clusters: []),
+            store: store,
+            meta: SimulatedMetaFileProvider(segments: [], billedSeconds: 570)
+        )
+
+        await #expect(throws: FileImportError.emptyTranscript) {
             try await spine.process(fileURL: url, call: call, profiles: [])
         }
         let persisted = try await store.fetchCall(id: call.id)
