@@ -72,6 +72,11 @@ import Testing
         let ready = await watcher.scanNow()
         #expect(ready.map(\.lastPathComponent) == ["drop.m4a"])
         #expect(await watcher.scanNow().isEmpty)
+
+        try Data([5, 6, 7, 8, 9]).write(to: file)
+        #expect(await watcher.scanNow().isEmpty)
+        let replacement = await watcher.scanNow()
+        #expect(replacement.map(\.lastPathComponent) == ["drop.m4a"])
     }
 }
 
@@ -223,9 +228,16 @@ import Testing
         try ImportFixtureWriter.writeWAV(to: file, seconds: 0.4)
         let requested = LockBox<[URL]>([])
         let store = MemoryStore()
+        let owner = SpeakerProfile(
+            displayName: "Me",
+            isOwner: true,
+            centroid: [1, 0, 0],
+            embeddingModel: EmbeddingModel.weSpeakerV2
+        )
+        try await store.upsertSpeakerProfile(owner)
         let meta = SimulatedMetaFileProvider(
             segments: [
-                RawSegment(start: 0, end: 1, text: "Cloud transcript of the import.", speakerTag: "A", channel: .mixed)
+                RawSegment(start: 0, end: 1, text: "Cloud transcript of the import.", speakerTag: "speaker_0", channel: .mixed)
             ],
             billedSeconds: 1,
             onTranscribe: { url in requested.value.append(url) }
@@ -234,7 +246,14 @@ import Testing
             store: store,
             spine: FileTranscriptionSpine(
                 speech: ScriptedPCMTranscriber(near: [], far: []),
-                diarizer: ScriptedDiarizer(clusters: []),
+                diarizer: ScriptedDiarizer(clusters: [
+                    DiarizedCluster(
+                        key: "A",
+                        ranges: [0...1],
+                        embedding: [1, 0, 0],
+                        embeddingModel: EmbeddingModel.weSpeakerV2
+                    )
+                ]),
                 store: store,
                 meta: meta
             ),
@@ -246,6 +265,16 @@ import Testing
         #expect(processed.call.sttProvider == .metaMuse)
         #expect(processed.call.metaBilledSec == 1)
         #expect(processed.turns.map(\.text) == ["Cloud transcript of the import."])
+        #expect(processed.turns.map(\.speakerID) == [owner.id])
+        #expect(processed.turns.map(\.clusterKey) == [TurnAttributor.ownerClusterKey])
+        let storedSegments = try await store.fetchSegments(callID: processed.call.id, provider: .metaMuse)
+        let storedSpeakers = try await store.fetchCallSpeakers(callID: processed.call.id)
+        let reloaded = TurnAttributor.fromStored(
+            segments: storedSegments,
+            speakers: storedSpeakers,
+            profiles: [owner]
+        )
+        #expect(reloaded.map(\.speakerID) == [owner.id])
         #expect(!requested.value.isEmpty)
     }
 

@@ -201,8 +201,13 @@ public struct FileTranscriptionSpine: Sendable {
         }
         working.diarizationProvider = diarizer.providerID
 
+        let localSegments = result.segments.map { segment -> RawSegment in
+            var segment = segment
+            segment.speakerTag = ClusterAssigner.assign(segment: segment, clusters: clusters)
+            return segment
+        }
         let turns = TurnAttributor.attributeMono(
-            segments: result.segments,
+            segments: localSegments,
             clusters: clusters,
             profiles: profiles
         )

@@ -72,7 +72,11 @@ public final class InboxWatcher: @unchecked Sendable {
     public func scanNow() async -> [URL] {
         var ready: [URL] = []
         for url in scanner.candidates(in: directory) {
-            if await settler.observe(url) {
+            let observation = await settler.observeState(url)
+            if observation.didChange {
+                forget(url)
+            }
+            if observation.isSettled {
                 if remember(url) {
                     ready.append(url)
                     onSettled?(url)
@@ -86,6 +90,12 @@ public final class InboxWatcher: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return announced.insert(url).inserted
+    }
+
+    private func forget(_ url: URL) {
+        lock.lock()
+        announced.remove(url)
+        lock.unlock()
     }
 
     private func startPolling() {
