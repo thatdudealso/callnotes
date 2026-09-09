@@ -60,18 +60,17 @@ public enum ImportTranscriptOverlapDeduper {
                         && overlaps($0, translated) && compatible($0, translated)
                 }
                 .sorted { $0.start == $1.start ? $0.end < $1.end : $0.start < $1.start }
-            let overlappingTail = overlappingSegments
-                .flatMap { textWords($0.text).map(\.normalized) }
-            let duplicateCount = sharedWordCount(
-                previous: overlappingTail,
+            let match = matchingTail(
+                in: overlappingSegments,
                 incoming: textWords(translated.text).map(\.normalized)
             )
+            let duplicateCount = match.wordCount
             if duplicateCount < textWords(translated.text).count {
                 if duplicateCount > 0 {
                     translated = trimLeadingWords(
                         translated,
                         count: duplicateCount,
-                        notBefore: overlappingSegments.map(\.end).max()
+                        notBefore: match.end
                     )
                 }
                 merged.append(translated)
@@ -126,6 +125,25 @@ public enum ImportTranscriptOverlapDeduper {
             }
         }
         return trimmed
+    }
+
+    private static func matchingTail(
+        in segments: [RawSegment],
+        incoming: [String]
+    ) -> (wordCount: Int, end: TimeInterval?) {
+        var best = (wordCount: 0, end: Optional<TimeInterval>.none)
+        guard !incoming.isEmpty else { return best }
+        for start in segments.indices {
+            var words: [String] = []
+            for end in start..<segments.count {
+                words += textWords(segments[end].text).map(\.normalized)
+                let count = sharedWordCount(previous: words, incoming: incoming)
+                if count > best.wordCount {
+                    best = (count, segments[end].end)
+                }
+            }
+        }
+        return best
     }
 
     private static func sharedWordCount(previous: [String], incoming: [String]) -> Int {

@@ -139,6 +139,22 @@ import Testing
         #expect(merged.map(\.text).joined(separator: " ") == "I agree with that plan")
     }
 
+    @Test func overlapDeduperPreservesCrosstalkOutsideTheMatchingTail() {
+        let merged = ImportTranscriptOverlapDeduper.merge(
+            previous: [
+                RawSegment(start: 564, end: 570, text: "I agree with", channel: .mixed),
+                RawSegment(start: 565, end: 570, text: "yes", channel: .mixed),
+            ],
+            incoming: [
+                RawSegment(start: 0, end: 3, text: "with that plan", channel: .mixed),
+            ],
+            incomingOffset: 565
+        )
+
+        #expect(merged.filter { $0.text != "yes" }.map(\.text).joined(separator: " ") == "I agree with that plan")
+        #expect(merged.filter { $0.text == "yes" }.count == 1)
+    }
+
     @Test func overlapDeduperTrimsResegmentedMetaSeamWordsAcrossTags() {
         let merged = ImportTranscriptOverlapDeduper.merge(
             previous: [
