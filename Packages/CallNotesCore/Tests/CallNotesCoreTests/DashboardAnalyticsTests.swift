@@ -85,6 +85,48 @@ import Testing
         #expect(Set(alex.callIDs) == Set(calls.map(\.id)))
     }
 
+    @Test func resolvesMatchedProfileWhenNoCounterpartyNameIsPresent() async throws {
+        let store = MemoryStore()
+        let call = fixtureCall(counterparty: nil, startedAt: now, duration: 60)
+        let profile = SpeakerProfile(
+            displayName: "Avery",
+            centroid: [0],
+            embeddingModel: EmbeddingModel.weSpeakerV2
+        )
+        try await store.upsertCall(call)
+        try await store.upsertSpeakerProfile(profile)
+        try await store.replaceCallSpeakers(
+            callID: call.id,
+            speakers: [CallSpeaker(callID: call.id, clusterKey: "far", profileID: profile.id, confidence: 0.9)]
+        )
+
+        let analytics = try await store.fetchDashboardAnalytics(asOf: now)
+
+        #expect(analytics.calls[0].counterpartyName == "Avery")
+        #expect(analytics.contacts.map(\.name) == ["Avery"])
+    }
+
+    @Test func editedCounterpartyNameOverridesMatchedProfile() async throws {
+        let store = MemoryStore()
+        let call = fixtureCall(counterparty: "Morgan", startedAt: now, duration: 60)
+        let profile = SpeakerProfile(
+            displayName: "Avery",
+            centroid: [0],
+            embeddingModel: EmbeddingModel.weSpeakerV2
+        )
+        try await store.upsertCall(call)
+        try await store.upsertSpeakerProfile(profile)
+        try await store.replaceCallSpeakers(
+            callID: call.id,
+            speakers: [CallSpeaker(callID: call.id, clusterKey: "far", profileID: profile.id, confidence: 0.9)]
+        )
+
+        let analytics = try await store.fetchDashboardAnalytics(asOf: now)
+
+        #expect(analytics.calls[0].counterpartyName == "Morgan")
+        #expect(analytics.contacts.map(\.name) == ["Morgan"])
+    }
+
     @Test func manyCallsAggregateDayWeekAndMonthAndKeepDrillDownIDs() {
         let calls = [
             fixtureCall(counterparty: "Avery", startedAt: now.addingTimeInterval(-3_600), duration: 120, engine: .appleSpeech),
@@ -189,6 +231,23 @@ import Testing
         let mixed = try #require(refreshed.calls.first { $0.id == retranscribed.id })
         #expect(mixed.engine == .mixed)
         #expect(abs(mixed.costDollars - 0.003) < 0.000_000_1)
+
+        let profile = SpeakerProfile(
+            displayName: "\(fixtureName) profile",
+            centroid: [0],
+            embeddingModel: EmbeddingModel.weSpeakerV2
+        )
+        let profileCall = fixtureCall(counterparty: nil, startedAt: now, duration: 60)
+        try await store.upsertSpeakerProfile(profile)
+        try await store.upsertCall(profileCall)
+        try await store.replaceCallSpeakers(
+            callID: profileCall.id,
+            speakers: [CallSpeaker(callID: profileCall.id, clusterKey: "far", profileID: profile.id, confidence: 0.9)]
+        )
+
+        let profileSnapshot = try await store.fetchDashboardAnalytics(asOf: now)
+        let resolved = try #require(profileSnapshot.calls.first { $0.id == profileCall.id })
+        #expect(resolved.counterpartyName == profile.displayName)
     }
 
     private func fixtureCall(

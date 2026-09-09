@@ -134,8 +134,12 @@ public actor PostgresStore: CallStore {
     }
 
     public func fetchDashboardAnalytics(asOf: Date) async throws -> DashboardAnalytics {
-        // Keep aggregation next to persistence so SwiftUI never interprets raw calls.
-        DashboardAnalytics.make(from: try await fetchCalls(), now: asOf)
+        let calls = try await fetchCalls()
+        return DashboardAnalytics.make(
+            from: calls,
+            counterpartyNames: try await dashboardCounterpartyNames(for: calls),
+            now: asOf
+        )
     }
 
     public func dashboardChanges() async -> AsyncStream<Void> {
@@ -464,6 +468,35 @@ public actor PostgresStore: CallStore {
         for continuation in dashboardObservers.values {
             continuation.yield()
         }
+    }
+
+    private func dashboardCounterpartyNames(for calls: [Call]) async throws -> [UUID: String] {
+        let callsWithoutNames = Set(calls.compactMap { call -> UUID? in
+            guard let name = call.counterpartyName,
+                !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { return call.id }
+            return nil
+        })
+        guard !callsWithoutNames.isEmpty else { return [:] }
+        let rows = try await client.query(
+            """
+            SELECT call_speakers.call_id, speaker_profiles.display_name, call_speakers.confidence
+            FROM call_speakers
+            JOIN speaker_profiles ON speaker_profiles.id = call_speakers.profile_id
+            WHERE speaker_profiles.is_owner = false
+            ORDER BY call_speakers.call_id, call_speakers.confidence DESC NULLS LAST, speaker_profiles.display_name
+            """,
+            logger: logger
+        )
+        var names: [UUID: String] = [:]
+        for try await (callID, displayName, _) in rows.decode((UUID, String, Float?).self) {
+            guard callsWithoutNames.contains(callID),
+                !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                names[callID] == nil
+            else { continue }
+            names[callID] = displayName
+        }
+        return names
     }
 
     private static func decodeSegment(_ row: PostgresRow) throws -> Segment {

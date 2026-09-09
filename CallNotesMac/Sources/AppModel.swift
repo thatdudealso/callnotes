@@ -133,8 +133,8 @@ final class AppModel {
     }
 
     func refresh() async throws {
-        calls = try await store.fetchCalls()
-        dashboardAnalytics = DashboardAnalytics.make(from: calls)
+        dashboardAnalytics = try await store.fetchDashboardAnalytics(asOf: .now)
+        calls = dashboardAnalytics.calls.map(\.call)
         if selectedCallID == nil {
             selectedCallID = calls.first?.id
         }
@@ -181,7 +181,13 @@ final class AppModel {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
                 guard let self, self.recordingState == .recording else { return }
-                self.dashboardAnalytics = DashboardAnalytics.make(from: self.calls)
+                let counterpartyNames = Dictionary(
+                    uniqueKeysWithValues: self.dashboardAnalytics.calls.map { ($0.id, $0.counterpartyName) }
+                )
+                self.dashboardAnalytics = DashboardAnalytics.make(
+                    from: self.calls,
+                    counterpartyNames: counterpartyNames
+                )
             }
         }
     }

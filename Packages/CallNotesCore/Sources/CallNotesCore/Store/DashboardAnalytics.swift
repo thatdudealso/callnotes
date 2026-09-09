@@ -22,9 +22,9 @@ public struct DashboardCall: Identifiable, Sendable, Equatable {
     public let call: Call
     public let durationSec: Int
     public let costDollars: Double
+    public let counterpartyName: String
 
     public var id: UUID { call.id }
-    public var counterpartyName: String { DashboardAnalytics.contactName(for: call.counterpartyName) }
     public var engine: DashboardEngine {
         let providers = call.transcriptionProviders + [call.sttProvider]
         let usesMeta = call.metaBilledSec > 0 || providers.contains(.metaMuse)
@@ -33,10 +33,11 @@ public struct DashboardCall: Identifiable, Sendable, Equatable {
         return usesMeta ? .meta : .local
     }
 
-    init(call: Call, durationSec: Int) {
+    init(call: Call, durationSec: Int, counterpartyName: String) {
         self.call = call
         self.durationSec = durationSec
         self.costDollars = MetaCostMeter.costDollars(billedSeconds: max(0, call.metaBilledSec))
+        self.counterpartyName = counterpartyName
     }
 }
 
@@ -86,11 +87,18 @@ public struct DashboardAnalytics: Sendable, Equatable {
 
     public static func make(
         from calls: [Call],
+        counterpartyNames: [UUID: String] = [:],
         now: Date = .now,
         calendar: Calendar = .current
     ) -> DashboardAnalytics {
         let dashboardCalls = calls
-            .map { DashboardCall(call: $0, durationSec: duration(for: $0, now: now)) }
+            .map {
+                DashboardCall(
+                    call: $0,
+                    durationSec: duration(for: $0, now: now),
+                    counterpartyName: contactName(for: counterpartyNames[$0.id] ?? $0.counterpartyName)
+                )
+            }
             .sorted { $0.call.startedAt > $1.call.startedAt }
         let totals = totals(for: dashboardCalls)
         let groupedPeriods = DashboardPeriodRange.allCases.flatMap { range in

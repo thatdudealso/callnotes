@@ -28,7 +28,11 @@ public actor MemoryStore: CallStore {
     }
 
     public func fetchDashboardAnalytics(asOf: Date) async throws -> DashboardAnalytics {
-        DashboardAnalytics.make(from: Array(calls.values), now: asOf)
+        DashboardAnalytics.make(
+            from: Array(calls.values),
+            counterpartyNames: dashboardCounterpartyNames(),
+            now: asOf
+        )
     }
 
     public func dashboardChanges() async -> AsyncStream<Void> {
@@ -116,6 +120,33 @@ public actor MemoryStore: CallStore {
         for continuation in dashboardObservers.values {
             continuation.yield()
         }
+    }
+
+    private func dashboardCounterpartyNames() -> [UUID: String] {
+        let profilesByID = Dictionary(uniqueKeysWithValues: profiles.map { ($0.key, $0.value) })
+        var names: [UUID: String] = [:]
+        for (callID, speakers) in callSpeakers {
+            guard let call = calls[callID], !hasCounterpartyName(call) else { continue }
+            let matches = speakers.compactMap { speaker -> (String, Float)? in
+                guard let profileID = speaker.profileID,
+                    let profile = profilesByID[profileID],
+                    !profile.isOwner,
+                    !profile.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                else { return nil }
+                return (profile.displayName, speaker.confidence ?? 0)
+            }
+            if let match = matches.sorted(by: { lhs, rhs in
+                lhs.1 == rhs.1 ? lhs.0 < rhs.0 : lhs.1 > rhs.1
+            }).first {
+                names[callID] = match.0
+            }
+        }
+        return names
+    }
+
+    private func hasCounterpartyName(_ call: Call) -> Bool {
+        guard let name = call.counterpartyName else { return false }
+        return !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
 
