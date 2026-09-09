@@ -81,6 +81,25 @@ import Testing
         #expect(Set(month.callIDs) == Set(calls.map(\.id)))
     }
 
+    @Test func localFallbackWithMetaBillingIsMixedAndRetainsItsCost() {
+        let call = fixtureCall(
+            counterparty: "Avery",
+            startedAt: now.addingTimeInterval(-60),
+            duration: 60,
+            engine: .appleSpeech,
+            billedSeconds: 60
+        )
+
+        let analytics = DashboardAnalytics.make(from: [call], now: now, calendar: calendar)
+
+        #expect(analytics.calls[0].engine == .mixed)
+        #expect(analytics.totals.localCallCount == 0)
+        #expect(analytics.totals.metaCallCount == 0)
+        #expect(analytics.totals.mixedCallCount == 1)
+        #expect(analytics.totals.metaBilledSeconds == 60)
+        #expect(abs(analytics.totals.metaCostDollars - 0.003) < 0.000_000_1)
+    }
+
     @Test func storePublishesAnInsertedCallWithoutARefreshPoll() async throws {
         let store = MemoryStore()
         let changes = await store.dashboardChanges()

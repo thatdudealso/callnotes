@@ -7,7 +7,9 @@ import SwiftUI
 @MainActor
 @Observable
 final class AppModel {
-    var recordingState: RecordingState = .idle
+    var recordingState: RecordingState = .idle {
+        didSet { updateDashboardTicker() }
+    }
     var calls: [Call] = []
     var selectedCallID: UUID?
     var turnsByCall: [UUID: [AttributedTurn]] = [:]
@@ -94,7 +96,7 @@ final class AppModel {
     init() {
         self.store = memoryStore
         statusMessage = "Checking dedicated CallNotes Postgres..."
-        startDashboardTicker()
+        observeDashboardChanges()
         Task { await bootstrap() }
     }
 
@@ -151,8 +153,14 @@ final class AppModel {
         let observedStore = store
         dashboardObservationTask = Task { [weak self] in
             let changes = await observedStore.dashboardChanges()
+            guard !Task.isCancelled, let self else { return }
+            do {
+                try await self.refresh()
+            } catch {
+                self.statusMessage = error.localizedDescription
+            }
             for await _ in changes {
-                guard !Task.isCancelled, let self else { return }
+                guard !Task.isCancelled else { return }
                 do {
                     try await self.refresh()
                 } catch {
@@ -162,11 +170,17 @@ final class AppModel {
         }
     }
 
-    private func startDashboardTicker() {
+    private func updateDashboardTicker() {
+        guard recordingState == .recording else {
+            dashboardTickerTask?.cancel()
+            dashboardTickerTask = nil
+            return
+        }
+        guard dashboardTickerTask == nil else { return }
         dashboardTickerTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
-                guard let self else { return }
+                guard let self, self.recordingState == .recording else { return }
                 self.dashboardAnalytics = DashboardAnalytics.make(from: self.calls)
             }
         }

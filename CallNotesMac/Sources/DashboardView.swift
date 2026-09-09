@@ -40,7 +40,7 @@ struct DashboardView: View {
 
     private var totals: some View {
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4), spacing: 12) {
-            DashboardMetric(title: "Calls", value: "\(analytics.totals.callCount)", detail: "\(analytics.totals.localCallCount) local · \(analytics.totals.metaCallCount) Meta")
+            DashboardMetric(title: "Calls", value: "\(analytics.totals.callCount)", detail: "\(analytics.totals.localCallCount) local · \(analytics.totals.metaCallCount) Meta · \(analytics.totals.mixedCallCount) mixed")
             DashboardMetric(title: "Talk time", value: duration(analytics.totals.totalDurationSec), detail: "Across all calls")
             DashboardMetric(title: "Meta cost", value: currency(analytics.totals.metaCostDollars), detail: "\(duration(analytics.totals.metaBilledSeconds)) billed")
             DashboardMetric(title: "People", value: "\(analytics.contacts.count)", detail: "Known and unknown contacts")
@@ -181,8 +181,8 @@ private struct DashboardDrillDownView: View {
                     HStack {
                         Text(item.call.startedAt.formatted(date: .abbreviated, time: .shortened))
                         Text(duration(item.durationSec))
-                        Text(item.isMeta ? "Meta" : "Local")
-                        if item.isMeta { Text(currency(item.costDollars)).foregroundStyle(CallNotesStyle.cloud) }
+                        Text(item.engine.displayName)
+                        if item.costDollars > 0 { Text(currency(item.costDollars)).foregroundStyle(CallNotesStyle.cloud) }
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)

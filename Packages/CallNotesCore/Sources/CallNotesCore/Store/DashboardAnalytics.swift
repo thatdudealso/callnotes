@@ -7,6 +7,16 @@ public enum DashboardPeriodRange: String, CaseIterable, Codable, Sendable {
     case month
 }
 
+public enum DashboardEngine: String, Sendable, Equatable {
+    case local
+    case meta
+    case mixed
+
+    public var displayName: String {
+        rawValue.capitalized
+    }
+}
+
 /// A call enriched with presentation-neutral analytics values.
 public struct DashboardCall: Identifiable, Sendable, Equatable {
     public let call: Call
@@ -15,12 +25,15 @@ public struct DashboardCall: Identifiable, Sendable, Equatable {
 
     public var id: UUID { call.id }
     public var counterpartyName: String { DashboardAnalytics.contactName(for: call.counterpartyName) }
-    public var isMeta: Bool { call.sttProvider == .metaMuse }
+    public var engine: DashboardEngine {
+        if call.sttProvider == .metaMuse { return .meta }
+        return call.metaBilledSec > 0 ? .mixed : .local
+    }
 
     init(call: Call, durationSec: Int) {
         self.call = call
         self.durationSec = durationSec
-        self.costDollars = MetaCostMeter.costDollars(billedSeconds: call.metaBilledSec)
+        self.costDollars = MetaCostMeter.costDollars(billedSeconds: max(0, call.metaBilledSec))
     }
 }
 
@@ -28,6 +41,7 @@ public struct DashboardTotals: Sendable, Equatable {
     public let callCount: Int
     public let localCallCount: Int
     public let metaCallCount: Int
+    public let mixedCallCount: Int
     public let totalDurationSec: Int
     public let metaBilledSeconds: Int
     public let metaCostDollars: Double
@@ -39,6 +53,7 @@ public struct DashboardPeriod: Identifiable, Sendable, Equatable {
     public let callCount: Int
     public let localCallCount: Int
     public let metaCallCount: Int
+    public let mixedCallCount: Int
     public let totalDurationSec: Int
     public let metaBilledSeconds: Int
     public let metaCostDollars: Double
@@ -103,8 +118,9 @@ public struct DashboardAnalytics: Sendable, Equatable {
     private static func totals(for calls: [DashboardCall]) -> DashboardTotals {
         DashboardTotals(
             callCount: calls.count,
-            localCallCount: calls.count(where: { !$0.isMeta }),
-            metaCallCount: calls.count(where: \.isMeta),
+            localCallCount: calls.count(where: { $0.engine == .local }),
+            metaCallCount: calls.count(where: { $0.engine == .meta }),
+            mixedCallCount: calls.count(where: { $0.engine == .mixed }),
             totalDurationSec: calls.reduce(0) { $0 + $1.durationSec },
             metaBilledSeconds: calls.reduce(0) { $0 + max(0, $1.call.metaBilledSec) },
             metaCostDollars: calls.reduce(0) { $0 + $1.costDollars }
@@ -127,6 +143,7 @@ public struct DashboardAnalytics: Sendable, Equatable {
                 callCount: totals.callCount,
                 localCallCount: totals.localCallCount,
                 metaCallCount: totals.metaCallCount,
+                mixedCallCount: totals.mixedCallCount,
                 totalDurationSec: totals.totalDurationSec,
                 metaBilledSeconds: totals.metaBilledSeconds,
                 metaCostDollars: totals.metaCostDollars,
