@@ -7,6 +7,7 @@ public actor PostgresStore: CallStore {
     private let client: PostgresClient
     private let logger: Logger
     private var runTask: Task<Void, Never>?
+    private var dashboardObservers: [UUID: AsyncStream<Void>.Continuation] = [:]
 
     public init(configuration: StoreConfiguration, password: String = "") {
         var logger = Logger(label: "com.thatdudealso.callnotes.store")
@@ -89,6 +90,7 @@ public actor PostgresStore: CallStore {
             """,
             logger: logger
         )
+        notifyDashboardObservers()
     }
 
     public func fetchCalls() async throws -> [Call] {
@@ -123,6 +125,21 @@ public actor PostgresStore: CallStore {
             return try Self.decodeCall(row)
         }
         return nil
+    }
+
+    public func fetchDashboardAnalytics(asOf: Date) async throws -> DashboardAnalytics {
+        // Keep aggregation next to persistence so SwiftUI never interprets raw calls.
+        DashboardAnalytics.make(from: try await fetchCalls(), now: asOf)
+    }
+
+    public func dashboardChanges() async -> AsyncStream<Void> {
+        let id = UUID()
+        let (stream, continuation) = AsyncStream<Void>.makeStream()
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.removeDashboardObserver(id) }
+        }
+        dashboardObservers[id] = continuation
+        return stream
     }
 
     public func replaceSegments(
@@ -428,6 +445,16 @@ public actor PostgresStore: CallStore {
         )
     }
 
+    private func removeDashboardObserver(_ id: UUID) {
+        dashboardObservers.removeValue(forKey: id)
+    }
+
+    private func notifyDashboardObservers() {
+        for continuation in dashboardObservers.values {
+            continuation.yield()
+        }
+    }
+
     private static func decodeSegment(_ row: PostgresRow) throws -> Segment {
         let decoded = try row.decode(
             (UUID, Int, Float, Float, String, String?, String, String?, String).self
@@ -479,6 +506,8 @@ public actor PostgresStore: CallStore {
           status text CHECK (status IN ('recording','uploaded','transcribing','transcribed','notes_ready','failed')),
           consent_announced bool DEFAULT false, meta_billed_sec int DEFAULT 0, error text, error_stage text,
           created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now());
+        CREATE INDEX IF NOT EXISTS calls_started_at_dashboard ON calls (started_at DESC);
+        CREATE INDEX IF NOT EXISTS calls_counterparty_started_at_dashboard ON calls (counterparty_name, started_at DESC);
         CREATE TABLE IF NOT EXISTS call_speakers (
           call_id uuid REFERENCES calls ON DELETE CASCADE, cluster_key text,
           profile_id uuid REFERENCES speaker_profiles, confidence real, label_override text,

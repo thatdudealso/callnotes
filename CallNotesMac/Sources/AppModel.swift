@@ -21,6 +21,7 @@ final class AppModel {
     var notesGeneratingCallID: UUID?
     var importProgress = ImportProgress()
     var inboxURL: URL?
+    var dashboardAnalytics = DashboardAnalytics.make(from: [])
 
     private var store: any CallStore
     private var notesSpine: NotesGenerationSpine?
@@ -38,6 +39,8 @@ final class AppModel {
     private var pendingInboxFiles: [URL] = []
     private var isImporting = false
     private var importNoticeTask: Task<Void, Never>?
+    private var dashboardObservationTask: Task<Void, Never>?
+    private var dashboardTickerTask: Task<Void, Never>?
 
     var selectedCall: Call? {
         calls.first { $0.id == selectedCallID }
@@ -91,6 +94,7 @@ final class AppModel {
     init() {
         self.store = memoryStore
         statusMessage = "Checking dedicated CallNotes Postgres..."
+        startDashboardTicker()
         Task { await bootstrap() }
     }
 
@@ -120,6 +124,7 @@ final class AppModel {
         startInboxWatcher()
         do {
             try await refresh()
+            observeDashboardChanges()
         } catch {
             statusMessage = error.localizedDescription
         }
@@ -127,6 +132,7 @@ final class AppModel {
 
     func refresh() async throws {
         calls = try await store.fetchCalls()
+        dashboardAnalytics = DashboardAnalytics.make(from: calls)
         if selectedCallID == nil {
             selectedCallID = calls.first?.id
         }
@@ -137,6 +143,32 @@ final class AppModel {
         }
         if let selectedCallID {
             turnsByCall[selectedCallID] = try await loadTurns(callID: selectedCallID)
+        }
+    }
+
+    private func observeDashboardChanges() {
+        dashboardObservationTask?.cancel()
+        let observedStore = store
+        dashboardObservationTask = Task { [weak self] in
+            let changes = await observedStore.dashboardChanges()
+            for await _ in changes {
+                guard !Task.isCancelled, let self else { return }
+                do {
+                    try await self.refresh()
+                } catch {
+                    self.statusMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func startDashboardTicker() {
+        dashboardTickerTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self else { return }
+                self.dashboardAnalytics = DashboardAnalytics.make(from: self.calls)
+            }
         }
     }
 

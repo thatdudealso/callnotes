@@ -8,6 +8,7 @@ public actor MemoryStore: CallStore {
     private var callSpeakers: [UUID: [CallSpeaker]] = [:]
     private var samples: [SpeakerSample] = []
     private var notes: [UUID: [NotesRecord]] = [:]
+    private var dashboardObservers: [UUID: AsyncStream<Void>.Continuation] = [:]
 
     public init() {}
 
@@ -15,6 +16,7 @@ public actor MemoryStore: CallStore {
 
     public func upsertCall(_ call: Call) async throws {
         calls[call.id] = call
+        notifyDashboardObservers()
     }
 
     public func fetchCalls() async throws -> [Call] {
@@ -23,6 +25,20 @@ public actor MemoryStore: CallStore {
 
     public func fetchCall(id: UUID) async throws -> Call? {
         calls[id]
+    }
+
+    public func fetchDashboardAnalytics(asOf: Date) async throws -> DashboardAnalytics {
+        DashboardAnalytics.make(from: Array(calls.values), now: asOf)
+    }
+
+    public func dashboardChanges() async -> AsyncStream<Void> {
+        let id = UUID()
+        let (stream, continuation) = AsyncStream<Void>.makeStream()
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.removeDashboardObserver(id) }
+        }
+        dashboardObservers[id] = continuation
+        return stream
     }
 
     public func replaceSegments(
@@ -90,6 +106,16 @@ public actor MemoryStore: CallStore {
 
     public func fetchNotes(callID: UUID) async throws -> [NotesRecord] {
         (notes[callID] ?? []).sorted { $0.createdAt > $1.createdAt }
+    }
+
+    private func removeDashboardObserver(_ id: UUID) {
+        dashboardObservers.removeValue(forKey: id)
+    }
+
+    private func notifyDashboardObservers() {
+        for continuation in dashboardObservers.values {
+            continuation.yield()
+        }
     }
 }
 
