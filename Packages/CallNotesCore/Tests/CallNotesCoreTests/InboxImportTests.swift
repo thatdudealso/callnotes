@@ -338,6 +338,32 @@ import Testing
     }
 }
 
+@Suite struct AppleFileTranscriptionTests {
+    @Test func non16KHzFileIsNormalizedBeforeAppleTranscription() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-apple-file-\(UUID().uuidString).wav")
+        try ImportFixtureWriter.writeWAV(to: url, seconds: 1, sampleRate: 44_100)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let segments = try await AppleSpeechProvider().transcribeFile(
+            fileURL: url,
+            config: STTSessionConfig(sampleRate: 16_000)
+        ) { pcm16, channel, config in
+            [
+                RawSegment(
+                    start: 0,
+                    end: Double(pcm16.count / 2) / Double(config.sampleRate),
+                    text: "Normalized transcript.",
+                    channel: channel
+                )
+            ]
+        }
+
+        #expect(segments.map(\.text) == ["Normalized transcript."])
+        #expect(segments.map(\.end) == [1])
+    }
+}
+
 private final class LockBox<Value>: @unchecked Sendable {
     var value: Value
     init(_ value: Value) { self.value = value }

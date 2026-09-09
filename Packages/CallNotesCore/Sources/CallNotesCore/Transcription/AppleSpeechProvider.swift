@@ -44,20 +44,30 @@ public struct AppleSpeechProvider: STTProvider {
     }
 
     public func transcribe(fileURL: URL, config: STTSessionConfig) async throws -> [RawSegment] {
-        let split = try ChannelAudio.splitStereoCAF(url: fileURL)
-        if split.far.isEmpty {
-            return try await transcribePCM(split.near, channel: .mixed, config: config)
+        try await transcribeFile(fileURL: fileURL, config: config) { pcm16, channel, config in
+            try await transcribePCM(pcm16, channel: channel, config: config)
+        }
+    }
+
+    func transcribeFile(
+        fileURL: URL,
+        config: STTSessionConfig,
+        transcribePCM: @escaping @Sendable (Data, SegmentChannel, STTSessionConfig) async throws -> [RawSegment]
+    ) async throws -> [RawSegment] {
+        let loaded = try FileAudioLoader.load(fileURL, targetSampleRate: config.sampleRate)
+        if !loaded.isStereo {
+            return try await transcribePCM(loaded.near, .mixed, config)
         }
 
         switch dualInstanceMode {
         case .concurrentLive:
-            async let near = transcribePCM(split.near, channel: .near, config: config)
-            async let far = transcribePCM(split.far, channel: .far, config: config)
+            async let near = transcribePCM(loaded.near, .near, config)
+            async let far = transcribePCM(loaded.far, .far, config)
             let combined = try await near + far
             return combined.sorted { $0.start < $1.start }
         case .nearLiveFarBatch:
-            let near = try await transcribePCM(split.near, channel: .near, config: config)
-            let far = try await transcribePCM(split.far, channel: .far, config: config)
+            let near = try await transcribePCM(loaded.near, .near, config)
+            let far = try await transcribePCM(loaded.far, .far, config)
             return (near + far).sorted { $0.start < $1.start }
         }
     }
