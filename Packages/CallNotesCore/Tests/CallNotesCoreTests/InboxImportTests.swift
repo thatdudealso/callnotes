@@ -124,6 +124,21 @@ import Testing
         #expect(merged.map(\.text).joined(separator: " ") == "I agree with that plan")
     }
 
+    @Test func overlapDeduperTrimsAcrossResegmentedPriorTail() {
+        let merged = ImportTranscriptOverlapDeduper.merge(
+            previous: [
+                RawSegment(start: 564, end: 567, text: "I agree", channel: .mixed),
+                RawSegment(start: 567, end: 570, text: "with", channel: .mixed),
+            ],
+            incoming: [
+                RawSegment(start: 0, end: 3, text: "I agree with that plan", channel: .mixed),
+            ],
+            incomingOffset: 565
+        )
+
+        #expect(merged.map(\.text).joined(separator: " ") == "I agree with that plan")
+    }
+
     @Test func overlapDeduperTrimsResegmentedMetaSeamWordsAcrossTags() {
         let merged = ImportTranscriptOverlapDeduper.merge(
             previous: [

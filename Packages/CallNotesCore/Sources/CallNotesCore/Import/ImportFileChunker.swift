@@ -54,17 +54,25 @@ public enum ImportTranscriptOverlapDeduper {
         var merged = previous
         for segment in incoming {
             var translated = offset(segment, by: incomingOffset)
-            let duplicateCount = merged.reduce(0) { count, existing in
-                guard overlapsKnownWindow(translated, startingAt: incomingOffset),
-                    overlaps(existing, translated), compatible(existing, translated)
-                else {
-                    return count
+            let overlappingSegments = merged
+                .filter {
+                    overlapsKnownWindow(translated, startingAt: incomingOffset)
+                        && overlaps($0, translated) && compatible($0, translated)
                 }
-                return max(count, sharedWordCount(existing.text, translated.text))
-            }
+                .sorted { $0.start == $1.start ? $0.end < $1.end : $0.start < $1.start }
+            let overlappingTail = overlappingSegments
+                .flatMap { textWords($0.text).map(\.normalized) }
+            let duplicateCount = sharedWordCount(
+                previous: overlappingTail,
+                incoming: textWords(translated.text).map(\.normalized)
+            )
             if duplicateCount < textWords(translated.text).count {
                 if duplicateCount > 0 {
-                    translated = trimLeadingWords(translated, count: duplicateCount)
+                    translated = trimLeadingWords(
+                        translated,
+                        count: duplicateCount,
+                        notBefore: overlappingSegments.map(\.end).max()
+                    )
                 }
                 merged.append(translated)
             }
@@ -94,7 +102,11 @@ public enum ImportTranscriptOverlapDeduper {
         return translated
     }
 
-    private static func trimLeadingWords(_ segment: RawSegment, count: Int) -> RawSegment {
+    private static func trimLeadingWords(
+        _ segment: RawSegment,
+        count: Int,
+        notBefore: TimeInterval?
+    ) -> RawSegment {
         let words = textWords(segment.text)
         guard count > 0, count < words.count else { return segment }
         var trimmed = segment
@@ -105,16 +117,22 @@ public enum ImportTranscriptOverlapDeduper {
         } else {
             trimmed.start += (trimmed.end - trimmed.start) * Double(count) / Double(words.count)
         }
+        if let notBefore, trimmed.start < notBefore {
+            let shift = notBefore - trimmed.start
+            trimmed.start += shift
+            trimmed.end += shift
+            trimmed.words = trimmed.words?.map { word in
+                Word(text: word.text, start: word.start + shift, end: word.end + shift)
+            }
+        }
         return trimmed
     }
 
-    private static func sharedWordCount(_ previous: String, _ incoming: String) -> Int {
-        let trailing = textWords(previous).map(\.normalized)
-        let leading = textWords(incoming).map(\.normalized)
-        let maximum = min(trailing.count, leading.count)
+    private static func sharedWordCount(previous: [String], incoming: [String]) -> Int {
+        let maximum = min(previous.count, incoming.count)
         guard maximum > 0 else { return 0 }
         for count in stride(from: maximum, through: 1, by: -1) {
-            if Array(trailing.suffix(count)) == Array(leading.prefix(count)) {
+            if Array(previous.suffix(count)) == Array(incoming.prefix(count)) {
                 return count
             }
         }
