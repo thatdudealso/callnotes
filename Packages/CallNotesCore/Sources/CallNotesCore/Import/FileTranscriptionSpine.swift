@@ -146,6 +146,9 @@ public struct FileTranscriptionSpine: Sendable {
                 dualInstanceMode: speech.dualInstanceMode
             )
         } catch {
+            if let metaFailure = error as? MetaFileTranscriptionFailure {
+                working.metaBilledSec += metaFailure.billedSeconds
+            }
             working.status = .failed
             working.error = error.localizedDescription
             working.errorStage = stage

@@ -45,9 +45,6 @@ public enum ImportFileChunker {
     }
 }
 
-/// Removes only text duplicated by the known upload overlap. Requires both
-/// temporal overlap and normalized-text equality so repeated conversational
-/// phrases outside the overlap remain intact.
 public enum ImportTranscriptOverlapDeduper {
     public static func merge(
         previous: [RawSegment],
@@ -55,13 +52,22 @@ public enum ImportTranscriptOverlapDeduper {
         incomingOffset: TimeInterval
     ) -> [RawSegment] {
         var merged = previous
-        for var segment in incoming {
-            segment.start += incomingOffset
-            segment.end += incomingOffset
-            let duplicate = merged.contains { existing in
-                overlaps(existing, segment) && normalized(existing.text) == normalized(segment.text)
+        for segment in incoming {
+            var translated = offset(segment, by: incomingOffset)
+            let duplicateCount = merged.reduce(0) { count, existing in
+                guard overlapsKnownWindow(translated, startingAt: incomingOffset),
+                    overlaps(existing, translated), compatible(existing, translated)
+                else {
+                    return count
+                }
+                return max(count, sharedWordCount(existing.text, translated.text))
             }
-            if !duplicate { merged.append(segment) }
+            if duplicateCount < textWords(translated.text).count {
+                if duplicateCount > 0 {
+                    translated = trimLeadingWords(translated, count: duplicateCount)
+                }
+                merged.append(translated)
+            }
         }
         return merged.sorted { $0.start == $1.start ? $0.end < $1.end : $0.start < $1.start }
     }
@@ -70,14 +76,62 @@ public enum ImportTranscriptOverlapDeduper {
         lhs.start < rhs.end && rhs.start < lhs.end
     }
 
-    private static func normalized(_ text: String) -> String {
-        text.lowercased()
+    private static func overlapsKnownWindow(_ segment: RawSegment, startingAt start: TimeInterval) -> Bool {
+        segment.start < start + ImportFileChunker.overlapDurationSeconds && start < segment.end
+    }
+
+    private static func compatible(_ lhs: RawSegment, _ rhs: RawSegment) -> Bool {
+        (lhs.channel == nil || rhs.channel == nil || lhs.channel == rhs.channel)
+            && (lhs.speakerTag == nil || rhs.speakerTag == nil || lhs.speakerTag == rhs.speakerTag)
+    }
+
+    private static func offset(_ segment: RawSegment, by offset: TimeInterval) -> RawSegment {
+        var translated = segment
+        translated.start += offset
+        translated.end += offset
+        translated.words = translated.words?.map { word in
+            Word(text: word.text, start: word.start + offset, end: word.end + offset)
+        }
+        return translated
+    }
+
+    private static func trimLeadingWords(_ segment: RawSegment, count: Int) -> RawSegment {
+        let words = textWords(segment.text)
+        guard count > 0, count < words.count else { return segment }
+        var trimmed = segment
+        trimmed.text = words.dropFirst(count).map(\.original).joined(separator: " ")
+        if let segmentWords = trimmed.words, segmentWords.count > count {
+            trimmed.words = Array(segmentWords.dropFirst(count))
+            trimmed.start = trimmed.words?.first?.start ?? trimmed.start
+        } else {
+            trimmed.start += (trimmed.end - trimmed.start) * Double(count) / Double(words.count)
+        }
+        return trimmed
+    }
+
+    private static func sharedWordCount(_ previous: String, _ incoming: String) -> Int {
+        let trailing = textWords(previous).map(\.normalized)
+        let leading = textWords(incoming).map(\.normalized)
+        let maximum = min(trailing.count, leading.count)
+        guard maximum > 0 else { return 0 }
+        for count in stride(from: maximum, through: 1, by: -1) {
+            if Array(trailing.suffix(count)) == Array(leading.prefix(count)) {
+                return count
+            }
+        }
+        return 0
+    }
+
+    private static func textWords(_ text: String) -> [(original: String, normalized: String)] {
+        text.split(whereSeparator: \.isWhitespace).compactMap { token in
+            let normalized = token.lowercased()
             .unicodeScalars
-            .filter { CharacterSet.alphanumerics.contains($0) || CharacterSet.whitespaces.contains($0) }
+            .filter { CharacterSet.alphanumerics.contains($0) }
             .map(String.init)
             .joined()
-            .split(whereSeparator: \.isWhitespace)
-            .joined(separator: " ")
+            guard !normalized.isEmpty else { return nil }
+            return (String(token), normalized)
+        }
     }
 }
 
