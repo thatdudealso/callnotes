@@ -38,14 +38,6 @@ public struct ImportPipeline: Sendable {
         progress.fileName = url.lastPathComponent
         progress.sourceURL = url
 
-        let hash = try await duplicates.fingerprint(of: url)
-        if await duplicates.contains(hash) {
-            progress.stage = .duplicate
-            progress.fractionComplete = 1
-            emit(progress)
-            throw FileImportError.duplicate
-        }
-
         progress.stage = .copying
         progress.fractionComplete = 0.05
         emit(progress)
@@ -56,6 +48,14 @@ public struct ImportPipeline: Sendable {
             try FileManager.default.removeItem(at: storedURL)
         }
         try FileManager.default.copyItem(at: url, to: storedURL)
+        let hash = try await duplicates.fingerprint(of: storedURL)
+        if await duplicates.contains(hash) {
+            try? FileManager.default.removeItem(at: storedURL)
+            progress.stage = .duplicate
+            progress.fractionComplete = 1
+            emit(progress)
+            throw FileImportError.duplicate
+        }
 
         var call = Call(
             id: callID,

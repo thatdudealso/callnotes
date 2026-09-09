@@ -219,6 +219,41 @@ import Testing
         }
     }
 
+    @Test func replacementDuringCopyRegistersTheCopiedSnapshot() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-copy-snapshot-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("replace.wav")
+        try ImportFixtureWriter.writeWAV(to: file, seconds: 0.3)
+
+        let store = MemoryStore()
+        let duplicates = InboxDuplicateIndex()
+        let pipeline = ImportPipeline(
+            store: store,
+            spine: FileTranscriptionSpine(
+                speech: ScriptedPCMTranscriber(
+                    near: [RawSegment(start: 0, end: 0.2, text: "Hello.", channel: .mixed)],
+                    far: []
+                ),
+                diarizer: ScriptedDiarizer(clusters: []),
+                store: store
+            ),
+            duplicates: duplicates,
+            audioRoot: root.appendingPathComponent("audio", isDirectory: true),
+            onProgress: { job in
+                guard job.stage == .copying else { return }
+                try? ImportFixtureWriter.writeWAV(to: file, seconds: 0.4)
+            }
+        )
+
+        _ = try await pipeline.`import`(file, engine: .appleSpeech)
+        await #expect(throws: FileImportError.duplicate) {
+            try await pipeline.`import`(file, engine: .appleSpeech)
+        }
+        #expect(try await store.fetchCalls().count == 1)
+    }
+
     @Test func simulatedMetaImportPathStoresSegmentsWithoutANetworkCall() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("callnotes-meta-sim-\(UUID().uuidString)", isDirectory: true)
