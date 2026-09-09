@@ -60,6 +60,31 @@ import Testing
         #expect(unknown.averageDurationSec == 60)
     }
 
+    @Test func groupsCounterpartyNamesCaseInsensitivelyRegardlessOfNumber() {
+        let calls = [
+            fixtureCall(
+                counterparty: "Alex",
+                number: "+15550000001",
+                startedAt: now.addingTimeInterval(-60),
+                duration: 120
+            ),
+            fixtureCall(
+                counterparty: "alex",
+                number: "+15550000002",
+                startedAt: now.addingTimeInterval(-120),
+                duration: 180
+            ),
+        ]
+
+        let analytics = DashboardAnalytics.make(from: calls, now: now, calendar: calendar)
+        let alex = try! #require(analytics.contacts.first { $0.name == "Alex" })
+
+        #expect(analytics.contacts.count == 1)
+        #expect(alex.callCount == 2)
+        #expect(alex.totalDurationSec == 300)
+        #expect(Set(alex.callIDs) == Set(calls.map(\.id)))
+    }
+
     @Test func manyCallsAggregateDayWeekAndMonthAndKeepDrillDownIDs() {
         let calls = [
             fixtureCall(counterparty: "Avery", startedAt: now.addingTimeInterval(-3_600), duration: 120, engine: .appleSpeech),
@@ -168,6 +193,7 @@ import Testing
 
     private func fixtureCall(
         counterparty: String?,
+        number: String? = nil,
         startedAt: Date,
         duration: Int,
         engine: STTProviderID = .appleSpeech,
@@ -179,6 +205,7 @@ import Testing
             endedAt: startedAt.addingTimeInterval(TimeInterval(duration)),
             durationSec: duration,
             counterpartyName: counterparty,
+            counterpartyNumber: number,
             audioPath: "/tmp/dashboard-fixture.caf",
             sttProvider: engine,
             status: .transcribed,

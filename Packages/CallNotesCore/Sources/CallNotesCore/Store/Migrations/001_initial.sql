@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS calls (
 CREATE INDEX IF NOT EXISTS calls_started_at_dashboard ON calls (started_at DESC);
 CREATE INDEX IF NOT EXISTS calls_counterparty_started_at_dashboard
   ON calls (counterparty_name, started_at DESC);
+CREATE INDEX IF NOT EXISTS calls_counterparty_identity_started_at_dashboard
+  ON calls (lower(btrim(counterparty_name)), started_at DESC);
 
 CREATE TABLE IF NOT EXISTS call_speakers (
   call_id uuid REFERENCES calls ON DELETE CASCADE,

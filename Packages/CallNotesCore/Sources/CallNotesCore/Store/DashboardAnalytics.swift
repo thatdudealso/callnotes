@@ -157,22 +157,27 @@ public struct DashboardAnalytics: Sendable, Equatable {
     }
 
     private static func contacts(for calls: [DashboardCall]) -> [DashboardContact] {
-        Dictionary(grouping: calls) { $0.counterpartyName }
-            .map { name, calls in
+        Dictionary(grouping: calls) { contactIdentity(for: $0) }
+            .map { _, calls in
+                let sortedCalls = calls.sorted { $0.call.startedAt > $1.call.startedAt }
                 let totalDuration = calls.reduce(0) { $0 + $1.durationSec }
                 return DashboardContact(
-                    name: name,
+                    name: sortedCalls[0].counterpartyName,
                     callCount: calls.count,
                     totalDurationSec: totalDuration,
                     averageDurationSec: totalDuration / calls.count,
                     lastContactedAt: calls.map(\.call.startedAt).max()!,
-                    callIDs: calls.sorted { $0.call.startedAt > $1.call.startedAt }.map(\.id)
+                    callIDs: sortedCalls.map(\.id)
                 )
             }
             .sorted {
                 if $0.callCount != $1.callCount { return $0.callCount > $1.callCount }
                 return $0.lastContactedAt > $1.lastContactedAt
             }
+    }
+
+    private static func contactIdentity(for call: DashboardCall) -> String {
+        call.counterpartyName.lowercased()
     }
 
     private static func periodStart(
