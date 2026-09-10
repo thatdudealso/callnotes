@@ -246,33 +246,6 @@ private final class PhoneBonjourResolver: NSObject, NetServiceBrowserDelegate, N
     }
 }
 
-/// Pins the leaf certificate supplied by the Mac pairing QR code. No CA exception is made.
-final class PinnedURLSessionDelegate: NSObject, URLSessionDelegate {
-    private let fingerprint: String
-    init(fingerprint: String) { self.fingerprint = fingerprint }
-
-    func urlSession(
-        _ session: URLSession,
-        didReceive challenge: URLAuthenticationChallenge,
-        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
-    ) {
-        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-              let trust = challenge.protectionSpace.serverTrust,
-              let certificates = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
-              let certificate = certificates.first
-        else {
-            completionHandler(.performDefaultHandling, nil)
-            return
-        }
-        let der = SecCertificateCopyData(certificate) as Data
-        guard CertificateFingerprint.matches(der, expected: fingerprint) else {
-            completionHandler(.cancelAuthenticationChallenge, nil)
-            return
-        }
-        completionHandler(.useCredential, URLCredential(trust: trust))
-    }
-}
-
 final class BackgroundUploadCoordinator: NSObject, @unchecked Sendable, URLSessionTaskDelegate, URLSessionDataDelegate {
     static let shared = BackgroundUploadCoordinator()
     private static let sessionIdentifier = "com.thatdudealso.callnotes.phone-upload"

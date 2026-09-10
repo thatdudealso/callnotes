@@ -170,7 +170,7 @@ private enum ExtensionBackgroundUpload {
         sessionConfiguration.isDiscretionary = false
         sessionConfiguration.sessionSendsLaunchEvents = true
         sessionConfiguration.waitsForConnectivity = true
-        let session = URLSession(configuration: sessionConfiguration, delegate: PinnedExtensionSessionDelegate(fingerprint: configuration.certificateFingerprint), delegateQueue: nil)
+        let session = URLSession(configuration: sessionConfiguration, delegate: PinnedURLSessionDelegate(fingerprint: configuration.certificateFingerprint), delegateQueue: nil)
         let task = session.uploadTask(with: request, fromFile: body.url)
         task.taskDescription = job.id.uuidString
         task.resume()
@@ -189,20 +189,6 @@ private enum ExtensionBackgroundUpload {
 }
 
 private struct ExtensionPairingConfiguration: Codable { var serverURL: URL; var deviceID: UUID; var certificateFingerprint: String }
-
-private final class PinnedExtensionSessionDelegate: NSObject, URLSessionDelegate {
-    private let fingerprint: String
-    init(fingerprint: String) { self.fingerprint = fingerprint }
-    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-              let trust = challenge.protectionSpace.serverTrust,
-              let certificate = (SecTrustCopyCertificateChain(trust) as? [SecCertificate])?.first
-        else { completionHandler(.performDefaultHandling, nil); return }
-        let actual = CertificateFingerprint.sha256(of: SecCertificateCopyData(certificate) as Data)
-        guard actual.caseInsensitiveCompare(fingerprint) == .orderedSame else { completionHandler(.cancelAuthenticationChallenge, nil); return }
-        completionHandler(.useCredential, URLCredential(trust: trust))
-    }
-}
 
 private enum ExtensionMultipartBody {
     struct Body { var url: URL; var contentType: String }

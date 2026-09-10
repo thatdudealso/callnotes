@@ -130,6 +130,36 @@ import Testing
         #expect(created.certificateFingerprint == reopened.certificateFingerprint)
         #expect(!created.privateKeyPEM.isEmpty)
     }
+
+    @Test func pinnedSessionAcceptsItsMacAndRejectsAnotherCertificate() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let identity = try MacTLSIdentity(storageDirectory: directory)
+        let server = MacSyncServer(store: MemoryStore())
+        let task = Task { try? await server.run(host: "127.0.0.1", identity: identity) }
+        defer { task.cancel() }
+        let url = try #require(URL(string: "https://127.0.0.1:\(SyncConstants.serverPort)/health"))
+        let trusted = URLSession(configuration: .ephemeral, delegate: PinnedURLSessionDelegate(fingerprint: identity.certificateFingerprint), delegateQueue: nil)
+        var response: URLResponse?
+        for _ in 0..<20 {
+            if let result = try? await trusted.data(from: url) {
+                response = result.1
+                break
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+
+        let rejected = URLSession(configuration: .ephemeral, delegate: PinnedURLSessionDelegate(fingerprint: String(repeating: "0", count: 64)), delegateQueue: nil)
+        let rejectedSucceeded: Bool
+        do {
+            _ = try await rejected.data(from: url)
+            rejectedSucceeded = true
+        } catch {
+            rejectedSucceeded = false
+        }
+        #expect(!rejectedSucceeded)
+    }
     #endif
 }
 

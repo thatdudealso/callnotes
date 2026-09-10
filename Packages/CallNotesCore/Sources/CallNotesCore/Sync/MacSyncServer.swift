@@ -70,7 +70,9 @@ public actor MacSyncServer {
             guard let boundary = contentType.split(separator: "boundary=").last.map(String.init), contentType.contains("multipart/form-data") else {
                 throw HTTPError(.badRequest, message: "Expected multipart audio upload.")
             }
-            guard await self.reserve(uploadID) else { return Response(status: .ok) }
+            guard await self.reserve(uploadID) else {
+                throw HTTPError(.conflict, message: "This recording is still being accepted.")
+            }
             if await self.hasStoredCall(uploadID) {
                 await self.release(uploadID)
                 return Response(status: .ok)
@@ -107,13 +109,14 @@ public actor MacSyncServer {
     enum UploadOutcome: Sendable, Equatable {
         case created
         case alreadyStored
+        case inProgress
     }
 
     /// Stores at most one call per upload identifier, so a phone that retries a
     /// transfer it could not acknowledge never produces a second call and never
     /// overwrites an already processed one.
     func accept(uploadID: UUID, metadata: CallUploadMetadata, audio: Data, fileExtension: String) async throws -> UploadOutcome {
-        guard reserve(uploadID) else { return .alreadyStored }
+        guard reserve(uploadID) else { return .inProgress }
         do {
             try FileManager.default.createDirectory(at: receivedUploadsDirectory, withIntermediateDirectories: true)
             let audioURL = receivedUploadsDirectory.appendingPathComponent("\(uploadID.uuidString).\(fileExtension)")
@@ -338,7 +341,9 @@ private struct MultipartStreamParser {
     }
 
     mutating func finish() throws -> MultipartCallUpload.StagedUpload? {
-        guard state == .complete, let metadata, let audioURL else {
+        guard state == .complete, let metadata, let audioURL,
+              (try? audioURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0 > 0
+        else {
             if let audioURL { try? FileManager.default.removeItem(at: audioURL) }
             return nil
         }
