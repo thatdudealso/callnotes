@@ -79,6 +79,60 @@ struct RootTabView: View {
     }
 }
 
+/// SwiftData backing for `MirrorReconciler`. It only performs the writes the
+/// reconciler asks for, so the cascade rules stay in one tested place.
+struct SwiftDataMirrorWriter: MirrorWriting {
+    let context: ModelContext
+
+    func localCallIDs() throws -> [UUID] {
+        try context.fetch(FetchDescriptor<MirroredCall>()).map(\.id)
+    }
+
+    func removeSegments(callID: UUID) throws {
+        for segment in try context.fetch(FetchDescriptor<MirroredSegment>(predicate: #Predicate { $0.callID == callID })) {
+            context.delete(segment)
+        }
+    }
+
+    func removeNote(callID: UUID) throws {
+        for note in try context.fetch(FetchDescriptor<MirroredNote>(predicate: #Predicate { $0.callID == callID })) {
+            context.delete(note)
+        }
+    }
+
+    func removeCall(id: UUID) throws {
+        for call in try context.fetch(FetchDescriptor<MirroredCall>(predicate: #Predicate { $0.id == id })) {
+            context.delete(call)
+        }
+    }
+
+    func upsertCall(_ remote: SyncDTO.MirroredCall) throws {
+        let id = remote.id
+        let call = try context.fetch(FetchDescriptor<MirroredCall>(predicate: #Predicate { $0.id == id })).first
+            ?? MirroredCall(id: id, title: remote.title, summary: remote.summary, startedAt: remote.startedAt, source: remote.source, status: remote.status)
+        call.title = remote.title
+        call.summary = remote.summary
+        call.startedAt = remote.startedAt
+        call.source = remote.source
+        call.status = remote.status
+        if call.modelContext == nil { context.insert(call) }
+    }
+
+    func insertSegments(_ segments: [SyncDTO.MirroredSegment], callID: UUID) throws {
+        for segment in segments {
+            context.insert(MirroredSegment(id: segment.id, callID: callID, speaker: segment.speaker, text: segment.text, startSec: segment.startSec))
+        }
+    }
+
+    func insertNote(_ note: SyncDTO.MirroredNote, callID: UUID) throws {
+        context.insert(MirroredNote(callID: callID, summary: note.summary, decisions: note.decisions, actionItems: note.actionItems))
+    }
+
+    func commit() throws {
+        try context.save()
+    }
+}
+
 @Observable @MainActor
 final class PhoneAppModel {
     var isPaired = false
@@ -109,27 +163,7 @@ final class PhoneAppModel {
     func refreshMirror(in context: ModelContext) async {
         do {
             let mirror = try await PhoneMirrorCoordinator.fetch()
-            let remoteIDs = Set(mirror.calls.map(\.id))
-            for local in try context.fetch(FetchDescriptor<MirroredCall>()) where !remoteIDs.contains(local.id) {
-                context.delete(local)
-            }
-            for remote in mirror.calls {
-                let callDescriptor = FetchDescriptor<MirroredCall>(predicate: #Predicate { $0.id == remote.id })
-                let call = try context.fetch(callDescriptor).first ?? MirroredCall(id: remote.id, title: remote.title, summary: remote.summary, startedAt: remote.startedAt, source: remote.source, status: remote.status)
-                call.title = remote.title; call.summary = remote.summary; call.startedAt = remote.startedAt; call.source = remote.source; call.status = remote.status
-                if call.modelContext == nil { context.insert(call) }
-                let existingSegments = try context.fetch(FetchDescriptor<MirroredSegment>(predicate: #Predicate { $0.callID == remote.id }))
-                for segment in existingSegments { context.delete(segment) }
-                for remoteSegment in remote.segments {
-                    context.insert(MirroredSegment(id: remoteSegment.id, callID: remote.id, speaker: remoteSegment.speaker, text: remoteSegment.text, startSec: remoteSegment.startSec))
-                }
-                let existingNotes = try context.fetch(FetchDescriptor<MirroredNote>(predicate: #Predicate { $0.callID == remote.id }))
-                for note in existingNotes { context.delete(note) }
-                if let remoteNote = remote.note {
-                    context.insert(MirroredNote(callID: remote.id, summary: remoteNote.summary, decisions: remoteNote.decisions, actionItems: remoteNote.actionItems))
-                }
-            }
-            try context.save()
+            try MirrorReconciler.apply(mirror, to: SwiftDataMirrorWriter(context: context))
         } catch { uploadStatus = error.localizedDescription }
     }
     func startRecording() async {
@@ -138,8 +172,10 @@ final class PhoneAppModel {
     func stopRecording() async {
         do {
             let audioURL = try recorder.stop()
-            let inbox = try PhoneSharedContainer.inbox()
-            _ = try await inbox.enqueue(audioAt: audioURL, metadata: .init(source: .iphoneMeeting, startedAt: Date()))
+            try await BackgroundUploadCoordinator.shared.enqueue(
+                audioAt: audioURL,
+                metadata: .init(source: .iphoneMeeting, startedAt: Date())
+            )
             uploadStatus = await BackgroundUploadCoordinator.shared.resume()
         } catch { uploadStatus = error.localizedDescription }
     }

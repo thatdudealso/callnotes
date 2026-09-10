@@ -14,8 +14,8 @@ enum PhoneSharedContainer {
         return url
     }
 
-    static func inbox() throws -> PendingUploadInbox {
-        try PendingUploadInbox(directory: directory().appendingPathComponent("PhoneUploads", isDirectory: true))
+    static func uploadsDirectory() throws -> URL {
+        try directory().appendingPathComponent("PhoneUploads", isDirectory: true)
     }
 
     static func recordingsDirectory() throws -> URL {
@@ -48,7 +48,6 @@ enum PhonePairingStore {
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: keychainService,
             kSecAttrAccount: configuration.deviceID.uuidString,
-            kSecAttrAccessGroup: try sharedAccessGroup(),
             kSecValueData: Data(token.utf8),
             kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
         ]
@@ -58,14 +57,12 @@ enum PhonePairingStore {
 
     static func load() -> (PhonePairingConfiguration, String)? {
         guard let data = UserDefaults(suiteName: PhoneSharedContainer.appGroupIdentifier)?.data(forKey: defaultsKey),
-              let configuration = try? JSONDecoder().decode(PhonePairingConfiguration.self, from: data),
-              let accessGroup = try? sharedAccessGroup()
+              let configuration = try? JSONDecoder().decode(PhonePairingConfiguration.self, from: data)
         else { return nil }
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: keychainService,
             kSecAttrAccount: configuration.deviceID.uuidString,
-            kSecAttrAccessGroup: accessGroup,
             kSecReturnData: true,
         ]
         var result: CFTypeRef?
@@ -90,23 +87,14 @@ enum PhonePairingStore {
     }
 
     static func remove() {
-        guard let (configuration, _)= load(), let accessGroup = try? sharedAccessGroup() else { return }
+        guard let (configuration, _) = load() else { return }
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: keychainService,
             kSecAttrAccount: configuration.deviceID.uuidString,
-            kSecAttrAccessGroup: accessGroup,
         ]
         SecItemDelete(query as CFDictionary)
         UserDefaults(suiteName: PhoneSharedContainer.appGroupIdentifier)?.removeObject(forKey: defaultsKey)
-    }
-
-    private static func sharedAccessGroup() throws -> String {
-        let task = SecTaskCreateFromSelf(nil)
-        guard let groups = SecTaskCopyValueForEntitlement(task, "keychain-access-groups" as CFString, nil) as? [String],
-              let group = groups.first(where: { $0.hasSuffix(".com.thatdudealso.callnotes.shared") })
-        else { throw CocoaError(.fileNoSuchFile) }
-        return group
     }
 }
 
@@ -168,7 +156,7 @@ enum PhoneMirrorCoordinator {
     }
 }
 
-private final class PhoneBonjourResolver: NSObject, NetServiceBrowserDelegate, NetServiceDelegate {
+private final class PhoneBonjourResolver: NSObject, NetServiceBrowserDelegate, NetServiceDelegate, @unchecked Sendable {
     private var continuation: CheckedContinuation<URL, Error>?
     private var browser: NetServiceBrowser?
     private var service: NetService?
@@ -187,8 +175,8 @@ private final class PhoneBonjourResolver: NSObject, NetServiceBrowserDelegate, N
             browser.delegate = self
             self.browser = browser
             browser.searchForServices(ofType: "\(SyncConstants.bonjourServiceType).", inDomain: "local.")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
-                self?.finish(.failure(URLError(.cannotFindHost)))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [self] in
+                finish(.failure(URLError(.cannotFindHost)))
             }
         }
     }
@@ -206,8 +194,7 @@ private final class PhoneBonjourResolver: NSObject, NetServiceBrowserDelegate, N
             resolveNextService()
             return
         }
-        Task { [weak self] in
-            guard let self else { return }
+        Task { [self] in
             let delegate = PinnedURLSessionDelegate(fingerprint: self.fingerprint)
             let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
             do {
@@ -246,64 +233,49 @@ private final class PhoneBonjourResolver: NSObject, NetServiceBrowserDelegate, N
     }
 }
 
-final class BackgroundUploadCoordinator: NSObject, @unchecked Sendable, URLSessionTaskDelegate, URLSessionDataDelegate {
-    static let shared = BackgroundUploadCoordinator()
-    private static let sessionIdentifier = "com.thatdudealso.callnotes.phone-upload"
-    private static let shareSessionIdentifier = "com.thatdudealso.callnotes.share-upload"
-    private var backgroundCompletionHandlers: [String: () -> Void] = [:]
-    private var pendingStateTransitions: [Task<Void, Never>] = []
-    private lazy var session: URLSession = {
-        let configuration = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
-        configuration.isDiscretionary = false
-        configuration.sessionSendsLaunchEvents = true
-        configuration.waitsForConnectivity = true
-        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
-    }()
-    private lazy var shareSession: URLSession = {
-        let configuration = URLSessionConfiguration.background(withIdentifier: Self.shareSessionIdentifier)
-        configuration.sharedContainerIdentifier = PhoneSharedContainer.appGroupIdentifier
-        configuration.isDiscretionary = false
-        configuration.sessionSendsLaunchEvents = true
-        configuration.waitsForConnectivity = true
-        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
-    }()
+/// Creates and re-creates the background tasks that `SessionUploadCoordinator`
+/// asks for. It owns no durable state: the Core coordinator decides when a job
+/// is completed, retried, or backed off.
+final class PhoneUploadScheduler: SessionUploadTaskStarting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var sessionProvider: (@Sendable () -> URLSession)?
 
-    func urlSession(
-        _ session: URLSession,
-        didReceive challenge: URLAuthenticationChallenge,
-        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
-    ) {
-        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-              let configuration = PhonePairingStore.loadConfiguration()
-        else {
-            completionHandler(.performDefaultHandling, nil)
-            return
-        }
-        PinnedURLSessionDelegate(fingerprint: configuration.certificateFingerprint)
-            .urlSession(session, didReceive: challenge, completionHandler: completionHandler)
+    func attach(_ provider: @escaping @Sendable () -> URLSession) {
+        lock.withLock { sessionProvider = provider }
     }
 
-    func handleBackgroundEvents(for identifier: String, completionHandler: @escaping () -> Void) {
-        backgroundCompletionHandlers[identifier] = completionHandler
-        if identifier == Self.sessionIdentifier { _ = session }
-        if identifier == Self.shareSessionIdentifier { _ = shareSession }
+    func start(_ job: PendingUpload) async {
+        guard let session = currentSession(), let (connection, token) = PhonePairingStore.load() else { return }
+        try? Self.schedule(job, connection: connection, token: token, session: session)
     }
 
-    func resume() async -> String {
-        guard let (connection, token) = PhonePairingStore.load() else {
-            return "Pair with your Mac to send pending recordings."
-        }
+    func retry(_ job: PendingUpload) async -> Bool {
+        guard let session = currentSession(),
+              let (connection, token) = PhonePairingStore.load(),
+              let endpoint = try? await PhoneBonjourResolver.resolve(fingerprint: connection.certificateFingerprint),
+              endpoint != connection.serverURL,
+              (try? PhonePairingStore.updateServerURL(endpoint)) != nil
+        else { return false }
+        var fallback = connection
+        fallback.serverURL = endpoint
         do {
-            let inbox = try PhoneSharedContainer.inbox()
-            let activeIDs = await activeTaskIDs()
-            for job in await inbox.pending() where !activeIDs.contains(job.id) {
-                try schedule(job, connection: connection, token: token, session: session)
-            }
-            return "Pending recordings will upload in the background."
-        } catch { return error.localizedDescription }
+            try Self.schedule(job, connection: fallback, token: token, session: session)
+            return true
+        } catch {
+            return false
+        }
     }
 
-    private func schedule(_ job: PendingUpload, connection: PhonePairingConfiguration, token: String, session: URLSession) throws {
+    func discardRequestBody(for uploadID: UUID) async {
+        guard let directory = try? PhoneSharedContainer.requestBodiesDirectory() else { return }
+        try? FileManager.default.removeItem(at: directory.appendingPathComponent(uploadID.uuidString).appendingPathExtension("multipart"))
+    }
+
+    private func currentSession() -> URLSession? {
+        lock.withLock { sessionProvider }?()
+    }
+
+    static func schedule(_ job: PendingUpload, connection: PhonePairingConfiguration, token: String, session: URLSession) throws {
         let body = try MultipartUploadBody.make(job: job, directory: PhoneSharedContainer.requestBodiesDirectory())
         var request = URLRequest(url: connection.serverURL.appendingPathComponent("calls").appendingPathComponent(job.id.uuidString))
         request.httpMethod = "POST"
@@ -313,50 +285,69 @@ final class BackgroundUploadCoordinator: NSObject, @unchecked Sendable, URLSessi
         task.taskDescription = job.id.uuidString
         task.resume()
     }
+}
 
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        guard let identifier = task.taskDescription.flatMap(UUID.init(uuidString:)) else { return }
-        let transition = Task {
-            guard let inbox = try? PhoneSharedContainer.inbox() else { return }
-            if error == nil, let response = task.response as? HTTPURLResponse, (200..<300).contains(response.statusCode) {
-                try? await inbox.markCompleted(identifier)
-                Self.discardRequestBody(for: identifier)
-            } else {
-                if let job = await inbox.pending().first(where: { $0.id == identifier }),
-                   let (connection, token) = PhonePairingStore.load(),
-                   let endpoint = try? await PhoneBonjourResolver.resolve(fingerprint: connection.certificateFingerprint)
-                {
-                    var fallback = connection
-                    fallback.serverURL = endpoint
-                    if (try? PhonePairingStore.updateServerURL(endpoint)) != nil,
-                       (try? self.schedule(job, connection: fallback, token: token, session: session)) != nil
-                    {
-                        return
-                    }
-                }
-                try? await inbox.markFailed(identifier)
-                Self.discardRequestBody(for: identifier)
+private final class UncheckedBox<Value>: @unchecked Sendable {
+    let value: Value
+    init(_ value: Value) { self.value = value }
+}
+
+/// Owns the app's two background sessions and hands every delegate callback to
+/// the shared Core `SessionUploadCoordinator`, so transfers started by the
+/// Share Extension settle through the same state machine after a relaunch.
+final class BackgroundUploadCoordinator: @unchecked Sendable {
+    static let shared = BackgroundUploadCoordinator()
+    static let sessionIdentifier = "com.thatdudealso.callnotes.phone-upload"
+    static let shareSessionIdentifier = SharedUploadSession.identifier
+
+    private let scheduler = PhoneUploadScheduler()
+    private let coordinator: SessionUploadCoordinator?
+    private let delegate: SessionUploadDelegate?
+    private let session: URLSession
+    private let shareSession: URLSession
+
+    private init() {
+        let coordinator = try? SessionUploadCoordinator(
+            directory: PhoneSharedContainer.uploadsDirectory(),
+            starter: scheduler
+        )
+        self.coordinator = coordinator
+        let delegate = coordinator.map { built in
+            SessionUploadDelegate(coordinator: built, pinnedFingerprint: {
+                PhonePairingStore.loadConfiguration()?.certificateFingerprint
+            })
+        }
+        self.delegate = delegate
+        session = SharedUploadSession.make(identifier: Self.sessionIdentifier, delegate: delegate)
+        shareSession = SharedUploadSession.make(identifier: Self.shareSessionIdentifier, delegate: delegate)
+        scheduler.attach { [unowned self] in self.session }
+    }
+
+    func handleBackgroundEvents(for identifier: String, completionHandler: @escaping () -> Void) {
+        guard let coordinator else {
+            DispatchQueue.main.async(execute: completionHandler)
+            return
+        }
+        let box = UncheckedBox(completionHandler)
+        Task {
+            await coordinator.handleBackgroundEvents(identifier: identifier) {
+                DispatchQueue.main.async { box.value() }
             }
         }
-        pendingStateTransitions.append(transition)
     }
 
-    private static func discardRequestBody(for identifier: UUID) {
-        guard let directory = try? PhoneSharedContainer.requestBodiesDirectory() else { return }
-        let body = directory.appendingPathComponent(identifier.uuidString).appendingPathExtension("multipart")
-        try? FileManager.default.removeItem(at: body)
+    func enqueue(audioAt url: URL, metadata: CallUploadMetadata) async throws {
+        guard let coordinator else { throw CocoaError(.fileNoSuchFile) }
+        try await coordinator.enqueue(audioAt: url, metadata: metadata)
     }
 
-    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
-        guard let identifier = session.configuration.identifier,
-              let completionHandler = backgroundCompletionHandlers.removeValue(forKey: identifier)
-        else { return }
-        let transitions = pendingStateTransitions
-        pendingStateTransitions.removeAll()
-        Task {
-            for transition in transitions { await transition.value }
-            DispatchQueue.main.async(execute: completionHandler)
+    func resume() async -> String {
+        guard PhonePairingStore.load() != nil else {
+            return "Pair with your Mac to send pending recordings."
         }
+        guard let coordinator else { return "Shared storage for recordings is unavailable." }
+        await coordinator.resume(skipping: await activeTaskIDs())
+        return "Pending recordings will upload in the background."
     }
 
     private func activeTaskIDs() async -> Set<UUID> {
@@ -366,7 +357,7 @@ final class BackgroundUploadCoordinator: NSObject, @unchecked Sendable, URLSessi
     }
 }
 
-private enum MultipartUploadBody {
+enum MultipartUploadBody {
     struct Body { var url: URL; var contentType: String }
 
     static func make(job: PendingUpload, directory: URL) throws -> Body {

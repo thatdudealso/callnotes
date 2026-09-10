@@ -234,7 +234,7 @@ final class AppModel {
                 store: store,
                 receivedUploadsDirectory: uploads,
                 onAccepted: { [weak self] callID, audioURL, metadata in
-                    await self?.processPhoneUpload(callID: callID, audioURL: audioURL, metadata: metadata)
+                    try await self?.processPhoneUpload(callID: callID, audioURL: audioURL, metadata: metadata)
                 }
             )
             let service = NetService(domain: "local.", type: "\(SyncConstants.bonjourServiceType).", name: Host.current().localizedName ?? "CallNotes", port: Int32(SyncConstants.serverPort))
@@ -274,7 +274,7 @@ final class AppModel {
         }
     }
 
-    func processPhoneUpload(callID: UUID, audioURL: URL, metadata: CallUploadMetadata) async {
+    func processPhoneUpload(callID: UUID, audioURL: URL, metadata: CallUploadMetadata) async throws {
         guard isStoreInitialized else { return }
         var job = ImportJob(fileName: audioURL.lastPathComponent, sourceURL: audioURL, stage: .settling, callID: callID)
         upsertImportJob(job)
@@ -342,6 +342,7 @@ final class AppModel {
             job.error = error.localizedDescription
             upsertImportJob(job)
             statusMessage = error.localizedDescription
+            throw error
         }
     }
 

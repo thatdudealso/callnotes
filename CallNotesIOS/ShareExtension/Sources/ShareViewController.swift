@@ -88,12 +88,16 @@ final class ShareViewController: UIViewController {
         Task {
             do {
                 let container = try self.sharedContainer()
-                let job = try await ExtensionUploadQueue.enqueue(
-                    audioAt: sharedAudioURL,
-                    metadata: .init(source: .iphoneRecording, startedAt: startedAt, counterpartyName: counterpartyName),
-                    in: container.appendingPathComponent("PhoneUploads", isDirectory: true)
+                let scheduler = ExtensionUploadScheduler(container: container)
+                let coordinator = try SessionUploadCoordinator(
+                    directory: container.appendingPathComponent("PhoneUploads", isDirectory: true),
+                    starter: scheduler
                 )
-                try ExtensionBackgroundUpload.schedule(job: job, in: container)
+                try await coordinator.enqueue(
+                    audioAt: sharedAudioURL,
+                    metadata: .init(source: .iphoneRecording, startedAt: startedAt, counterpartyName: counterpartyName)
+                )
+                if let failure = scheduler.lastFailure { throw failure }
                 await MainActor.run { self.extensionContext?.completeRequest(returningItems: nil) }
             } catch {
                 await MainActor.run { self.showError(error.localizedDescription) }
@@ -144,44 +148,46 @@ final class ShareViewController: UIViewController {
     }
 }
 
-private enum ExtensionUploadQueue {
-    static func enqueue(audioAt source: URL, metadata: CallUploadMetadata, in directory: URL) async throws -> PendingUpload {
-        let inbox = try PendingUploadInbox(directory: directory)
-        return try await inbox.enqueue(audioAt: source, metadata: metadata)
-    }
-}
-
-private enum ExtensionBackgroundUpload {
+/// Starts the extension's half of a transfer. The durable queue state stays in
+/// the Core `SessionUploadCoordinator`, which the containing app reattaches to
+/// after this process exits.
+private final class ExtensionUploadScheduler: SessionUploadTaskStarting, @unchecked Sendable {
     private static let configurationKey = "paired_mac"
     private static let keychainService = "com.thatdudealso.callnotes.phone-pairing"
 
-    static func schedule(job: PendingUpload, in container: URL) throws {
-        guard let data = UserDefaults(suiteName: "group.com.thatdudealso.callnotes")?.data(forKey: configurationKey),
+    private let container: URL
+    private let lock = NSLock()
+    private var failure: Error?
+
+    init(container: URL) { self.container = container }
+
+    var lastFailure: Error? { lock.withLock { failure } }
+
+    func start(_ job: PendingUpload) async {
+        do { try schedule(job: job) } catch { lock.withLock { failure = error } }
+    }
+
+    private func schedule(job: PendingUpload) throws {
+        guard let data = UserDefaults(suiteName: "group.com.thatdudealso.callnotes")?.data(forKey: Self.configurationKey),
               let configuration = try? JSONDecoder().decode(ExtensionPairingConfiguration.self, from: data)
         else { throw URLError(.userAuthenticationRequired) }
-        guard let token = token(for: configuration.deviceID) else { throw URLError(.userAuthenticationRequired) }
+        guard let token = Self.token(for: configuration.deviceID) else { throw URLError(.userAuthenticationRequired) }
         let body = try ExtensionMultipartBody.make(job: job, directory: container.appendingPathComponent("UploadRequests", isDirectory: true))
         var request = URLRequest(url: configuration.serverURL.appendingPathComponent("calls").appendingPathComponent(job.id.uuidString))
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue(body.contentType, forHTTPHeaderField: "Content-Type")
-        let sessionConfiguration = URLSessionConfiguration.background(withIdentifier: "com.thatdudealso.callnotes.share-upload")
-        sessionConfiguration.sharedContainerIdentifier = "group.com.thatdudealso.callnotes"
-        sessionConfiguration.isDiscretionary = false
-        sessionConfiguration.sessionSendsLaunchEvents = true
-        sessionConfiguration.waitsForConnectivity = true
-        let session = URLSession(configuration: sessionConfiguration, delegate: PinnedURLSessionDelegate(fingerprint: configuration.certificateFingerprint), delegateQueue: nil)
+        let session = SharedUploadSession.make(identifier: SharedUploadSession.identifier, delegate: nil)
         let task = session.uploadTask(with: request, fromFile: body.url)
         task.taskDescription = job.id.uuidString
         task.resume()
     }
 
+    /// Both targets declare exactly one `keychain-access-groups` entry, so the
+    /// keychain resolves an unqualified query to that shared group in the app
+    /// and in this extension alike.
     private static func token(for deviceID: UUID) -> String? {
-        let task = SecTaskCreateFromSelf(nil)
-        guard let groups = SecTaskCopyValueForEntitlement(task, "keychain-access-groups" as CFString, nil) as? [String],
-              let accessGroup = groups.first(where: { $0.hasSuffix(".com.thatdudealso.callnotes.shared") })
-        else { return nil }
-        let query: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: keychainService, kSecAttrAccount: deviceID.uuidString, kSecAttrAccessGroup: accessGroup, kSecReturnData: true]
+        let query: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: keychainService, kSecAttrAccount: deviceID.uuidString, kSecReturnData: true]
         var result: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data else { return nil }
         return String(data: data, encoding: .utf8)

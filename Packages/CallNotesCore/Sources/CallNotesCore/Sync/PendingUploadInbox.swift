@@ -88,6 +88,7 @@ public actor PendingUploadInbox {
     }
 
     public func enqueue(audioAt sourceURL: URL, metadata: CallUploadMetadata) throws -> PendingUpload {
+        reload()
         guard FileManager.default.fileExists(atPath: sourceURL.path) else {
             throw PendingUploadInboxError.sourceFileMissing
         }
@@ -101,13 +102,15 @@ public actor PendingUploadInbox {
     }
 
     public func pending(now: Date = Date()) -> [PendingUpload] {
-        entries.filter { entry in
+        reload()
+        return entries.filter { entry in
             guard FileManager.default.fileExists(atPath: entry.audioURL.path) else { return false }
             return entry.nextAttemptAt.map { $0 <= now } ?? true
         }.sorted { $0.createdAt < $1.createdAt }
     }
 
     public func markFailed(_ id: UUID, at date: Date = Date()) throws {
+        reload()
         guard let index = entries.firstIndex(where: { $0.id == id }) else {
             throw PendingUploadInboxError.unknownUpload
         }
@@ -118,12 +121,20 @@ public actor PendingUploadInbox {
     }
 
     public func markCompleted(_ id: UUID) throws {
+        reload()
         guard let index = entries.firstIndex(where: { $0.id == id }) else {
             throw PendingUploadInboxError.unknownUpload
         }
         let entry = entries.remove(at: index)
         try? FileManager.default.removeItem(at: entry.audioURL)
         try persist()
+    }
+
+    /// The manifest, not this actor, is the source of truth: the Share Extension
+    /// and the app each hold their own inbox over the same App Group directory.
+    private func reload() {
+        guard let stored = try? Self.loadManifest(at: manifestURL) else { return }
+        entries = stored
     }
 
     private func persist() throws {

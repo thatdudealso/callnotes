@@ -14,14 +14,15 @@ public actor MacSyncServer {
     private let pairing: PairingAuthority
     private let store: any CallStore
     private let receivedUploadsDirectory: URL
-    private let onAccepted: (@Sendable (UUID, URL, CallUploadMetadata) async -> Void)?
+    private let onAccepted: (@Sendable (UUID, URL, CallUploadMetadata) async throws -> Void)?
     private var acceptingUploadIDs: Set<UUID> = []
+    private var processingUploadIDs: Set<UUID> = []
 
     public init(
         pairing: PairingAuthority = PairingAuthority(),
         store: any CallStore = MemoryStore(),
         receivedUploadsDirectory: URL? = nil,
-        onAccepted: (@Sendable (UUID, URL, CallUploadMetadata) async -> Void)? = nil
+        onAccepted: (@Sendable (UUID, URL, CallUploadMetadata) async throws -> Void)? = nil
     ) {
         self.pairing = pairing
         self.store = store
@@ -73,9 +74,9 @@ public actor MacSyncServer {
             guard await self.reserve(uploadID) else {
                 throw HTTPError(.conflict, message: "This recording is still being accepted.")
             }
-            if await self.hasStoredCall(uploadID) {
+            if let settled = await self.settleExistingUpload(uploadID) {
                 await self.release(uploadID)
-                return Response(status: .ok)
+                return Response(status: settled == .created ? .created : .ok)
             }
             do {
                 try FileManager.default.createDirectory(at: self.receivedUploadsDirectory, withIntermediateDirectories: true)
@@ -109,6 +110,7 @@ public actor MacSyncServer {
     enum UploadOutcome: Sendable, Equatable {
         case created
         case alreadyStored
+        case resumed
         case inProgress
     }
 
@@ -119,6 +121,10 @@ public actor MacSyncServer {
         guard !audio.isEmpty else { throw HTTPError(.badRequest, message: "Audio upload is empty.") }
         guard reserve(uploadID) else { return .inProgress }
         do {
+            if let settled = await settleExistingUpload(uploadID) {
+                release(uploadID)
+                return settled
+            }
             try FileManager.default.createDirectory(at: receivedUploadsDirectory, withIntermediateDirectories: true)
             let audioURL = receivedUploadsDirectory.appendingPathComponent("\(uploadID.uuidString).\(MultipartCallUpload.safeAudioExtension(fileExtension))")
             try audio.write(to: audioURL, options: .atomic)
@@ -131,8 +137,19 @@ public actor MacSyncServer {
 
     private func acceptReserved(uploadID: UUID, metadata: CallUploadMetadata, audioURL: URL) async throws -> UploadOutcome {
         defer { acceptingUploadIDs.remove(uploadID) }
-        if try await store.fetchCall(id: uploadID) != nil { return .alreadyStored }
-        return try await storeAccepted(uploadID: uploadID, metadata: metadata, audioURL: audioURL)
+        guard let existing = try await store.fetchCall(id: uploadID) else {
+            return try await storeAccepted(uploadID: uploadID, metadata: metadata, audioURL: audioURL)
+        }
+        guard !isProcessed(existing), !processingUploadIDs.contains(uploadID) else {
+            try? FileManager.default.removeItem(at: audioURL)
+            return .alreadyStored
+        }
+        var replaced = existing
+        replaced.audioPath = audioURL.path
+        try metadata.writeSidecar(nextTo: audioURL)
+        try await store.upsertCall(replaced)
+        launchProcessing(uploadID: uploadID, audioURL: audioURL, metadata: metadata)
+        return .resumed
     }
 
     private func storeAccepted(uploadID: UUID, metadata: CallUploadMetadata, audioURL: URL) async throws -> UploadOutcome {
@@ -147,10 +164,51 @@ public actor MacSyncServer {
             status: .uploaded
         )
         try await store.upsertCall(call)
-        if let onAccepted {
-            Task { await onAccepted(uploadID, audioURL, metadata) }
-        }
+        launchProcessing(uploadID: uploadID, audioURL: audioURL, metadata: metadata)
         return .created
+    }
+
+    /// Decides what an upload identifier that the Mac has already seen deserves.
+    /// A finished call is acknowledged untouched; an accepted-but-unprocessed one
+    /// resumes from its retained staging audio, so a 201 whose processing failed
+    /// never leaves the recording stuck. `nil` means the bytes are still needed.
+    private func settleExistingUpload(_ uploadID: UUID) async -> UploadOutcome? {
+        guard let call = try? await store.fetchCall(id: uploadID) else { return nil }
+        if processingUploadIDs.contains(uploadID) || isProcessed(call) { return .alreadyStored }
+        guard let staged = stagedAudioURL(for: uploadID) else { return nil }
+        let metadata = CallUploadMetadata.loadSidecar(nextTo: staged)
+            ?? CallUploadMetadata(source: call.source, startedAt: call.startedAt, counterpartyName: call.counterpartyName)
+        launchProcessing(uploadID: uploadID, audioURL: staged, metadata: metadata)
+        return .resumed
+    }
+
+    private func launchProcessing(uploadID: UUID, audioURL: URL, metadata: CallUploadMetadata) {
+        guard let onAccepted else { return }
+        guard processingUploadIDs.insert(uploadID).inserted else { return }
+        Task {
+            try? await onAccepted(uploadID, audioURL, metadata)
+            self.finishProcessing(uploadID)
+        }
+    }
+
+    private func finishProcessing(_ uploadID: UUID) {
+        processingUploadIDs.remove(uploadID)
+    }
+
+    private func isProcessed(_ call: Call) -> Bool {
+        switch call.status {
+        case .transcribed, .notesReady: true
+        case .recording, .uploaded, .transcribing, .failed: false
+        }
+    }
+
+    /// Staging audio is keyed by upload identifier, so its presence is the
+    /// durable record that a retry can resume without re-sending the recording.
+    private func stagedAudioURL(for uploadID: UUID) -> URL? {
+        let contents = (try? FileManager.default.contentsOfDirectory(at: receivedUploadsDirectory, includingPropertiesForKeys: nil)) ?? []
+        return contents.first {
+            $0.deletingPathExtension().lastPathComponent == uploadID.uuidString && $0.pathExtension.lowercased() != "json"
+        }
     }
 
     private func reserve(_ uploadID: UUID) -> Bool {
@@ -159,10 +217,6 @@ public actor MacSyncServer {
 
     private func release(_ uploadID: UUID) {
         acceptingUploadIDs.remove(uploadID)
-    }
-
-    private func hasStoredCall(_ uploadID: UUID) async -> Bool {
-        (try? await store.fetchCall(id: uploadID)) != nil
     }
 
     private static func authorizedDevice(for request: Request, pairing: PairingAuthority) async throws -> PairedDevice {
