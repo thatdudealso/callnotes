@@ -4,6 +4,11 @@ import Foundation
 import Observation
 import SwiftUI
 
+enum SidebarItem: Hashable {
+    case dashboard
+    case call(UUID)
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -41,8 +46,29 @@ final class AppModel {
     private var pendingInboxFiles: [URL] = []
     private var isImporting = false
     private var importNoticeTask: Task<Void, Never>?
+    private var showsDashboard = false
     private var dashboardObservationTask: Task<Void, Never>?
     private var dashboardTickerTask: Task<Void, Never>?
+
+    /// The sidebar owns navigation, but the model owns the state so a closed and
+    /// reopened window lands back on the Dashboard or the call the user was reading.
+    var sidebarSelection: SidebarItem? {
+        get {
+            if showsDashboard { return .dashboard }
+            return selectedCallID.map(SidebarItem.call)
+        }
+        set {
+            switch newValue {
+            case .dashboard:
+                showsDashboard = true
+            case .call(let id):
+                showsDashboard = false
+                selectedCallID = id
+            case nil:
+                showsDashboard = false
+            }
+        }
+    }
 
     var selectedCall: Call? {
         calls.first { $0.id == selectedCallID }

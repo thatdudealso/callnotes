@@ -8,7 +8,7 @@ public actor MemoryStore: CallStore {
     private var callSpeakers: [UUID: [CallSpeaker]] = [:]
     private var samples: [SpeakerSample] = []
     private var notes: [UUID: [NotesRecord]] = [:]
-    private var dashboardObservers: [UUID: AsyncStream<Void>.Continuation] = [:]
+    private var dashboardObservers = DashboardObservers()
 
     public init() {}
 
@@ -16,7 +16,7 @@ public actor MemoryStore: CallStore {
 
     public func upsertCall(_ call: Call) async throws {
         calls[call.id] = call
-        notifyDashboardObservers()
+        dashboardObservers.notify()
     }
 
     public func fetchCalls() async throws -> [Call] {
@@ -36,13 +36,9 @@ public actor MemoryStore: CallStore {
     }
 
     public func dashboardChanges() async -> AsyncStream<Void> {
-        let id = UUID()
-        let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
-        continuation.onTermination = { [weak self] _ in
+        dashboardObservers.register { [weak self] id in
             Task { await self?.removeDashboardObserver(id) }
         }
-        dashboardObservers[id] = continuation
-        return stream
     }
 
     public func replaceSegments(
@@ -113,13 +109,7 @@ public actor MemoryStore: CallStore {
     }
 
     private func removeDashboardObserver(_ id: UUID) {
-        dashboardObservers.removeValue(forKey: id)
-    }
-
-    private func notifyDashboardObservers() {
-        for continuation in dashboardObservers.values {
-            continuation.yield()
-        }
+        dashboardObservers.remove(id)
     }
 
     private func dashboardCounterpartyNames() -> [UUID: String] {

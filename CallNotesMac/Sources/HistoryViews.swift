@@ -3,18 +3,12 @@ import CallNotesCore
 import SwiftUI
 import UniformTypeIdentifiers
 
-enum SidebarItem: Hashable {
-    case dashboard
-    case call(UUID)
-}
-
 struct HistorySplitView: View {
     @Bindable var model: AppModel
-    @State private var selection: SidebarItem?
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $selection) {
+            List(selection: $model.sidebarSelection) {
                 Label("Dashboard", systemImage: "chart.bar.xaxis")
                     .tag(SidebarItem.dashboard)
                 Section("Calls") {
@@ -46,7 +40,7 @@ struct HistorySplitView: View {
                 }
             }
         } detail: {
-            switch selection {
+            switch model.sidebarSelection {
             case .dashboard:
                 DashboardView(model: model)
             case .call where model.selectedCall != nil:
@@ -55,18 +49,9 @@ struct HistorySplitView: View {
                 empty
             }
         }
-        .onChange(of: selection) { _, newValue in
-            guard case .call(let id) = newValue else { return }
-            model.selectedCallID = id
-        }
         .onChange(of: model.selectedCallID) { _, newValue in
-            guard let newValue else { return }
-            if selection == nil {
-                selection = .call(newValue)
-            }
-            if let call = model.calls.first(where: { $0.id == newValue }) {
-                Task { await model.select(call) }
-            }
+            guard let newValue, let call = model.calls.first(where: { $0.id == newValue }) else { return }
+            Task { await model.select(call) }
         }
     }
 

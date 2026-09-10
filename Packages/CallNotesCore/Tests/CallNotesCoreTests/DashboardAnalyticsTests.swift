@@ -267,10 +267,22 @@ import Testing
                     billedSeconds: 60
                 ),
             ]
+            let changes = await store.dashboardChanges()
+            let published = Task {
+                for await _ in changes { return true }
+                return false
+            }
+            let deadline = Task {
+                try? await Task.sleep(for: .seconds(5))
+                published.cancel()
+            }
             for call in calls {
                 try await store.upsertCall(call)
                 callIDs.append(call.id)
             }
+
+            #expect(await published.value)
+            deadline.cancel()
 
             let snapshot = try await store.fetchDashboardAnalytics(asOf: now)
             let contact = try #require(snapshot.contacts.first { $0.name == fixtureName })

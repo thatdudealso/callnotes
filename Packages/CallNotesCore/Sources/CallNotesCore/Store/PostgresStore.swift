@@ -7,7 +7,7 @@ public actor PostgresStore: CallStore {
     private let client: PostgresClient
     private let logger: Logger
     private var runTask: Task<Void, Never>?
-    private var dashboardObservers: [UUID: AsyncStream<Void>.Continuation] = [:]
+    private var dashboardObservers = DashboardObservers()
 
     public init(configuration: StoreConfiguration, password: String = "") {
         var logger = Logger(label: "com.thatdudealso.callnotes.store")
@@ -96,7 +96,7 @@ public actor PostgresStore: CallStore {
             """,
             logger: logger
         )
-        notifyDashboardObservers()
+        dashboardObservers.notify()
     }
 
     public func fetchCalls() async throws -> [Call] {
@@ -144,13 +144,9 @@ public actor PostgresStore: CallStore {
     }
 
     public func dashboardChanges() async -> AsyncStream<Void> {
-        let id = UUID()
-        let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
-        continuation.onTermination = { [weak self] _ in
+        dashboardObservers.register { [weak self] id in
             Task { await self?.removeDashboardObserver(id) }
         }
-        dashboardObservers[id] = continuation
-        return stream
     }
 
     public func replaceSegments(
@@ -391,7 +387,7 @@ public actor PostgresStore: CallStore {
             try await client.query("DELETE FROM speaker_profiles WHERE id = \(id)", logger: logger)
         }
         if !callIDs.isEmpty {
-            notifyDashboardObservers()
+            dashboardObservers.notify()
         }
     }
 
@@ -477,13 +473,7 @@ public actor PostgresStore: CallStore {
     }
 
     private func removeDashboardObserver(_ id: UUID) {
-        dashboardObservers.removeValue(forKey: id)
-    }
-
-    private func notifyDashboardObservers() {
-        for continuation in dashboardObservers.values {
-            continuation.yield()
-        }
+        dashboardObservers.remove(id)
     }
 
     /// Counts, talk time, averages and last-contacted are aggregated by Postgres so
