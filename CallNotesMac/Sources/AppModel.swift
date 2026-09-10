@@ -482,7 +482,7 @@ final class AppModel {
         statusMessage = "Audio capture could not start: \(message)"
     }
 
-    func updateCounterpartyName(for callID: UUID, name: String) {
+    func updateCounterpartyName(for callID: UUID, name: String) async {
         guard let index = calls.firstIndex(where: { $0.id == callID }) else { return }
         let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
         calls[index].counterpartyName = normalized.isEmpty ? nil : normalized
@@ -490,12 +490,10 @@ final class AppModel {
         if instantCallAtHangUp?.id == callID {
             instantCallAtHangUp = call
         }
-        Task {
-            do {
-                try await store.upsertCall(call)
-            } catch {
-                statusMessage = error.localizedDescription
-            }
+        do {
+            try await store.upsertCall(call)
+        } catch {
+            statusMessage = error.localizedDescription
         }
     }
 

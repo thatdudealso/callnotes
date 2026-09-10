@@ -134,17 +134,11 @@ public actor PostgresStore: CallStore {
     }
 
     public func fetchDashboardAnalytics(asOf: Date) async throws -> DashboardAnalytics {
-        let contacts = try await dashboardContacts(asOf: asOf)
-        var counterpartyNames: [UUID: String] = [:]
-        for contact in contacts {
-            for callID in contact.callIDs {
-                counterpartyNames[callID] = contact.name
-            }
-        }
+        let aggregate = try await dashboardContacts(asOf: asOf)
         return DashboardAnalytics.make(
             from: try await fetchCalls(),
-            counterpartyNames: counterpartyNames,
-            contacts: contacts,
+            counterpartyNames: aggregate.resolvedNames,
+            contacts: aggregate.contacts,
             now: asOf
         )
     }
@@ -497,7 +491,9 @@ public actor PostgresStore: CallStore {
     /// resolves in the contracted order: the user-edited counterparty name, then the
     /// highest-confidence matched non-owner speaker profile, then `Unknown`, grouped
     /// case-insensitively so one person never splits across rows.
-    private func dashboardContacts(asOf: Date) async throws -> [DashboardContact] {
+    private func dashboardContacts(
+        asOf: Date
+    ) async throws -> (contacts: [DashboardContact], resolvedNames: [UUID: String]) {
         let rows = try await client.query(
             """
             WITH resolved AS (
@@ -527,12 +523,12 @@ public actor PostgresStore: CallStore {
               ) AS matched ON true
             )
             SELECT
-              (array_agg(resolved_name ORDER BY started_at DESC))[1] AS display_name,
               count(*)::int AS call_count,
               sum(duration_sec)::int AS total_duration_sec,
               (sum(duration_sec) / count(*))::int AS average_duration_sec,
               max(started_at) AS last_contacted_at,
-              array_agg(call_id ORDER BY started_at DESC) AS call_ids
+              array_agg(call_id ORDER BY started_at DESC, call_id) AS call_ids,
+              array_agg(resolved_name ORDER BY started_at DESC, call_id) AS resolved_names
             FROM resolved
             GROUP BY lower(resolved_name)
             ORDER BY call_count DESC, last_contacted_at DESC
@@ -540,19 +536,25 @@ public actor PostgresStore: CallStore {
             logger: logger
         )
         var contacts: [DashboardContact] = []
-        for try await row in rows.decode((String, Int, Int, Int, Date, [UUID]).self) {
+        var resolvedNames: [UUID: String] = [:]
+        for try await row in rows.decode((Int, Int, Int, Date, [UUID], [String]).self) {
+            let callIDs = row.4
+            let names = row.5
+            for (callID, name) in zip(callIDs, names) {
+                resolvedNames[callID] = name
+            }
             contacts.append(
                 DashboardContact(
-                    name: row.0,
-                    callCount: row.1,
-                    totalDurationSec: row.2,
-                    averageDurationSec: row.3,
-                    lastContactedAt: row.4,
-                    callIDs: row.5
+                    name: names.first ?? "Unknown",
+                    callCount: row.0,
+                    totalDurationSec: row.1,
+                    averageDurationSec: row.2,
+                    lastContactedAt: row.3,
+                    callIDs: callIDs
                 )
             )
         }
-        return contacts
+        return (contacts, resolvedNames)
     }
 
     private static func decodeSegment(_ row: PostgresRow) throws -> Segment {

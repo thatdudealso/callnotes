@@ -127,6 +127,31 @@ import Testing
         #expect(analytics.contacts.map(\.name) == ["Morgan"])
     }
 
+    @Test func groupLabelFollowsTheMostRecentCallWithoutRelabellingOlderCalls() async throws {
+        let store = MemoryStore()
+        let profile = SpeakerProfile(
+            displayName: "Avery",
+            centroid: [0],
+            embeddingModel: EmbeddingModel.weSpeakerV2
+        )
+        let matched = fixtureCall(counterparty: nil, startedAt: now.addingTimeInterval(-3_600), duration: 60)
+        let shouted = fixtureCall(counterparty: "AVERY", startedAt: now, duration: 60)
+        try await store.upsertSpeakerProfile(profile)
+        try await store.upsertCall(matched)
+        try await store.upsertCall(shouted)
+        try await store.replaceCallSpeakers(
+            callID: matched.id,
+            speakers: [CallSpeaker(callID: matched.id, clusterKey: "far", profileID: profile.id, confidence: 0.9)]
+        )
+
+        let analytics = try await store.fetchDashboardAnalytics(asOf: now)
+        let resolved = try #require(analytics.calls.first { $0.id == matched.id })
+
+        #expect(resolved.counterpartyName == "Avery")
+        #expect(analytics.contacts.map(\.name) == ["AVERY"])
+        #expect(analytics.contacts[0].callCount == 2)
+    }
+
     @Test func editedCounterpartyNameWinsOverAStaleResolvedIdentity() {
         let call = fixtureCall(counterparty: "Priya", startedAt: now, duration: 60)
 
@@ -274,9 +299,22 @@ import Testing
                 speakers: [CallSpeaker(callID: profileCall.id, clusterKey: "far", profileID: profile.id, confidence: 0.9)]
             )
 
+            let shoutedName = profile.displayName.uppercased()
+            let shoutedCall = fixtureCall(
+                counterparty: shoutedName,
+                startedAt: now.addingTimeInterval(60),
+                duration: 30
+            )
+            try await store.upsertCall(shoutedCall)
+            callIDs.append(shoutedCall.id)
+
             let profileSnapshot = try await store.fetchDashboardAnalytics(asOf: now)
             let resolved = try #require(profileSnapshot.calls.first { $0.id == profileCall.id })
+            let group = try #require(profileSnapshot.contacts.first { $0.callIDs.contains(profileCall.id) })
+
             #expect(resolved.counterpartyName == profile.displayName)
+            #expect(group.name == shoutedName)
+            #expect(group.callCount == 2)
         }
     }
 

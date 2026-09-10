@@ -107,7 +107,7 @@ struct DashboardView: View {
                 Text("Contacts will appear here as calls are saved.")
                     .foregroundStyle(.secondary)
             } else {
-                VStack(spacing: 0) {
+                LazyVStack(spacing: 0) {
                     ForEach(analytics.contacts) { contact in
                         Button {
                             show(contact.callIDs, title: contact.name)

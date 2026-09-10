@@ -109,6 +109,39 @@ struct HistoryRow: View {
     }
 }
 
+/// The draft lives here rather than in `AppModel.calls` so a store refresh that
+/// lands mid-edit cannot rewrite what is being typed. The name is committed on
+/// submit or focus loss, and an external change is only adopted while idle.
+private struct CounterpartyNameField: View {
+    var model: AppModel
+    let call: Call
+
+    @State private var draft = ""
+    @FocusState private var isEditing: Bool
+
+    var body: some View {
+        TextField("Counterparty", text: $draft)
+            .textFieldStyle(.roundedBorder)
+            .focused($isEditing)
+            .onSubmit { commit() }
+            .onChange(of: isEditing) { _, editing in
+                if !editing { commit() }
+            }
+            .onChange(of: call.counterpartyName) { _, name in
+                guard !isEditing else { return }
+                draft = name ?? ""
+            }
+            .task(id: call.id) { draft = call.counterpartyName ?? "" }
+    }
+
+    @MainActor
+    private func commit() {
+        let normalized = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalized != (call.counterpartyName ?? "") else { return }
+        Task { await model.updateCounterpartyName(for: call.id, name: normalized) }
+    }
+}
+
 struct CallDetailView: View {
     var model: AppModel
     @AppStorage("meta_privacy_acknowledged") private var privacyAcknowledged = false
@@ -176,14 +209,7 @@ struct CallDetailView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(call.counterpartyName ?? "Untitled call")
                     .font(.title2.weight(.semibold))
-                TextField(
-                    "Counterparty",
-                    text: Binding(
-                        get: { call.counterpartyName ?? "" },
-                        set: { model.updateCounterpartyName(for: call.id, name: $0) }
-                    )
-                )
-                .textFieldStyle(.roundedBorder)
+                CounterpartyNameField(model: model, call: call)
                 HStack(spacing: 12) {
                     Text(call.startedAt.formatted(date: .abbreviated, time: .shortened))
                     Text(call.source.rawValue.replacingOccurrences(of: "_", with: " "))
