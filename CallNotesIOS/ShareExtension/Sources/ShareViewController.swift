@@ -14,6 +14,7 @@ final class ShareViewController: UIViewController {
     private var didDisappear = false
     private var isSending = false
     private let sendButton = UIButton(type: .system)
+    private var cancelButton: UIBarButtonItem?
     private var sharedAudioLease: SharedAudioStaging.Lease?
 
     override func viewDidLoad() {
@@ -57,6 +58,7 @@ final class ShareViewController: UIViewController {
             primaryAction: UIAction { [weak self] _ in self?.cancelShare() }
         )
         cancel.accessibilityLabel = "Cancel sharing"
+        cancelButton = cancel
         item.leftBarButtonItem = cancel
         bar.setItems([item], animated: false)
         view.addSubview(bar)
@@ -67,7 +69,10 @@ final class ShareViewController: UIViewController {
         ])
     }
 
+    /// Tearing the extension down mid-enqueue would abandon a half-copied
+    /// recording that no sweep covers, so a send in flight owns the sheet.
     private func cancelShare() {
+        guard !isSending else { return }
         discardUnsentStaging()
         extensionContext?.cancelRequest(withError: CocoaError(.userCancelled))
     }
@@ -116,7 +121,10 @@ final class ShareViewController: UIViewController {
     private func loadAudio() {
         guard let item = extensionContext?.inputItems.first as? NSExtensionItem,
               let provider = item.attachments?.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.audio.identifier) })
-        else { return }
+        else {
+            showError("CallNotes can only send audio recordings. Share a recording from Notes, Voice Memos, Files, or Mail.")
+            return
+        }
         let suggestedName = provider.suggestedName
         provider.loadInPlaceFileRepresentation(forTypeIdentifier: UTType.audio.identifier) { [weak self] url, inPlace, error in
             guard let url else {
@@ -157,10 +165,12 @@ final class ShareViewController: UIViewController {
         let startedAt = datePicker.date
         isSending = true
         sendButton.isEnabled = false
+        cancelButton?.isEnabled = false
         Task {
             defer {
                 self.isSending = false
                 self.sendButton.isEnabled = true
+                self.cancelButton?.isEnabled = true
                 if self.didDisappear { self.discardUnsentStaging() }
             }
             do {

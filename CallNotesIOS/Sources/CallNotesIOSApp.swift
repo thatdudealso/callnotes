@@ -228,10 +228,10 @@ final class PhoneAppModel {
     func stopRecording() async {
         defer { recorder.releaseRecordingFile() }
         do {
-            let audioURL = try recorder.stop()
+            let capture = try recorder.stop()
             try await BackgroundUploadCoordinator.shared.enqueue(
-                audioAt: audioURL,
-                metadata: .init(source: .iphoneMeeting, startedAt: Date())
+                audioAt: capture.url,
+                metadata: .init(source: .iphoneMeeting, startedAt: capture.startedAt)
             )
             uploadStatus = await BackgroundUploadCoordinator.shared.resume()
         } catch { uploadStatus = error.localizedDescription }
@@ -376,6 +376,7 @@ struct PhoneSettingsView: View {
     private(set) var isRecording = false
     @ObservationIgnored private var recorder: AVAudioRecorder?
     @ObservationIgnored private var lease: SharedAudioStaging.Lease?
+    @ObservationIgnored private var captureStartedAt: Date?
     func start() async throws {
         guard await AVAudioApplication.requestRecordPermission() else {
             throw NSError(domain: "CallNotes.Recorder", code: 1, userInfo: [NSLocalizedDescriptionKey: "CallNotes needs microphone access to record."])
@@ -392,11 +393,20 @@ struct PhoneSettingsView: View {
             throw NSError(domain: "CallNotes.Recorder", code: 2, userInfo: [NSLocalizedDescriptionKey: "Could not start recording."])
         }
         self.lease = lease
+        captureStartedAt = Date()
         isRecording = true
     }
-    func stop() throws -> URL {
-        guard let recorder else { throw CocoaError(.fileNoSuchFile) }
-        recorder.stop(); isRecording = false; self.recorder = nil; return recorder.url
+
+    /// The capture start, not the moment Stop was tapped: history ordering and
+    /// dashboard periods key off this, so a 45-minute meeting must not land
+    /// 45 minutes late.
+    func stop() throws -> (url: URL, startedAt: Date) {
+        guard let recorder, let captureStartedAt else { throw CocoaError(.fileNoSuchFile) }
+        recorder.stop()
+        isRecording = false
+        self.recorder = nil
+        self.captureStartedAt = nil
+        return (recorder.url, captureStartedAt)
     }
 
     /// Held from `start` until the upload queue owns the bytes, so the launch
