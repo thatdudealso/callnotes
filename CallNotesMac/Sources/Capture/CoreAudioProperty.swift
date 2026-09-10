@@ -18,7 +18,7 @@ enum CoreAudioProperty {
         qualifierSize: UInt32 = 0
     ) throws -> T {
         var address = address(selector, scope: scope)
-        var data = UnsafeMutablePointer<T>.allocate(capacity: 1)
+        let data = UnsafeMutablePointer<T>.allocate(capacity: 1)
         defer { data.deallocate() }
         var size = UInt32(MemoryLayout<T>.size)
         let status = AudioObjectGetPropertyData(object, &address, qualifierSize, qualifier, &size, data)

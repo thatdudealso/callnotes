@@ -14,8 +14,16 @@ public enum InboxPaths: Sendable {
     public static let audioExtensions: Set<String> = ["m4a", "caf", "wav", "aiff", "aif", "aac"]
 
     public static func iCloudDriveRoot(fileManager: FileManager = .default) -> URL {
+        #if os(macOS)
         fileManager.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs", isDirectory: true)
+        #else
+        // The Mac import watcher is the only caller that uses the desktop
+        // iCloud Drive location. Keep this shared type iOS-buildable without
+        // inventing a path outside the app sandbox.
+        fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("CallNotes-iCloud-unavailable", isDirectory: true)
+        #endif
     }
 
     public static func iCloudDriveInbox(fileManager: FileManager = .default) -> URL? {

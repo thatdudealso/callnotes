@@ -78,6 +78,9 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: true
         INFOPLIST_KEY_NSMicrophoneUsageDescription: CallNotes records in-person meetings you start and uploads them to your Mac for transcription.
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: CallNotes talks only to your own Mac on your local network to sync calls and notes.
+        INFOPLIST_KEY_UIBackgroundModes: [audio, processing]
+        INFOPLIST_KEY_BGTaskSchedulerPermittedIdentifiers: [com.thatdudealso.callnotes.upload]
+        CODE_SIGN_ENTITLEMENTS: CallNotesIOS/CallNotesIOS.entitlements
 
   CallNotesCaptureHarness:
     type: tool
@@ -140,6 +143,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.thatdudealso.callnotes.ios.ShareExtension
         MARKETING_VERSION: 0.1.0
+        CODE_SIGN_ENTITLEMENTS: CallNotesIOS/ShareExtension/CallNotesShareExtension.entitlements
 
 schemes:
   CallNotesMac:

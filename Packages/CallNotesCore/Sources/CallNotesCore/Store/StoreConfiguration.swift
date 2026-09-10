@@ -85,6 +85,7 @@ public struct StoreConfiguration: Sendable {
     }
 
     private static func installedHomebrewPrefix() -> String? {
+        #if os(macOS)
         let process = Process()
         let output = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -107,5 +108,8 @@ public struct StoreConfiguration: Sendable {
             return nil
         }
         return prefix
+        #else
+        return nil
+        #endif
     }
 }

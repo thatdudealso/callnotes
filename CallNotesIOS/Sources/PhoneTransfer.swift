@@ -1,0 +1,168 @@
+import CallNotesCore
+import CryptoKit
+import Foundation
+import Security
+import UIKit
+
+enum PhoneSharedContainer {
+    static let appGroupIdentifier = "group.com.thatdudealso.callnotes"
+
+    static func directory() throws -> URL {
+        guard let url = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        return url
+    }
+
+    static func inbox() throws -> PendingUploadInbox {
+        try PendingUploadInbox(directory: directory().appendingPathComponent("PhoneUploads", isDirectory: true))
+    }
+
+    static func recordingsDirectory() throws -> URL {
+        let url = try directory().appendingPathComponent("Recordings", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    static func requestBodiesDirectory() throws -> URL {
+        let url = try directory().appendingPathComponent("UploadRequests", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+}
+
+struct PhonePairingConfiguration: Codable, Sendable {
+    var serverURL: URL
+    var deviceID: UUID
+    var certificateFingerprint: String
+}
+
+enum PhonePairingStore {
+    private static let defaultsKey = "paired_mac"
+    private static let keychainService = "com.thatdudealso.callnotes.phone-pairing"
+
+    static func save(_ configuration: PhonePairingConfiguration, token: String) throws {
+        let defaults = UserDefaults(suiteName: PhoneSharedContainer.appGroupIdentifier)
+        defaults?.set(try JSONEncoder().encode(configuration), forKey: defaultsKey)
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: keychainService,
+            kSecAttrAccount: configuration.deviceID.uuidString,
+            kSecValueData: Data(token.utf8),
+            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+        ]
+        SecItemDelete(query as CFDictionary)
+        guard SecItemAdd(query as CFDictionary, nil) == errSecSuccess else { throw CocoaError(.fileWriteUnknown) }
+    }
+
+    static func load() -> (PhonePairingConfiguration, String)? {
+        guard let data = UserDefaults(suiteName: PhoneSharedContainer.appGroupIdentifier)?.data(forKey: defaultsKey),
+              let configuration = try? JSONDecoder().decode(PhonePairingConfiguration.self, from: data)
+        else { return nil }
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: keychainService,
+            kSecAttrAccount: configuration.deviceID.uuidString,
+            kSecReturnData: true,
+        ]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let tokenData = result as? Data,
+              let token = String(data: tokenData, encoding: .utf8)
+        else { return nil }
+        return (configuration, token)
+    }
+}
+
+/// Pins the leaf certificate supplied by the Mac pairing QR code. No CA exception is made.
+final class PinnedURLSessionDelegate: NSObject, URLSessionDelegate {
+    private let fingerprint: String
+    init(fingerprint: String) { self.fingerprint = fingerprint }
+
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let trust = challenge.protectionSpace.serverTrust,
+              let certificates = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
+              let certificate = certificates.first
+        else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        let der = SecCertificateCopyData(certificate) as Data
+        guard CertificateFingerprint.matches(der, expected: fingerprint) else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        completionHandler(.useCredential, URLCredential(trust: trust))
+    }
+}
+
+final class BackgroundUploadCoordinator: NSObject, @unchecked Sendable, URLSessionTaskDelegate, URLSessionDataDelegate {
+    static let shared = BackgroundUploadCoordinator()
+    private static let sessionIdentifier = "com.thatdudealso.callnotes.phone-upload"
+    private lazy var session: URLSession = {
+        let configuration = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
+        configuration.isDiscretionary = false
+        configuration.sessionSendsLaunchEvents = true
+        configuration.waitsForConnectivity = true
+        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+    }()
+
+    func resume() async -> String {
+        guard let (connection, token) = PhonePairingStore.load() else {
+            return "Pair with your Mac to send pending recordings."
+        }
+        do {
+            let inbox = try PhoneSharedContainer.inbox()
+            for job in await inbox.pending() {
+                try schedule(job, connection: connection, token: token)
+            }
+            return "Pending recordings will upload in the background."
+        } catch { return error.localizedDescription }
+    }
+
+    private func schedule(_ job: PendingUpload, connection: PhonePairingConfiguration, token: String) throws {
+        let body = try MultipartUploadBody.make(job: job, directory: PhoneSharedContainer.requestBodiesDirectory())
+        var request = URLRequest(url: connection.serverURL.appendingPathComponent("calls"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(body.contentType, forHTTPHeaderField: "Content-Type")
+        let task = session.uploadTask(with: request, fromFile: body.url)
+        task.taskDescription = job.id.uuidString
+        task.resume()
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard let identifier = task.taskDescription.flatMap(UUID.init(uuidString:)) else { return }
+        Task {
+            guard let inbox = try? PhoneSharedContainer.inbox() else { return }
+            if error == nil, let response = task.response as? HTTPURLResponse, (200..<300).contains(response.statusCode) {
+                try? await inbox.markCompleted(identifier)
+            } else {
+                try? await inbox.markFailed(identifier)
+            }
+        }
+    }
+}
+
+private enum MultipartUploadBody {
+    struct Body { var url: URL; var contentType: String }
+
+    static func make(job: PendingUpload, directory: URL) throws -> Body {
+        let boundary = "CallNotes-\(UUID().uuidString)"
+        let url = directory.appendingPathComponent(job.id.uuidString).appendingPathExtension("multipart")
+        var data = Data()
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        data.append("--\(boundary)\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n".data(using: .utf8)!)
+        data.append(try encoder.encode(job.metadata))
+        data.append("\r\n--\(boundary)\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"\(job.audioURL.lastPathComponent)\"\r\nContent-Type: audio/mp4\r\n\r\n".data(using: .utf8)!)
+        data.append(try Data(contentsOf: job.audioURL))
+        data.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+        try data.write(to: url, options: .atomic)
+        return Body(url: url, contentType: "multipart/form-data; boundary=\(boundary)")
+    }
+}
