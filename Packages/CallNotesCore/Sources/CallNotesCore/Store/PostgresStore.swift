@@ -531,11 +531,11 @@ public actor PostgresStore: CallStore {
         dashboardObservers.remove(id)
     }
 
-    /// Counts, talk time, averages and last-contacted are aggregated by Postgres so
-    /// the dashboard never loads the whole call table to group it in memory. Identity
-    /// resolves in the contracted order: the user-edited counterparty name, then the
-    /// highest-confidence matched non-owner speaker profile, then `Unknown`, grouped
-    /// case-insensitively so one person never splits across rows.
+    private static let incompleteProcessingStatuses = DashboardAnalytics
+        .incompleteProcessingStatuses
+        .map(\.rawValue)
+        .sorted()
+
     /// Mirrors `CharacterSet.whitespacesAndNewlines` so Postgres and MemoryStore
     /// resolve and group the same identity for the same stored name.
     private static let identityWhitespace =
@@ -544,6 +544,11 @@ public actor PostgresStore: CallStore {
         + "\u{2006}\u{2007}\u{2008}\u{2009}\u{200A}"
         + "\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}"
 
+    /// Counts, talk time, averages and last-contacted are aggregated by Postgres so
+    /// the dashboard never loads the whole call table to group it in memory. Identity
+    /// resolves in the contracted order: the user-edited counterparty name, then the
+    /// highest-confidence matched non-owner speaker profile, then `Unknown`, grouped
+    /// case-insensitively so one person never splits across rows.
     private static func dashboardContacts(
         asOf: Date,
         on connection: PostgresConnection,
@@ -557,8 +562,19 @@ public actor PostgresStore: CallStore {
                 calls.started_at AS started_at,
                 GREATEST(0, COALESCE(
                   calls.duration_sec,
-                  FLOOR(EXTRACT(EPOCH FROM (COALESCE(calls.ended_at, \(asOf)) - calls.started_at)))::int
+                  CASE
+                    WHEN calls.ended_at IS NOT NULL
+                      THEN FLOOR(EXTRACT(EPOCH FROM (calls.ended_at - calls.started_at)))::int
+                    WHEN calls.status = \(CallStatus.recording.rawValue)
+                      THEN FLOOR(EXTRACT(EPOCH FROM (\(asOf) - calls.started_at)))::int
+                    ELSE 0
+                  END
                 )) AS duration_sec,
+                (
+                  calls.duration_sec IS NULL
+                  AND calls.ended_at IS NULL
+                  AND calls.status = ANY(\(Self.incompleteProcessingStatuses))
+                ) AS is_incomplete,
                 NULLIF(btrim(calls.counterparty_name, \(identityWhitespace)), '') AS edited_name
               FROM calls
             ),
@@ -567,6 +583,7 @@ public actor PostgresStore: CallStore {
                 edited.call_id,
                 edited.started_at,
                 edited.duration_sec,
+                edited.is_incomplete,
                 COALESCE(
                   edited.edited_name,
                   NULLIF(btrim(matched.display_name, \(identityWhitespace)), ''),
@@ -588,7 +605,8 @@ public actor PostgresStore: CallStore {
             SELECT
               count(*)::int AS call_count,
               sum(duration_sec)::int AS total_duration_sec,
-              (sum(duration_sec) / count(*))::int AS average_duration_sec,
+              (sum(duration_sec) / GREATEST(1, count(*) FILTER (WHERE NOT is_incomplete)))::int
+                AS average_duration_sec,
               max(started_at) AS last_contacted_at,
               array_agg(call_id ORDER BY started_at DESC, call_id) AS call_ids,
               array_agg(resolved_name ORDER BY started_at DESC, call_id) AS resolved_names

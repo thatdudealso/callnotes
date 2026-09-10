@@ -246,6 +246,42 @@ import Testing
         #expect(snapshot.calls.map(\.id) == [call.id])
     }
 
+    @Test func openEndedTranscribingCallAddsNoTalkTimeAndIsMarkedIncomplete() throws {
+        let calls = [
+            processingCall(startedAt: now.addingTimeInterval(-7 * 86_400), status: .transcribing),
+            fixtureCall(counterparty: "Avery", startedAt: now.addingTimeInterval(-60), duration: 120),
+        ]
+
+        let analytics = DashboardAnalytics.make(from: calls, now: now, calendar: calendar)
+        let stalled = try #require(analytics.calls.first { $0.id == calls[0].id })
+        let avery = try #require(analytics.contacts.first { $0.name == "Avery" })
+
+        #expect(stalled.isIncomplete)
+        #expect(stalled.durationSec == 0)
+        #expect(analytics.totals.callCount == 2)
+        #expect(analytics.totals.totalDurationSec == 120)
+        #expect(analytics.totals.incompleteCallCount == 1)
+        #expect(avery.callCount == 2)
+        #expect(avery.totalDurationSec == 120)
+        #expect(avery.averageDurationSec == 120)
+        #expect(analytics.periods.allSatisfy { $0.totalDurationSec <= 120 })
+    }
+
+    @Test func openEndedRecordingStillExtrapolatesWhileIncompleteProcessingDoesNot() throws {
+        let live = processingCall(startedAt: now.addingTimeInterval(-120), status: .recording)
+        let stalled = processingCall(startedAt: now.addingTimeInterval(-120), status: .uploaded)
+
+        let analytics = DashboardAnalytics.make(from: [live, stalled], now: now, calendar: calendar)
+        let liveRow = try #require(analytics.calls.first { $0.id == live.id })
+        let stalledRow = try #require(analytics.calls.first { $0.id == stalled.id })
+
+        #expect(liveRow.durationSec == 120)
+        #expect(!liveRow.isIncomplete)
+        #expect(stalledRow.durationSec == 0)
+        #expect(stalledRow.isIncomplete)
+        #expect(analytics.totals.totalDurationSec == 120)
+    }
+
     @Test func strandedRecordingIsClosedAtItsLastSegmentInsteadOfExtrapolating() async throws {
         let store = MemoryStore()
         let stranded = recordingCall(startedAt: now.addingTimeInterval(-7 * 86_400))
@@ -420,6 +456,10 @@ import Testing
             try await store.upsertCall(live)
             callIDs.append(live.id)
 
+            let stalled = processingCall(startedAt: now.addingTimeInterval(-7 * 86_400), status: .transcribing)
+            try await store.upsertCall(stalled)
+            callIDs.append(stalled.id)
+
             let closed = try await store.closeStrandedRecordings(excluding: live.id)
             let persistedStranded = try #require(await store.fetchCall(id: stranded.id))
             let persistedLive = try #require(await store.fetchCall(id: live.id))
@@ -433,8 +473,17 @@ import Testing
             let repairedSnapshot = try await store.fetchDashboardAnalytics(asOf: now)
             let strandedRow = try #require(repairedSnapshot.calls.first { $0.id == stranded.id })
             let liveRow = try #require(repairedSnapshot.calls.first { $0.id == live.id })
+            let stalledRow = try #require(repairedSnapshot.calls.first { $0.id == stalled.id })
+            let stalledContact = try #require(
+                repairedSnapshot.contacts.first { $0.callIDs.contains(stalled.id) }
+            )
             #expect(strandedRow.durationSec == 180)
             #expect(liveRow.durationSec == 120)
+            #expect(stalledRow.durationSec == 0)
+            #expect(stalledRow.isIncomplete)
+            let persistedStalled = try #require(await store.fetchCall(id: stalled.id))
+            #expect(persistedStalled.status == .transcribing)
+            #expect(stalledContact.averageDurationSec == (180 + 120) / 2)
 
             let shoutedName = profile.displayName.uppercased()
             let shoutedCall = fixtureCall(
@@ -493,13 +542,17 @@ import Testing
     private static let fixtureAudioPath = "/tmp/dashboard-fixture.caf"
 
     private func recordingCall(startedAt: Date) -> Call {
+        processingCall(startedAt: startedAt, status: .recording)
+    }
+
+    private func processingCall(startedAt: Date, status: CallStatus) -> Call {
         Call(
             source: .macManual,
             startedAt: startedAt,
             counterpartyName: "Avery",
             audioPath: Self.fixtureAudioPath,
             sttProvider: .appleSpeech,
-            status: .recording
+            status: status
         )
     }
 

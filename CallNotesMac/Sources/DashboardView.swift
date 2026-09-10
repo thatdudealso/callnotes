@@ -41,7 +41,7 @@ struct DashboardView: View {
     private var totals: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 12)], spacing: 12) {
             DashboardMetric(title: "Calls", value: "\(analytics.totals.callCount)", detail: "\(analytics.totals.localCallCount) local · \(analytics.totals.metaCallCount) Meta · \(analytics.totals.mixedCallCount) mixed")
-            DashboardMetric(title: "Talk time", value: duration(analytics.totals.totalDurationSec), detail: "Across all calls")
+            DashboardMetric(title: "Talk time", value: duration(analytics.totals.totalDurationSec), detail: talkTimeDetail)
             DashboardMetric(title: "Meta cost", value: currency(analytics.totals.metaCostDollars), detail: "\(duration(analytics.totals.metaBilledSeconds)) billed")
             DashboardMetric(title: "People", value: "\(analytics.contacts.count)", detail: "Known and unknown contacts")
         }
@@ -163,6 +163,12 @@ struct DashboardView: View {
         }
     }
 
+    private var talkTimeDetail: String {
+        let incomplete = analytics.totals.incompleteCallCount
+        guard incomplete > 0 else { return "Across all calls" }
+        return "Across all calls · \(incomplete) still processing, not counted"
+    }
+
     private static let periodRowLimit = 6
 
     private func show(_ ids: [UUID], title: String) {
@@ -216,7 +222,7 @@ private struct DashboardDrillDownView: View {
                     Text(item.counterpartyName).fontWeight(.medium)
                     HStack {
                         Text(item.call.startedAt.formatted(date: .abbreviated, time: .shortened))
-                        Text(duration(item.durationSec))
+                        Text(item.isIncomplete ? "Incomplete" : duration(item.durationSec))
                         Text(item.engine.displayName)
                         if item.costDollars > 0 { Text(currency(item.costDollars)).foregroundStyle(CallNotesStyle.cloud) }
                     }

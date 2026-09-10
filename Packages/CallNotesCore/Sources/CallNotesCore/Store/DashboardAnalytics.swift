@@ -25,6 +25,11 @@ public struct DashboardCall: Identifiable, Sendable, Equatable {
     public let counterpartyName: String
     public let engine: DashboardEngine
 
+    /// A call left mid-processing by a crash has no end and no duration. Crash
+    /// recovery is Phase 7, so until then it contributes no talk time and says so
+    /// rather than growing a total nobody can trace.
+    public let isIncomplete: Bool
+
     public var id: UUID { call.id }
 
     init(call: Call, durationSec: Int, counterpartyName: String) {
@@ -33,6 +38,7 @@ public struct DashboardCall: Identifiable, Sendable, Equatable {
         self.costDollars = MetaCostMeter.costDollars(billedSeconds: max(0, call.metaBilledSec))
         self.counterpartyName = counterpartyName
         self.engine = Self.engine(for: call)
+        self.isIncomplete = DashboardAnalytics.isIncomplete(call)
     }
 
     private static func engine(for call: Call) -> DashboardEngine {
@@ -54,6 +60,7 @@ public struct DashboardTotals: Sendable, Equatable {
     public let totalDurationSec: Int
     public let metaBilledSeconds: Int
     public let metaCostDollars: Double
+    public let incompleteCallCount: Int
 }
 
 public struct DashboardPeriod: Identifiable, Sendable, Equatable {
@@ -136,10 +143,23 @@ public struct DashboardAnalytics: Sendable, Equatable {
         return trimmed
     }
 
+    /// Only a call that is still recording may extrapolate to now; every other
+    /// open-ended row would otherwise grow its own duration forever.
+    static let incompleteProcessingStatuses: Set<CallStatus> = [.uploaded, .transcribing]
+
+    static func isIncomplete(_ call: Call) -> Bool {
+        call.durationSec == nil
+            && call.endedAt == nil
+            && incompleteProcessingStatuses.contains(call.status)
+    }
+
     private static func duration(for call: Call, now: Date) -> Int {
         if let duration = call.durationSec { return max(0, duration) }
-        let end = call.endedAt ?? now
-        return max(0, Int(end.timeIntervalSince(call.startedAt).rounded(.down)))
+        if let endedAt = call.endedAt {
+            return max(0, Int(endedAt.timeIntervalSince(call.startedAt).rounded(.down)))
+        }
+        guard call.status == .recording else { return 0 }
+        return max(0, Int(now.timeIntervalSince(call.startedAt).rounded(.down)))
     }
 
     private static func totals(for calls: [DashboardCall]) -> DashboardTotals {
@@ -150,7 +170,8 @@ public struct DashboardAnalytics: Sendable, Equatable {
             mixedCallCount: calls.count(where: { $0.engine == .mixed }),
             totalDurationSec: calls.reduce(0) { $0 + $1.durationSec },
             metaBilledSeconds: calls.reduce(0) { $0 + max(0, $1.call.metaBilledSec) },
-            metaCostDollars: calls.reduce(0) { $0 + $1.costDollars }
+            metaCostDollars: calls.reduce(0) { $0 + $1.costDollars },
+            incompleteCallCount: calls.count(where: \.isIncomplete)
         )
     }
 
@@ -185,11 +206,12 @@ public struct DashboardAnalytics: Sendable, Equatable {
             .map { _, calls in
                 let sortedCalls = calls.sorted { $0.call.startedAt > $1.call.startedAt }
                 let totalDuration = calls.reduce(0) { $0 + $1.durationSec }
+                let timedCalls = calls.count { !$0.isIncomplete }
                 return DashboardContact(
                     name: sortedCalls[0].counterpartyName,
                     callCount: calls.count,
                     totalDurationSec: totalDuration,
-                    averageDurationSec: totalDuration / calls.count,
+                    averageDurationSec: totalDuration / max(1, timedCalls),
                     lastContactedAt: calls.map(\.call.startedAt).max()!,
                     callIDs: sortedCalls.map(\.id)
                 )
