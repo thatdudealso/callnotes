@@ -333,6 +333,15 @@ import Testing
         #expect(analytics.totals.totalDurationSec == 120)
     }
 
+    @Test func fixtureSweepNeverSelectsACallOutsideTheTestNamespace() {
+        let seeded = fixtureCall(counterparty: "Avery", startedAt: now, duration: 60)
+        var imported = seeded
+        imported.audioPath = "/tmp/dashboard-fixture.caf"
+
+        #expect(Self.isStrandedFixture(seeded))
+        #expect(!Self.isStrandedFixture(imported))
+    }
+
     @Test func batchedPreferredNotesMatchThePerCallPreference() async throws {
         let store = MemoryStore()
         let deep = fixtureCall(counterparty: "Avery", startedAt: now, duration: 60)
@@ -456,6 +465,24 @@ import Testing
             try await store.upsertCall(live)
             callIDs.append(live.id)
 
+            let unrelated = Call(
+                source: .fileImport,
+                startedAt: now.addingTimeInterval(-30),
+                endedAt: now,
+                durationSec: 30,
+                counterpartyName: "\(fixtureName) unrelated",
+                audioPath: "/tmp/dashboard-fixture.caf",
+                sttProvider: .appleSpeech,
+                status: .transcribed
+            )
+            try await store.upsertCall(unrelated)
+            callIDs.append(unrelated.id)
+
+            let sweepTargets = try await store.fetchCalls().filter(Self.isStrandedFixture)
+
+            #expect(!sweepTargets.contains { $0.id == unrelated.id })
+            #expect(sweepTargets.contains { $0.id == profileCall.id })
+
             let stalled = processingCall(startedAt: now.addingTimeInterval(-7 * 86_400), status: .transcribing)
             try await store.upsertCall(stalled)
             callIDs.append(stalled.id)
@@ -504,12 +531,18 @@ import Testing
         }
     }
 
-    private static let fixturePrefix = "Dashboard fixture "
+    private static let fixturePrefix = "\(Self.fixtureNamespace) "
+
+    /// Keyed on a namespace only this suite writes to, so the sweep can never reach
+    /// a real call that merely shares a plausible audio path.
+    private static func isStrandedFixture(_ call: Call) -> Bool {
+        call.audioPath.hasPrefix(fixtureAudioRoot)
+    }
 
     /// Removes every row a killed run can strand: a leaked non-owner profile also
     /// silently disables counterparty-name suggestion for real calls.
     private func sweepLeftoverPostgresFixtures(_ store: PostgresStore) async throws {
-        let leftoverCalls = try await store.fetchCalls().filter { $0.audioPath == Self.fixtureAudioPath }
+        let leftoverCalls = try await store.fetchCalls().filter(Self.isStrandedFixture)
         let leftoverProfiles = try await store.fetchSpeakerProfiles().filter {
             !$0.isOwner && $0.displayName.hasPrefix(Self.fixturePrefix)
         }
@@ -539,7 +572,9 @@ import Testing
         #expect(remainingProfiles.allSatisfy { !profileIDs.contains($0.id) })
     }
 
-    private static let fixtureAudioPath = "/tmp/dashboard-fixture.caf"
+    private static let fixtureNamespace = "callnotes-dashboard-test-fixture"
+    private static let fixtureAudioRoot = "/tmp/\(Self.fixtureNamespace)/"
+    private static let fixtureAudioPath = "\(Self.fixtureAudioRoot)\(UUID().uuidString).caf"
 
     private func recordingCall(startedAt: Date) -> Call {
         processingCall(startedAt: startedAt, status: .recording)
