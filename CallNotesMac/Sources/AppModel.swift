@@ -144,18 +144,22 @@ final class AppModel {
         statusMessage = "Validating Apple SpeechAnalyzer dual-instance support..."
         speech = await AppleSpeechProvider.validated()
         live.dualInstanceMode = speech.dualInstanceMode
+        // The repair reads every `.recording` row, so it has to finish before
+        // `postgres` becomes the published store: a call started while it is in
+        // flight would otherwise land in the table it is about to close out.
+        var repairFailure: String?
+        do {
+            _ = try await postgres.closeStrandedRecordings(excluding: instantCallAtHangUp?.id)
+        } catch {
+            repairFailure = error.localizedDescription
+        }
         store = postgres
         storeBackendName = "postgres"
         isStoreInitialized = true
         observeDashboardChanges()
         notesSpine = NotesGenerationSpine(client: OllamaClient(), store: postgres)
-        statusMessage = nil
+        statusMessage = repairFailure
         startInboxWatcher()
-        do {
-            _ = try await postgres.closeStrandedRecordings(excluding: instantCallAtHangUp?.id)
-        } catch {
-            statusMessage = error.localizedDescription
-        }
     }
 
     func refresh() async throws {

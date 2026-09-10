@@ -720,7 +720,11 @@ public actor PostgresStore: CallStore {
         SET transcription_providers = COALESCE(
           (SELECT jsonb_agg(DISTINCT provider) FROM segments WHERE call_id = calls.id),
           jsonb_build_array(stt_provider))
-        WHERE transcription_providers = '[]'::jsonb;
+        WHERE transcription_providers = '[]'::jsonb
+          AND NOT EXISTS (
+            SELECT 1 FROM schema_migrations WHERE version = 'backfill_transcription_providers');
+        INSERT INTO schema_migrations (version) VALUES ('backfill_transcription_providers')
+        ON CONFLICT (version) DO NOTHING;
         CREATE TABLE IF NOT EXISTS notes (
           id uuid PRIMARY KEY, call_id uuid REFERENCES calls ON DELETE CASCADE, provider text NOT NULL,
           model_digest text, prompt_version text NOT NULL, body jsonb NOT NULL,

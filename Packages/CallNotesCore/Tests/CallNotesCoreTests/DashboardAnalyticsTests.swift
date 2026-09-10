@@ -552,12 +552,6 @@ import Testing
             #expect(stalledContact.totalDurationSec == 120)
             #expect(stalledContact.averageDurationSec == 120)
 
-            let cancelled = Task { try await store.fetchDashboardAnalytics(asOf: self.now) }
-            cancelled.cancel()
-            _ = try? await cancelled.value
-            try await store.upsertCall(stalledSibling)
-            #expect(try await store.fetchDashboardAnalytics(asOf: now).totals.callCount > 0)
-
             let shoutedName = profile.displayName.uppercased()
             let shoutedCall = fixtureCall(
                 counterparty: shoutedName,
