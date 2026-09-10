@@ -119,7 +119,7 @@ public actor MacSyncServer {
         guard reserve(uploadID) else { return .inProgress }
         do {
             try FileManager.default.createDirectory(at: receivedUploadsDirectory, withIntermediateDirectories: true)
-            let audioURL = receivedUploadsDirectory.appendingPathComponent("\(uploadID.uuidString).\(fileExtension)")
+            let audioURL = receivedUploadsDirectory.appendingPathComponent("\(uploadID.uuidString).\(MultipartCallUpload.safeAudioExtension(fileExtension))")
             try audio.write(to: audioURL, options: .atomic)
             return try await acceptReserved(uploadID: uploadID, metadata: metadata, audioURL: audioURL)
         } catch {
@@ -205,6 +205,11 @@ enum MultipartCallUpload {
     struct Upload { var metadata: CallUploadMetadata; var audio: Data; var fileExtension: String }
     struct StagedUpload { var metadata: CallUploadMetadata; var audioURL: URL }
 
+    static func safeAudioExtension(_ candidate: String) -> String {
+        let normalized = candidate.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
+        return ["wav", "m4a", "caf", "mp3", "aac", "aiff", "aif"].contains(normalized) ? normalized : "m4a"
+    }
+
     static func stream(_ body: RequestBody, boundary: String, directory: URL, uploadID: UUID) async throws -> StagedUpload? {
         var parser = try MultipartStreamParser(boundary: boundary, directory: directory, uploadID: uploadID)
         defer { try? parser.close() }
@@ -231,7 +236,7 @@ enum MultipartCallUpload {
         let headers = String(decoding: audioHeaders, as: UTF8.self)
         guard headers.contains("name=\"audio\"") else { return nil }
         let filename = headers.components(separatedBy: "filename=\"").dropFirst().first?.split(separator: "\"").first
-        let fileExtension = filename.map { URL(fileURLWithPath: String($0)).pathExtension.lowercased() }.flatMap { $0.isEmpty ? nil : $0 } ?? "m4a"
+        let fileExtension = safeAudioExtension(filename.map { URL(fileURLWithPath: String($0)).pathExtension } ?? "")
         let audioURL = directory.appendingPathComponent("\(uploadID.uuidString).\(fileExtension)")
         FileManager.default.createFile(atPath: audioURL.path, contents: nil)
         let output = try FileHandle(forWritingTo: audioURL)
@@ -311,7 +316,7 @@ private struct MultipartStreamParser {
                     let text = String(decoding: headers, as: UTF8.self)
                     guard text.contains("name=\"audio\"") else { throw CocoaError(.fileReadCorruptFile) }
                     let filename = text.components(separatedBy: "filename=\"").dropFirst().first?.split(separator: "\"").first
-                    let ext = filename.map { URL(fileURLWithPath: String($0)).pathExtension.lowercased() }.flatMap { $0.isEmpty ? nil : $0 } ?? "m4a"
+                    let ext = MultipartCallUpload.safeAudioExtension(filename.map { URL(fileURLWithPath: String($0)).pathExtension } ?? "")
                     let url = directory.appendingPathComponent("\(uploadID.uuidString).\(ext)")
                     FileManager.default.createFile(atPath: url.path, contents: nil)
                     audioURL = url

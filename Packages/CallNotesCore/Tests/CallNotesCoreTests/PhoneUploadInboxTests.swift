@@ -48,6 +48,19 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: job.audioURL.path))
     }
 
+    @Test func failedRelaunchUploadRemainsQueuedForRetry() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("recording.m4a")
+        try Data("recording".utf8).write(to: source)
+        let firstProcess = try PendingUploadInbox(directory: root.appendingPathComponent("shared", isDirectory: true))
+        let job = try await firstProcess.enqueue(audioAt: source, metadata: .init(source: .iphoneRecording))
+        let relaunchedProcess = try PendingUploadInbox(directory: root.appendingPathComponent("shared", isDirectory: true))
+        try await relaunchedProcess.markFailed(job.id, at: .distantPast)
+        #expect(await relaunchedProcess.pending().map(\.id) == [job.id])
+    }
+
     #if os(macOS)
     @Test func multipartUploadPreservesTrailingAudioCRLF() throws {
         let boundary = "CallNotes-test"
@@ -106,8 +119,38 @@ import Testing
         async let second = server.accept(uploadID: uploadID, metadata: metadata, audio: Data("second".utf8), fileExtension: "m4a")
         let outcomes = try await [first, second]
         #expect(outcomes.filter { $0 == .created }.count == 1)
+        #expect(outcomes.contains(.inProgress))
         try await Task.sleep(for: .milliseconds(50))
         #expect(await counter.count == 1)
+    }
+
+    @Test func failedAcceptanceReleasesItsReservationForARetry() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("not a directory".utf8).write(to: root)
+        let server = MacSyncServer(store: MemoryStore(), receivedUploadsDirectory: root)
+        let uploadID = UUID()
+        let metadata = CallUploadMetadata(source: .iphoneRecording)
+        await #expect(throws: Error.self) {
+            try await server.accept(uploadID: uploadID, metadata: metadata, audio: Data("audio".utf8), fileExtension: "m4a")
+        }
+        try FileManager.default.removeItem(at: root)
+        let retry = try await server.accept(uploadID: uploadID, metadata: metadata, audio: Data("audio".utf8), fileExtension: "m4a")
+        #expect(retry == .created)
+    }
+
+    @Test func unsafeAudioExtensionCannotOverwriteMetadataSidecar() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let server = MacSyncServer(store: MemoryStore(), receivedUploadsDirectory: root)
+        let uploadID = UUID()
+        let audio = Data("audio bytes".utf8)
+        let metadata = CallUploadMetadata(source: .iphoneRecording)
+        let outcome = try await server.accept(uploadID: uploadID, metadata: metadata, audio: audio, fileExtension: "json")
+        #expect(outcome == .created)
+        let audioURL = root.appendingPathComponent("\(uploadID.uuidString).m4a")
+        #expect(try Data(contentsOf: audioURL) == audio)
+        #expect(CallUploadMetadata.loadSidecar(nextTo: audioURL) == metadata)
     }
 
     @Test func reuploadingTheSameRecordingKeepsOneCallAndItsProgress() async throws {

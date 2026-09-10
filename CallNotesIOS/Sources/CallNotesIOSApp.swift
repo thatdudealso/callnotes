@@ -109,22 +109,24 @@ final class PhoneAppModel {
     func refreshMirror(in context: ModelContext) async {
         do {
             let mirror = try await PhoneMirrorCoordinator.fetch()
+            let remoteIDs = Set(mirror.calls.map(\.id))
+            for local in try context.fetch(FetchDescriptor<MirroredCall>()) where !remoteIDs.contains(local.id) {
+                context.delete(local)
+            }
             for remote in mirror.calls {
                 let callDescriptor = FetchDescriptor<MirroredCall>(predicate: #Predicate { $0.id == remote.id })
                 let call = try context.fetch(callDescriptor).first ?? MirroredCall(id: remote.id, title: remote.title, summary: remote.summary, startedAt: remote.startedAt, source: remote.source, status: remote.status)
                 call.title = remote.title; call.summary = remote.summary; call.startedAt = remote.startedAt; call.source = remote.source; call.status = remote.status
                 if call.modelContext == nil { context.insert(call) }
+                let existingSegments = try context.fetch(FetchDescriptor<MirroredSegment>(predicate: #Predicate { $0.callID == remote.id }))
+                for segment in existingSegments { context.delete(segment) }
                 for remoteSegment in remote.segments {
-                    let segmentDescriptor = FetchDescriptor<MirroredSegment>(predicate: #Predicate { $0.id == remoteSegment.id })
-                    let segment = try context.fetch(segmentDescriptor).first ?? MirroredSegment(id: remoteSegment.id, callID: remote.id, speaker: remoteSegment.speaker, text: remoteSegment.text, startSec: remoteSegment.startSec)
-                    segment.speaker = remoteSegment.speaker; segment.text = remoteSegment.text; segment.startSec = remoteSegment.startSec
-                    if segment.modelContext == nil { context.insert(segment) }
+                    context.insert(MirroredSegment(id: remoteSegment.id, callID: remote.id, speaker: remoteSegment.speaker, text: remoteSegment.text, startSec: remoteSegment.startSec))
                 }
+                let existingNotes = try context.fetch(FetchDescriptor<MirroredNote>(predicate: #Predicate { $0.callID == remote.id }))
+                for note in existingNotes { context.delete(note) }
                 if let remoteNote = remote.note {
-                    let noteDescriptor = FetchDescriptor<MirroredNote>(predicate: #Predicate { $0.callID == remote.id })
-                    let note = try context.fetch(noteDescriptor).first ?? MirroredNote(callID: remote.id, summary: remoteNote.summary, decisions: remoteNote.decisions, actionItems: remoteNote.actionItems)
-                    note.summary = remoteNote.summary; note.decisions = remoteNote.decisions; note.actionItems = remoteNote.actionItems
-                    if note.modelContext == nil { context.insert(note) }
+                    context.insert(MirroredNote(callID: remote.id, summary: remoteNote.summary, decisions: remoteNote.decisions, actionItems: remoteNote.actionItems))
                 }
             }
             try context.save()
