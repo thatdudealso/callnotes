@@ -246,6 +246,27 @@ import Testing
         #expect(snapshot.calls.map(\.id) == [call.id])
     }
 
+    @Test func batchedPreferredNotesMatchThePerCallPreference() async throws {
+        let store = MemoryStore()
+        let deep = fixtureCall(counterparty: "Avery", startedAt: now, duration: 60)
+        let instantOnly = fixtureCall(counterparty: "Mina", startedAt: now, duration: 60)
+        try await store.upsertCall(deep)
+        try await store.upsertCall(instantOnly)
+        try await store.upsertNotes(fixtureNotes(callID: deep.id, provider: .glimmer, at: now))
+        try await store.upsertNotes(
+            fixtureNotes(callID: deep.id, provider: .appleFM, at: now.addingTimeInterval(60))
+        )
+        try await store.upsertNotes(fixtureNotes(callID: instantOnly.id, provider: .appleFM, at: now))
+
+        let batched = try await store.fetchPreferredNotesByCall()
+        let perCall = try await store.fetchPreferredNotes(callID: deep.id)
+
+        #expect(batched[deep.id] == perCall)
+        #expect(batched[deep.id]?.provider == .glimmer)
+        #expect(batched[instantOnly.id]?.provider == .appleFM)
+        #expect(batched.count == 2)
+    }
+
     @Test func seededPostgresFixturePreservesContactAndCostTruth() async throws {
         guard let store = await PostgresStore.makeIfAvailable() else { return }
         try await store.migrate()
@@ -325,6 +346,15 @@ import Testing
                 speakers: [CallSpeaker(callID: profileCall.id, clusterKey: "far", profileID: profile.id, confidence: 0.9)]
             )
 
+            try await store.upsertNotes(fixtureNotes(callID: profileCall.id, provider: .glimmer, at: now))
+            try await store.upsertNotes(
+                fixtureNotes(callID: profileCall.id, provider: .appleFM, at: now.addingTimeInterval(60))
+            )
+            let batchedNotes = try await store.fetchPreferredNotesByCall()
+            let perCallNotes = try await store.fetchPreferredNotes(callID: profileCall.id)
+            #expect(batchedNotes[profileCall.id] == perCallNotes)
+            #expect(batchedNotes[profileCall.id]?.provider == .glimmer)
+
             let shoutedName = profile.displayName.uppercased()
             let shoutedCall = fixtureCall(
                 counterparty: shoutedName,
@@ -380,6 +410,15 @@ import Testing
     }
 
     private static let fixtureAudioPath = "/tmp/dashboard-fixture.caf"
+
+    private func fixtureNotes(callID: UUID, provider: NotesProviderID, at createdAt: Date) -> NotesRecord {
+        NotesRecord(
+            callID: callID,
+            provider: provider,
+            body: CallNotes(title: "\(provider.rawValue) title", summary: "\(provider.rawValue) summary"),
+            createdAt: createdAt
+        )
+    }
 
     private func fixtureCall(
         counterparty: String?,

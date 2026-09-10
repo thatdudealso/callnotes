@@ -58,7 +58,8 @@ struct DashboardView: View {
                         Text(range.rawValue.capitalized)
                             .font(.subheadline.weight(.medium))
                             .foregroundStyle(.secondary)
-                        ForEach(periods.prefix(6)) { period in
+                        ForEach(Array(periods.prefix(6).enumerated()), id: \.element.id) { index, period in
+                            if index > 0 { Divider() }
                             Button {
                                 show(period.callIDs, title: "\(range.rawValue.capitalized) of \(period.startsAt.formatted(date: .abbreviated, time: .omitted))")
                             } label: {
@@ -84,7 +85,6 @@ struct DashboardView: View {
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
-                            Divider()
                         }
                     }
                     .padding(16)
@@ -108,7 +108,8 @@ struct DashboardView: View {
                     .foregroundStyle(.secondary)
             } else {
                 LazyVStack(spacing: 0) {
-                    ForEach(analytics.contacts) { contact in
+                    ForEach(Array(analytics.contacts.enumerated()), id: \.element.id) { index, contact in
+                        if index > 0 { Divider() }
                         Button {
                             show(contact.callIDs, title: contact.name)
                         } label: {
@@ -132,10 +133,10 @@ struct DashboardView: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        Divider()
                     }
                 }
                 .padding(.horizontal, 16)
+                .padding(.vertical, 6)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
             }
         }
@@ -146,14 +147,19 @@ struct DashboardView: View {
         drillDownTitle = title
     }
 
-    private func duration(_ seconds: Int) -> String {
+    private func duration(_ seconds: Int) -> String { DashboardFormat.duration(seconds) }
+    private func currency(_ value: Double) -> String { DashboardFormat.currency(value) }
+}
+
+private enum DashboardFormat {
+    static func duration(_ seconds: Int) -> String {
         let hours = seconds / 3_600
         let minutes = seconds % 3_600 / 60
         if hours > 0 { return "\(hours)h \(minutes)m" }
         return "\(minutes)m \(seconds % 60)s"
     }
 
-    private func currency(_ value: Double) -> String {
+    static func currency(_ value: Double) -> String {
         value.formatted(.currency(code: "USD").precision(.fractionLength(2...4)))
     }
 }
@@ -201,6 +207,6 @@ private struct DashboardDrillDownView: View {
         .frame(minWidth: 460, minHeight: 360)
     }
 
-    private func duration(_ seconds: Int) -> String { "\(seconds / 60)m \(seconds % 60)s" }
-    private func currency(_ value: Double) -> String { value.formatted(.currency(code: "USD").precision(.fractionLength(2...4))) }
+    private func duration(_ seconds: Int) -> String { DashboardFormat.duration(seconds) }
+    private func currency(_ value: Double) -> String { DashboardFormat.currency(value) }
 }

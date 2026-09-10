@@ -65,7 +65,7 @@ final class AppModel {
                 showsDashboard = false
                 selectedCallID = id
             case nil:
-                showsDashboard = false
+                break
             }
         }
     }
@@ -164,11 +164,7 @@ final class AppModel {
         if selectedCallID == nil {
             selectedCallID = calls.first?.id
         }
-        for call in calls {
-            if let notes = try await store.fetchPreferredNotes(callID: call.id) {
-                notesByCall[call.id] = notes
-            }
-        }
+        notesByCall = try await store.fetchPreferredNotesByCall()
         if let selectedCallID {
             turnsByCall[selectedCallID] = try await loadTurns(callID: selectedCallID)
         }

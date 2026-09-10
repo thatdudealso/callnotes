@@ -99,20 +99,22 @@ public actor PostgresStore: CallStore {
         dashboardObservers.notify()
     }
 
+    private static let selectCalls: PostgresQuery = """
+        SELECT id, source, started_at, ended_at, duration_sec, counterparty_name, counterparty_number,
+               audio_path, audio_channels, sample_rate, stt_provider, diarization_provider, notes_provider,
+               status, consent_announced, meta_billed_sec, error, error_stage, transcription_providers::text
+        FROM calls
+        ORDER BY started_at DESC
+        """
+
     public func fetchCalls() async throws -> [Call] {
-        let rows = try await client.query(
-            """
-            SELECT id, source, started_at, ended_at, duration_sec, counterparty_name, counterparty_number,
-                   audio_path, audio_channels, sample_rate, stt_provider, diarization_provider, notes_provider,
-                   status, consent_announced, meta_billed_sec, error, error_stage, transcription_providers::text
-            FROM calls
-            ORDER BY started_at DESC
-            """,
-            logger: logger
-        )
+        try await Self.decodeCalls(client.query(Self.selectCalls, logger: logger))
+    }
+
+    private static func decodeCalls(_ rows: PostgresRowSequence) async throws -> [Call] {
         var calls: [Call] = []
         for try await row in rows {
-            calls.append(try Self.decodeCall(row))
+            calls.append(try decodeCall(row))
         }
         return calls
     }
@@ -133,14 +135,28 @@ public actor PostgresStore: CallStore {
         return nil
     }
 
+    /// Both result sets are read in one repeatable-read snapshot: an `upsertCall`
+    /// interleaved between them would otherwise report a call in the totals and
+    /// period rows while its contact row still shows the older count.
     public func fetchDashboardAnalytics(asOf: Date) async throws -> DashboardAnalytics {
-        let aggregate = try await dashboardContacts(asOf: asOf)
-        return DashboardAnalytics.make(
-            from: try await fetchCalls(),
-            counterpartyNames: aggregate.resolvedNames,
-            contacts: aggregate.contacts,
-            now: asOf
-        )
+        let logger = logger
+        return try await client.withConnection { connection in
+            try await connection.query("BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY", logger: logger)
+            do {
+                let aggregate = try await Self.dashboardContacts(asOf: asOf, on: connection, logger: logger)
+                let calls = try await Self.decodeCalls(connection.query(Self.selectCalls, logger: logger))
+                try await connection.query("COMMIT", logger: logger)
+                return DashboardAnalytics.make(
+                    from: calls,
+                    counterpartyNames: aggregate.resolvedNames,
+                    contacts: aggregate.contacts,
+                    now: asOf
+                )
+            } catch {
+                try? await connection.query("ROLLBACK", logger: logger)
+                throw error
+            }
+        }
     }
 
     public func dashboardChanges() async -> AsyncStream<Void> {
@@ -349,29 +365,41 @@ public actor PostgresStore: CallStore {
             logger: logger
         )
         var records: [NotesRecord] = []
-        for try await (
-            id,
-            callID,
-            provider,
-            digest,
-            promptVersion,
-            bodyJSON,
-            edited,
-            createdAt
-        ) in rows.decode((UUID, UUID, String, String?, String, String, Bool, Date).self) {
-            let body = try JSONDecoder().decode(CallNotes.self, from: Data(bodyJSON.utf8))
-            records.append(
-                NotesRecord(
-                    id: id,
-                    callID: callID,
-                    provider: NotesProviderID(rawValue: provider) ?? .glimmer,
-                    modelDigest: digest,
-                    promptVersion: promptVersion,
-                    body: body,
-                    editedByUser: edited,
-                    createdAt: createdAt
-                )
-            )
+        for try await row in rows {
+            records.append(try Self.decodeNotes(row))
+        }
+        return records
+    }
+
+    private static func decodeNotes(_ row: PostgresRow) throws -> NotesRecord {
+        let decoded = try row.decode((UUID, UUID, String, String?, String, String, Bool, Date).self)
+        return NotesRecord(
+            id: decoded.0,
+            callID: decoded.1,
+            provider: NotesProviderID(rawValue: decoded.2) ?? .glimmer,
+            modelDigest: decoded.3,
+            promptVersion: decoded.4,
+            body: try JSONDecoder().decode(CallNotes.self, from: Data(decoded.5.utf8)),
+            editedByUser: decoded.6,
+            createdAt: decoded.7
+        )
+    }
+
+    public func fetchPreferredNotesByCall() async throws -> [UUID: NotesRecord] {
+        let appleFM = NotesProviderID.appleFM.rawValue
+        let rows = try await client.query(
+            """
+            SELECT DISTINCT ON (call_id)
+                   id, call_id, provider, model_digest, prompt_version, body::text, edited_by_user, created_at
+            FROM notes
+            ORDER BY call_id, (provider = \(appleFM)), created_at DESC
+            """,
+            logger: logger
+        )
+        var records: [UUID: NotesRecord] = [:]
+        for try await row in rows {
+            let record = try Self.decodeNotes(row)
+            records[record.callID] = record
         }
         return records
     }
@@ -489,10 +517,12 @@ public actor PostgresStore: CallStore {
         + "\u{2006}\u{2007}\u{2008}\u{2009}\u{200A}"
         + "\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}"
 
-    private func dashboardContacts(
-        asOf: Date
+    private static func dashboardContacts(
+        asOf: Date,
+        on connection: PostgresConnection,
+        logger: Logger
     ) async throws -> (contacts: [DashboardContact], resolvedNames: [UUID: String]) {
-        let rows = try await client.query(
+        let rows = try await connection.query(
             """
             WITH edited AS (
               SELECT
@@ -502,7 +532,7 @@ public actor PostgresStore: CallStore {
                   calls.duration_sec,
                   FLOOR(EXTRACT(EPOCH FROM (COALESCE(calls.ended_at, \(asOf)) - calls.started_at)))::int
                 )) AS duration_sec,
-                NULLIF(btrim(calls.counterparty_name, \(Self.identityWhitespace)), '') AS edited_name
+                NULLIF(btrim(calls.counterparty_name, \(identityWhitespace)), '') AS edited_name
               FROM calls
             ),
             resolved AS (
@@ -512,7 +542,7 @@ public actor PostgresStore: CallStore {
                 edited.duration_sec,
                 COALESCE(
                   edited.edited_name,
-                  NULLIF(btrim(matched.display_name, \(Self.identityWhitespace)), ''),
+                  NULLIF(btrim(matched.display_name, \(identityWhitespace)), ''),
                   'Unknown'
                 ) AS resolved_name
               FROM edited
@@ -523,7 +553,7 @@ public actor PostgresStore: CallStore {
                 WHERE call_speakers.call_id = edited.call_id
                   AND edited.edited_name IS NULL
                   AND speaker_profiles.is_owner = false
-                  AND btrim(speaker_profiles.display_name, \(Self.identityWhitespace)) <> ''
+                  AND btrim(speaker_profiles.display_name, \(identityWhitespace)) <> ''
                 ORDER BY call_speakers.confidence DESC NULLS LAST, speaker_profiles.display_name
                 LIMIT 1
               ) AS matched ON true

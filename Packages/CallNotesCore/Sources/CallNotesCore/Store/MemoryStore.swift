@@ -108,6 +108,10 @@ public actor MemoryStore: CallStore {
         (notes[callID] ?? []).sorted { $0.createdAt > $1.createdAt }
     }
 
+    public func fetchPreferredNotesByCall() async throws -> [UUID: NotesRecord] {
+        notes.compactMapValues(NotesRecord.preferred(in:))
+    }
+
     private func removeDashboardObserver(_ id: UUID) {
         dashboardObservers.remove(id)
     }
