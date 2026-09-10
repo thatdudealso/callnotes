@@ -3,7 +3,8 @@ import Foundation
 /// On-disk locations for the import inbox (plan Phase 5).
 ///
 /// Finder's iCloud Drive folder is `~/Library/Mobile Documents/com~apple~CloudDocs`.
-/// Dropping an m4a into `CallNotes/Inbox` there is the Files path from the iPhone.
+/// Dropping a supported audio file into `CallNotes/Inbox` there is the Files
+/// path from the iPhone.
 /// When iCloud Drive is off, the watcher falls back to Application Support.
 public enum InboxPaths: Sendable {
     public static let folderName = "CallNotes"

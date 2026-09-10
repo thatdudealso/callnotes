@@ -41,7 +41,8 @@ store, Apple Foundation Models for instant notes, and Ollama for deep notes.
 The optional Meta Muse cloud transcription engine sits behind the same
 provider seams, with the API key kept in the Keychain and local providers as
 the automatic fallback.
-Drop an m4a into the Inbox folder (menu bar → Open Inbox folder) to import a
+Drop a supported audio file (`.m4a`, `.caf`, `.wav`, `.aiff`, `.aif`, or
+`.aac`) into the Inbox folder (menu bar → Open Inbox folder) to import a
 recording. Hummingbird remains planned for the phone-sync phase. The iPhone app
 and Share Extension are intentionally minimal Phase 0 shells that will later
 upload recordings to the paired Mac.
