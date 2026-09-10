@@ -127,6 +127,7 @@ private enum ExtensionBackgroundUpload {
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue(body.contentType, forHTTPHeaderField: "Content-Type")
         let sessionConfiguration = URLSessionConfiguration.background(withIdentifier: "com.thatdudealso.callnotes.share-upload")
+        sessionConfiguration.sharedContainerIdentifier = "group.com.thatdudealso.callnotes"
         sessionConfiguration.isDiscretionary = false
         sessionConfiguration.sessionSendsLaunchEvents = true
         sessionConfiguration.waitsForConnectivity = true
