@@ -224,7 +224,11 @@ private struct DashboardDrillDownView: View {
                         Text(item.call.startedAt.formatted(date: .abbreviated, time: .shortened))
                         Text(item.isIncomplete ? "Incomplete" : duration(item.durationSec))
                         Text(item.engine.displayName)
-                        if item.costDollars > 0 { Text(currency(item.costDollars)).foregroundStyle(CallNotesStyle.cloud) }
+                        if item.costDollars > 0 {
+                            Text(currency(item.costDollars)).foregroundStyle(CallNotesStyle.cloud)
+                        } else {
+                            Text("No cost")
+                        }
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
