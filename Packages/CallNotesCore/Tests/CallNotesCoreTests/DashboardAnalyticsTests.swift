@@ -333,6 +333,61 @@ import Testing
         #expect(analytics.totals.totalDurationSec == 120)
     }
 
+    @Test func finishedLiveSessionReachesTheDashboardThroughTheStoreObserver() async throws {
+        let store = MemoryStore()
+        var call = recordingCall(startedAt: now.addingTimeInterval(-120))
+        call.sttProvider = .metaMuse
+        try await store.upsertCall(call)
+        let published = try await observedChange(from: store) {
+            call.metaBilledSec += 60
+            call.endedAt = self.now
+            call.durationSec = 120
+            call.status = .transcribed
+            call.sttProvider = .appleSpeech
+            try await store.replaceSegments(
+                callID: call.id,
+                provider: .appleSpeech,
+                [Segment(callID: call.id, seq: 0, startSec: 0, endSec: 120, channel: .near, text: "hi", provider: .appleSpeech)]
+            )
+            try await store.upsertCall(call)
+        }
+
+        let snapshot = try await store.fetchDashboardAnalytics(asOf: now)
+        let row = try #require(snapshot.calls.first { $0.id == call.id })
+
+        #expect(published)
+        #expect(row.durationSec == 120)
+        #expect(row.engine == .mixed)
+        #expect(abs(row.costDollars - 0.003) < 0.000_000_1)
+        #expect(snapshot.totals.totalDurationSec == 120)
+    }
+
+    @Test func retranscriptionReachesTheDashboardThroughTheStoreObserver() async throws {
+        let store = MemoryStore()
+        var call = fixtureCall(counterparty: "Avery", startedAt: now, duration: 60)
+        try await store.upsertCall(call)
+        let published = try await observedChange(from: store) {
+            try await store.replaceSegments(
+                callID: call.id,
+                provider: .metaMuse,
+                [Segment(callID: call.id, seq: 0, startSec: 0, endSec: 60, channel: .near, text: "hi", provider: .metaMuse)]
+            )
+            call.sttProvider = .metaMuse
+            call.status = .transcribed
+            try await store.upsertCall(call)
+            call.metaBilledSec += 60
+            try await store.upsertCall(call)
+        }
+
+        let snapshot = try await store.fetchDashboardAnalytics(asOf: now)
+        let row = try #require(snapshot.calls.first { $0.id == call.id })
+
+        #expect(published)
+        #expect(row.engine == .mixed)
+        #expect(abs(row.costDollars - 0.003) < 0.000_000_1)
+        #expect(abs(snapshot.totals.metaCostDollars - 0.003) < 0.000_000_1)
+    }
+
     @Test func fixtureSweepNeverSelectsACallOutsideTheTestNamespace() {
         let seeded = fixtureCall(counterparty: "Avery", startedAt: now, duration: 60)
         var imported = seeded
@@ -535,6 +590,28 @@ import Testing
 
     /// Keyed on a namespace only this suite writes to, so the sweep can never reach
     /// a real call that merely shares a plausible audio path.
+    /// Runs `writes` with a live `dashboardChanges()` subscription and reports whether
+    /// the store published, so a path can be proven to reach the dashboard without any
+    /// manual refresh. Bounded so a missing notification fails instead of hanging.
+    private func observedChange(
+        from store: some CallStore,
+        _ writes: () async throws -> Void
+    ) async throws -> Bool {
+        let changes = await store.dashboardChanges()
+        let published = Task {
+            for await _ in changes { return true }
+            return false
+        }
+        let deadline = Task {
+            try? await Task.sleep(for: .seconds(5))
+            published.cancel()
+        }
+        try await writes()
+        let result = await published.value
+        deadline.cancel()
+        return result
+    }
+
     private static func isStrandedFixture(_ call: Call) -> Bool {
         call.audioPath.hasPrefix(fixtureAudioRoot)
     }
