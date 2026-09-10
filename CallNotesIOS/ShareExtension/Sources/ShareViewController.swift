@@ -8,9 +8,8 @@ import Security
 /// moves it into the shared App Group queue before the extension exits.
 final class ShareViewController: UIViewController {
     private let nameField = UITextField()
-    private let dateField = UITextField()
+    private let datePicker = UIDatePicker()
     private var sharedAudioURL: URL?
-    private var sharedMetadata: CallUploadMetadata?
     private var transfer: ExtensionUploadTransfer?
     private var queuedJob: PendingUpload?
 
@@ -34,9 +33,18 @@ final class ShareViewController: UIViewController {
         nameField.placeholder = "Contact name"
         nameField.borderStyle = .roundedRect
         nameField.accessibilityLabel = "Counterparty name"
-        dateField.placeholder = "Start time"
-        dateField.borderStyle = .roundedRect
-        dateField.accessibilityLabel = "Call start time"
+        datePicker.datePickerMode = .dateAndTime
+        datePicker.preferredDatePickerStyle = .compact
+        datePicker.date = Date()
+        datePicker.accessibilityLabel = "Call start time"
+        let dateLabel = UILabel()
+        dateLabel.text = "Start time"
+        dateLabel.font = .preferredFont(forTextStyle: .subheadline)
+        dateLabel.textColor = .secondaryLabel
+        let dateRow = UIStackView(arrangedSubviews: [dateLabel, datePicker])
+        dateRow.axis = .horizontal
+        dateRow.alignment = .firstBaseline
+        dateRow.spacing = 12
         let send = UIButton(type: .system)
         send.configuration = .filled()
         send.configuration?.title = "Send to Mac"
@@ -44,7 +52,7 @@ final class ShareViewController: UIViewController {
         send.addTarget(self, action: #selector(sendToMac), for: .touchUpInside)
         send.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
         send.accessibilityLabel = "Send shared recording to Mac"
-        let stack = UIStackView(arrangedSubviews: [titleLabel, descriptionLabel, nameField, dateField, send])
+        let stack = UIStackView(arrangedSubviews: [titleLabel, descriptionLabel, nameField, dateRow, send])
         stack.axis = .vertical; stack.spacing = 16; stack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -74,10 +82,9 @@ final class ShareViewController: UIViewController {
             DispatchQueue.main.async {
                 self?.sharedAudioURL = stagedURL
                 let metadata = ExtensionRecordingTitleParser.parse(suggestedName ?? "")
-                self?.sharedMetadata = metadata
                 self?.nameField.text = metadata?.counterpartyName
                 if let startedAt = metadata?.startedAt {
-                    self?.dateField.text = Self.dateFormatter.string(from: startedAt)
+                    self?.datePicker.date = startedAt
                 }
             }
         }
@@ -89,7 +96,7 @@ final class ShareViewController: UIViewController {
     @objc private func sendToMac() {
         guard let sharedAudioURL else { showError("This share item is not an audio file."); return }
         let counterpartyName = nameField.text
-        let startedAt = Self.dateFormatter.date(from: dateField.text ?? "") ?? sharedMetadata?.startedAt
+        let startedAt = datePicker.date
         Task {
             do {
                 let transfer = try self.uploadTransfer()
@@ -125,15 +132,6 @@ final class ShareViewController: UIViewController {
         }
         return url
     }
-
-    private static let dateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-        formatter.locale = .current
-        formatter.timeZone = .current
-        return formatter
-    }()
 
     private nonisolated static func stageSharedAudio(_ source: URL, inPlace: Bool) throws -> URL {
         guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.thatdudealso.callnotes") else {
@@ -218,6 +216,11 @@ private final class ExtensionUploadScheduler: SessionUploadTaskStarting, @unchec
     func start(_ job: PendingUpload) async {
         lock.withLock { failure = nil }
         do { try schedule(job: job) } catch { lock.withLock { failure = error } }
+    }
+
+    func discardRequestBody(for uploadID: UUID) async {
+        let directory = container.appendingPathComponent("UploadRequests", isDirectory: true)
+        try? FileManager.default.removeItem(at: directory.appendingPathComponent(uploadID.uuidString).appendingPathExtension("multipart"))
     }
 
     private func schedule(job: PendingUpload) throws {

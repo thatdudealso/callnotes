@@ -120,6 +120,18 @@ public actor PendingUploadInbox {
         try persist()
     }
 
+    /// A rejected token is not a transient failure: the job waits for the user
+    /// to pair again rather than sitting out an exponential backoff.
+    public func clearBackoff(_ id: UUID) throws {
+        reload()
+        guard let index = entries.firstIndex(where: { $0.id == id }) else {
+            throw PendingUploadInboxError.unknownUpload
+        }
+        entries[index].retryCount = 0
+        entries[index].nextAttemptAt = nil
+        try persist()
+    }
+
     public func markCompleted(_ id: UUID) throws {
         reload()
         guard let index = entries.firstIndex(where: { $0.id == id }) else {

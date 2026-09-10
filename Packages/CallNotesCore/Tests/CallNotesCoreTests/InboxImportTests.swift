@@ -346,6 +346,62 @@ import Testing
         #expect(jobs.value.last?.stage == .completed)
     }
 
+    /// A run that failed in the notes stage never claimed the content, so the
+    /// retry that finishes it must not be rejected as a duplicate of itself and
+    /// take the transcript the first run produced down with it.
+    @Test func retryAfterANotesFailureIsNotADuplicateOfItself() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-notes-retry-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("call.wav")
+        try ImportFixtureWriter.writeWAV(to: file, seconds: 0.3)
+
+        let store = MemoryStore()
+        let duplicates = InboxDuplicateIndex()
+        let callID = UUID()
+        let notesBody = CallNotes(title: "Pilot ship", summary: "Ship the pilot next week.")
+        func pipeline(notesAreUsable: Bool) -> ImportPipeline {
+            let health: ProviderHealth = notesAreUsable ? .healthy : .unavailable(reason: "ollama is down")
+            return ImportPipeline(
+                store: store,
+                spine: FileTranscriptionSpine(
+                    speech: ScriptedPCMTranscriber(
+                        near: [RawSegment(start: 0, end: 1, text: "We will ship the pilot next week.", channel: .mixed)],
+                        far: []
+                    ),
+                    diarizer: ScriptedDiarizer(clusters: []),
+                    store: store
+                ),
+                notes: NotesGenerationSpine(
+                    instant: ScriptedNotesProvider(id: .appleFM, health: .unavailable(reason: "test"), outputs: []),
+                    deep: ScriptedNotesProvider(id: .glimmer, health: health, outputs: [.success(notesBody)]),
+                    fallback: ScriptedNotesProvider(id: .fallbackInstruct, health: health, outputs: [.success(notesBody)]),
+                    store: store
+                ),
+                duplicates: duplicates,
+                audioRoot: root.appendingPathComponent("audio", isDirectory: true)
+            )
+        }
+        func job() -> ImportJob {
+            ImportJob(fileName: file.lastPathComponent, sourceURL: file, callID: callID)
+        }
+
+        await #expect(throws: Error.self) {
+            try await pipeline(notesAreUsable: false).`import`(file, engine: .appleSpeech, job: job())
+        }
+        let transcribed = try await store.fetchSegments(callID: callID, provider: .appleSpeech)
+        #expect(!transcribed.isEmpty)
+
+        let processed = try await pipeline(notesAreUsable: true).`import`(file, engine: .appleSpeech, job: job())
+
+        #expect(processed.call.id == callID)
+        #expect(processed.call.status == .notesReady)
+        #expect(try await store.fetchCalls().count == 1)
+        #expect(try await store.fetchSegments(callID: callID, provider: .appleSpeech).map(\.text) == transcribed.map(\.text))
+        #expect(FileManager.default.fileExists(atPath: processed.call.audioPath))
+    }
+
     @Test func secondDropOfTheSameBytesIsADuplicate() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("callnotes-dup-pipe-\(UUID().uuidString)", isDirectory: true)

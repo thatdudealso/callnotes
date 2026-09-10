@@ -91,7 +91,6 @@ public struct ImportPipeline: Sendable {
             job: progress
         )
         call = processed.call
-        _ = await duplicates.register(hash)
 
         if let notes {
             progress.stage = .notes
@@ -112,12 +111,14 @@ public struct ImportPipeline: Sendable {
                 finished.call.notesProvider = deep.provider
                 finished.call.status = .notesReady
             }
+            _ = await duplicates.register(hash)
             progress.stage = .completed
             progress.fractionComplete = 1
             emit(progress)
             return finished
         }
 
+        _ = await duplicates.register(hash)
         progress.stage = .completed
         progress.fractionComplete = 1
         emit(progress)

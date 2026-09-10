@@ -66,7 +66,7 @@ public actor MacSyncServer {
         }
         router.get("mirror") { request, _ async throws -> SyncDTO.Mirror in
             _ = try await Self.authorizedDevice(for: request, pairing: pairing)
-            return try await Self.mirror(store: self.store)
+            return try await self.mirror()
         }
         router.post("calls/:uploadID") { request, context async throws -> Response in
             _ = try await Self.authorizedDevice(for: request, pairing: pairing)
@@ -111,6 +111,10 @@ public actor MacSyncServer {
             configuration: .init(address: .hostname(host, port: SyncConstants.serverPort))
         )
         try await app.runService()
+    }
+
+    func mirror() async throws -> SyncDTO.Mirror {
+        try await Self.mirror(store: store)
     }
 
     enum UploadOutcome: Sendable, Equatable {
@@ -269,7 +273,7 @@ public actor MacSyncServer {
             mirrored.append(SyncDTO.MirroredCall(
                 id: call.id,
                 title: note?.body.title ?? call.counterpartyName ?? "Call",
-                summary: note?.body.summary ?? "Processing recording",
+                summary: note?.body.summary ?? placeholderSummary(for: call.status),
                 startedAt: call.startedAt,
                 source: call.source.rawValue,
                 status: call.status.rawValue,
@@ -278,6 +282,16 @@ public actor MacSyncServer {
             ))
         }
         return SyncDTO.Mirror(calls: mirrored)
+    }
+
+    /// A call with no note yet still needs honest copy on the phone: a run that
+    /// gave up must not keep reading as if it were still working.
+    private static func placeholderSummary(for status: CallStatus) -> String {
+        switch status {
+        case .failed: "Could not finish this recording"
+        case .transcribed: "Writing notes"
+        case .recording, .uploaded, .transcribing, .notesReady: "Processing recording"
+        }
     }
 
     private static func mirroredSegments(_ segments: [Segment], callID: UUID, store: any CallStore) async throws -> [SyncDTO.MirroredSegment] {

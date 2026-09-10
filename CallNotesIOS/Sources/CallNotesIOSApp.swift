@@ -184,6 +184,9 @@ final class PhoneAppModel {
         do {
             let mirror = try await PhoneMirrorCoordinator.fetch()
             try MirrorReconciler.apply(mirror, to: SwiftDataMirrorWriter(context: context))
+        } catch PhoneSyncError.unpaired {
+            unpair()
+            uploadStatus = PhoneSyncError.unpaired.localizedDescription
         } catch { uploadStatus = error.localizedDescription }
     }
     func startRecording() async {

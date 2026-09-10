@@ -9,11 +9,31 @@ public protocol SessionUploadTaskStarting: Sendable {
     /// queued instead of being backed off as a failure.
     func retry(_ job: PendingUpload) async -> Bool
     func discardRequestBody(for uploadID: UUID) async
+    /// The paired Mac rejected this device's token, so no other endpoint or
+    /// backoff will help until the user pairs again.
+    func authorizationRejected() async
 }
 
 public extension SessionUploadTaskStarting {
     func retry(_ job: PendingUpload) async -> Bool { false }
     func discardRequestBody(for uploadID: UUID) async {}
+    func authorizationRejected() async {}
+}
+
+/// The system's background-relaunch completion handlers. UIKit delivers
+/// `handleEventsForBackgroundURLSession` before the session's delegate events,
+/// so registration has to be synchronous to keep that ordering.
+private final class BackgroundCompletionHandlers: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handlers: [String: @Sendable () -> Void] = [:]
+
+    func store(_ handler: @escaping @Sendable () -> Void, for identifier: String) {
+        lock.withLock { handlers[identifier] = handler }
+    }
+
+    func take(_ identifier: String) -> (@Sendable () -> Void)? {
+        lock.withLock { handlers.removeValue(forKey: identifier) }
+    }
 }
 
 /// The single upload state machine shared by the iOS app and its Share
@@ -23,7 +43,7 @@ public extension SessionUploadTaskStarting {
 public actor SessionUploadCoordinator {
     private let inbox: PendingUploadInbox
     private let starter: any SessionUploadTaskStarting
-    private var completionHandlers: [String: @Sendable () -> Void] = [:]
+    private let completionHandlers = BackgroundCompletionHandlers()
 
     public init(directory: URL, starter: any SessionUploadTaskStarting) throws {
         self.inbox = try PendingUploadInbox(directory: directory)
@@ -31,10 +51,12 @@ public actor SessionUploadCoordinator {
     }
 
     /// Copies the audio into the App Group queue before starting its transfer,
-    /// so the job outlives the process that shared it.
+    /// so the job outlives the process that shared it. The queued copy is then
+    /// the only one: `sourceURL` is app-owned staging and is consumed here.
     @discardableResult
     public func enqueue(audioAt sourceURL: URL, metadata: CallUploadMetadata) async throws -> PendingUpload {
         let job = try await inbox.enqueue(audioAt: sourceURL, metadata: metadata)
+        try? FileManager.default.removeItem(at: sourceURL)
         await starter.start(job)
         return job
     }
@@ -45,14 +67,20 @@ public actor SessionUploadCoordinator {
         }
     }
 
-    public func handleBackgroundEvents(identifier: String, completionHandler: @escaping @Sendable () -> Void) {
-        completionHandlers[identifier] = completionHandler
+    public nonisolated func handleBackgroundEvents(identifier: String, completionHandler: @escaping @Sendable () -> Void) {
+        completionHandlers.store(completionHandler, for: identifier)
     }
 
     public func taskCompleted(uploadID: UUID, error: Error?, statusCode: Int? = nil) async {
         let succeeded = error == nil && (statusCode.map { (200..<300).contains($0) } ?? true)
         if succeeded {
             try? await inbox.markCompleted(uploadID)
+            await starter.discardRequestBody(for: uploadID)
+            return
+        }
+        if statusCode == 401 {
+            try? await inbox.clearBackoff(uploadID)
+            await starter.authorizationRejected()
             await starter.discardRequestBody(for: uploadID)
             return
         }
@@ -64,8 +92,8 @@ public actor SessionUploadCoordinator {
         await starter.discardRequestBody(for: uploadID)
     }
 
-    public func finishBackgroundEvents(identifier: String) {
-        completionHandlers.removeValue(forKey: identifier)?()
+    public nonisolated func finishBackgroundEvents(identifier: String) {
+        completionHandlers.take(identifier)?()
     }
 }
 

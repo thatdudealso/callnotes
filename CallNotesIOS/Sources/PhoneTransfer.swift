@@ -31,6 +31,16 @@ enum PhoneSharedContainer {
     }
 }
 
+enum PhoneSyncError: Error, LocalizedError {
+    case unpaired
+
+    var errorDescription: String? {
+        switch self {
+        case .unpaired: "This iPhone is no longer paired with your Mac. Scan the pairing QR code again."
+        }
+    }
+}
+
 struct PhonePairingConfiguration: Codable, Sendable {
     var serverURL: URL
     var deviceID: UUID
@@ -113,6 +123,7 @@ enum PhonePairingCoordinator {
     private static func pair(ticket: PairingTicket, serverURL: URL, deviceName: String) async throws -> PhonePairingConfiguration {
         let delegate = PinnedURLSessionDelegate(fingerprint: ticket.certificateFingerprint)
         let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
         var request = URLRequest(url: serverURL.appendingPathComponent("pair"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -138,6 +149,8 @@ enum PhoneMirrorCoordinator {
         guard let (connection, token) = PhonePairingStore.load() else { throw URLError(.userAuthenticationRequired) }
         do {
             return try await fetch(connection: connection, token: token)
+        } catch PhoneSyncError.unpaired {
+            throw PhoneSyncError.unpaired
         } catch {
             var discovered = connection
             discovered.serverURL = try await PhoneBonjourResolver.resolve(fingerprint: connection.certificateFingerprint)
@@ -148,10 +161,13 @@ enum PhoneMirrorCoordinator {
     private static func fetch(connection: PhonePairingConfiguration, token: String) async throws -> SyncDTO.Mirror {
         let delegate = PinnedURLSessionDelegate(fingerprint: connection.certificateFingerprint)
         let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
         var request = URLRequest(url: connection.serverURL.appendingPathComponent("mirror"))
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { throw URLError(.cannotLoadFromNetwork) }
+        guard let http = response as? HTTPURLResponse else { throw URLError(.cannotLoadFromNetwork) }
+        guard http.statusCode != 401 else { throw PhoneSyncError.unpaired }
+        guard (200..<300).contains(http.statusCode) else { throw URLError(.cannotLoadFromNetwork) }
         return try JSONDecoder().decode(SyncDTO.Mirror.self, from: data)
     }
 }
@@ -166,6 +182,10 @@ private final class PhoneBonjourResolver: NSObject, NetServiceBrowserDelegate, N
     private var pendingServices: [NetService] = []
     private var fingerprint = ""
     private var isFinished = false
+    private var discoveryFinished = false
+
+    private static let candidateTimeout: TimeInterval = 2
+    private static let discoveryWindow: TimeInterval = 5
 
     static func resolve(fingerprint: String) async throws -> URL {
         try await PhoneBonjourResolver().resolveService(fingerprint: fingerprint)
@@ -192,8 +212,8 @@ private final class PhoneBonjourResolver: NSObject, NetServiceBrowserDelegate, N
                 browser.schedule(in: .main, forMode: .common)
                 browser.searchForServices(ofType: "\(SyncConstants.bonjourServiceType).", inDomain: "local.")
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [self] in
-                finish(.failure(URLError(.cannotFindHost)))
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.discoveryWindow) { [self] in
+                endDiscovery()
             }
         }
     }
@@ -214,9 +234,13 @@ private final class PhoneBonjourResolver: NSObject, NetServiceBrowserDelegate, N
         let fingerprint = lock.withLock { self.fingerprint }
         Task { [self] in
             let delegate = PinnedURLSessionDelegate(fingerprint: fingerprint)
-            let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
             do {
-                let (_, response) = try await session.data(from: url.appendingPathComponent("health"))
+                let configuration = URLSessionConfiguration.ephemeral
+            configuration.timeoutIntervalForRequest = Self.candidateTimeout
+            configuration.timeoutIntervalForResource = Self.candidateTimeout
+            let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+            defer { session.finishTasksAndInvalidate() }
+            let (_, response) = try await session.data(from: url.appendingPathComponent("health"))
                 guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else { throw URLError(.cannotConnectToHost) }
                 finish(.success(url))
             } catch {
@@ -249,13 +273,39 @@ private final class PhoneBonjourResolver: NSObject, NetServiceBrowserDelegate, N
             service = next
             return next
         }
-        guard let next else { return }
+        guard let next else {
+            finishIfExhausted()
+            return
+        }
         let box = UncheckedBox(next)
         DispatchQueue.main.async { [self] in
             box.value.delegate = self
             box.value.schedule(in: .main, forMode: .common)
-            box.value.resolve(withTimeout: 5)
+            box.value.resolve(withTimeout: Self.candidateTimeout)
         }
+    }
+
+    /// The window bounds how long new candidates may appear. A candidate that is
+    /// already queued still gets its own short resolve and health-check budget,
+    /// so one asleep Mac cannot consume the whole sweep.
+    private func endDiscovery() {
+        let browser = lock.withLock { () -> NetServiceBrowser? in
+            discoveryFinished = true
+            let browser = self.browser
+            self.browser = nil
+            return browser
+        }
+        if let browser {
+            let box = UncheckedBox(browser)
+            DispatchQueue.main.async { box.value.stop() }
+        }
+        finishIfExhausted()
+    }
+
+    private func finishIfExhausted() {
+        let exhausted = lock.withLock { discoveryFinished && service == nil && pendingServices.isEmpty }
+        guard exhausted else { return }
+        finish(.failure(URLError(.cannotFindHost)))
     }
 
     /// Resolves the continuation exactly once: the five-second timeout and a
@@ -312,6 +362,10 @@ final class PhoneUploadScheduler: SessionUploadTaskStarting, @unchecked Sendable
         } catch {
             return false
         }
+    }
+
+    func authorizationRejected() async {
+        PhonePairingStore.remove()
     }
 
     func discardRequestBody(for uploadID: UUID) async {
@@ -377,10 +431,8 @@ final class BackgroundUploadCoordinator: @unchecked Sendable {
             DispatchQueue.main.async { box.value() }
             return
         }
-        Task {
-            await coordinator.handleBackgroundEvents(identifier: identifier) {
-                DispatchQueue.main.async { box.value() }
-            }
+        coordinator.handleBackgroundEvents(identifier: identifier) {
+            DispatchQueue.main.async { box.value() }
         }
     }
 

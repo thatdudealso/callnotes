@@ -73,7 +73,7 @@ import Testing
         #expect(harness.scheduler.log == ["start:\(job.id)"])
 
         let task = harness.uploadTask(for: job.id)
-        await harness.coordinator.handleBackgroundEvents(identifier: harness.sessionIdentifier) {
+        harness.coordinator.handleBackgroundEvents(identifier: harness.sessionIdentifier) {
             harness.scheduler.record("released-system-handler")
         }
         harness.delegate.urlSession(harness.session, task: task, didCompleteWithError: nil)
@@ -95,7 +95,7 @@ import Testing
         let job = try await harness.enqueueRecording()
 
         let task = harness.uploadTask(for: job.id)
-        await harness.coordinator.handleBackgroundEvents(identifier: harness.sessionIdentifier) {
+        harness.coordinator.handleBackgroundEvents(identifier: harness.sessionIdentifier) {
             harness.scheduler.record("released-system-handler")
         }
         harness.delegate.urlSession(harness.session, task: task, didCompleteWithError: URLError(.networkConnectionLost))
@@ -105,6 +105,55 @@ import Testing
         #expect(harness.scheduler.log.last == "released-system-handler")
         let reopened = try PendingUploadInbox(directory: harness.inboxDirectory)
         #expect(await reopened.pending(now: .distantFuture).map(\.id) == [job.id])
+    }
+
+    /// UIKit hands the completion handler over before the session delivers its
+    /// delegate events, so registration has to land before any of them drain.
+    @Test func backgroundHandlerRegisteredJustBeforeTheEventsStillRuns() async throws {
+        let harness = try RelaunchHarness()
+        defer { harness.tearDown() }
+        let job = try await harness.enqueueRecording()
+        let task = harness.uploadTask(for: job.id)
+
+        harness.coordinator.handleBackgroundEvents(identifier: harness.sessionIdentifier) {
+            harness.scheduler.record("released-system-handler")
+        }
+        harness.delegate.urlSession(harness.session, task: task, didCompleteWithError: nil)
+        harness.delegate.urlSessionDidFinishEvents(forBackgroundURLSession: harness.session)
+        try await harness.waitForSystemHandler()
+
+        #expect(harness.scheduler.log == ["discard:\(job.id)", "released-system-handler"])
+    }
+
+    /// A revoked device gets 401 forever, so the job must wait for a new pairing
+    /// instead of sitting out an exponential backoff that cannot help it.
+    @Test func revokedDeviceClearsTheBackoffAndTheStoredPairing() async throws {
+        let harness = try RelaunchHarness()
+        defer { harness.tearDown() }
+        let job = try await harness.enqueueRecording()
+        let inbox = try PendingUploadInbox(directory: harness.inboxDirectory)
+        try await inbox.markFailed(job.id)
+        #expect(await inbox.pending().isEmpty)
+
+        await harness.coordinator.taskCompleted(uploadID: job.id, error: nil, statusCode: 401)
+
+        #expect(harness.scheduler.log.contains("authorization-rejected"))
+        let reopened = try PendingUploadInbox(directory: harness.inboxDirectory)
+        #expect(await reopened.pending().map(\.id) == [job.id])
+    }
+
+    /// The App Group must not accumulate a second full-size copy of every
+    /// recording: once the durable job owns the audio, the staging copy goes.
+    @Test func enqueueConsumesTheStagedSourceRecording() async throws {
+        let harness = try RelaunchHarness()
+        defer { harness.tearDown() }
+        let source = harness.root.appendingPathComponent("staged-recording.m4a")
+        try Data("recording".utf8).write(to: source)
+
+        let job = try await harness.coordinator.enqueue(audioAt: source, metadata: .init(source: .iphoneRecording))
+
+        #expect(!FileManager.default.fileExists(atPath: source.path))
+        #expect(FileManager.default.fileExists(atPath: job.audioURL.path))
     }
 
     @Test func rejectedUploadResponseKeepsTheRecordingQueued() async throws {
@@ -445,6 +494,27 @@ import Testing
         #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("\(uploadID.uuidString).m4a").path))
     }
 
+    /// A call the Mac gave up on must not keep reading as work in progress on
+    /// the phone, where the mirrored summary is the only visible status.
+    @Test func mirrorDoesNotDescribeAGivenUpRecordingAsStillProcessing() async throws {
+        let store = MemoryStore()
+        let server = MacSyncServer(store: store)
+        let callID = UUID()
+        try await store.upsertCall(Call(
+            id: callID,
+            source: .iphoneRecording,
+            startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            counterpartyName: "Priya",
+            audioPath: "/tmp/\(callID.uuidString).m4a",
+            sttProvider: .appleSpeech,
+            status: .failed
+        ))
+
+        let mirrored = try #require(try await server.mirror().calls.first)
+        #expect(mirrored.status == CallStatus.failed.rawValue)
+        #expect(mirrored.summary == "Could not finish this recording")
+    }
+
     @Test func importedPhoneUploadKeepsTheUploadedCallAndItsMetadata() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("callnotes-phone-handoff-\(UUID().uuidString)", isDirectory: true)
@@ -565,6 +635,7 @@ private final class RecordingScheduler: SessionUploadTaskStarting, @unchecked Se
     func record(_ event: String) { lock.withLock { events.append(event) } }
     func start(_ job: PendingUpload) async { record("start:\(job.id)") }
     func discardRequestBody(for uploadID: UUID) async { record("discard:\(uploadID)") }
+    func authorizationRejected() async { record("authorization-rejected") }
 }
 
 /// A relaunched app: a real background `URLSession` wired to the production

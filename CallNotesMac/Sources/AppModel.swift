@@ -276,6 +276,7 @@ final class AppModel {
 
     func processPhoneUpload(callID: UUID, audioURL: URL, metadata: CallUploadMetadata) async throws {
         guard isStoreInitialized else { return }
+        if try await resumeNotes(callID: callID, audioURL: audioURL) { return }
         var job = ImportJob(fileName: audioURL.lastPathComponent, sourceURL: audioURL, stage: .settling, callID: callID)
         upsertImportJob(job)
         let storedDefault = UserDefaults.standard.string(forKey: "default_engine")
@@ -344,6 +345,46 @@ final class AppModel {
             statusMessage = error.localizedDescription
             throw error
         }
+    }
+
+    /// A retried upload whose transcript already landed only needs its notes.
+    /// Re-importing the same bytes would fingerprint the recording as a
+    /// duplicate of itself and delete the call this retry exists to finish.
+    private func resumeNotes(callID: UUID, audioURL: URL) async throws -> Bool {
+        guard let notesSpine, let call = try await store.fetchCall(id: callID) else { return false }
+        let segments = try await store.fetchSegments(callID: callID, provider: call.sttProvider)
+        guard !segments.isEmpty else { return false }
+        let speakers = try await store.fetchCallSpeakers(callID: callID)
+        let profiles = try await store.fetchSpeakerProfiles()
+        let turns = TurnAttributor.fromStored(segments: segments, speakers: speakers, profiles: profiles)
+        var job = ImportJob(fileName: audioURL.lastPathComponent, sourceURL: audioURL, stage: .notes, callID: callID)
+        job.fractionComplete = 0.92
+        upsertImportJob(job)
+        let transcript = Transcript(
+            callID: callID,
+            turns: turns,
+            provider: call.sttProvider,
+            counterpartyName: call.counterpartyName
+        )
+        do {
+            _ = try await notesSpine.generateInstant(transcript, call: call)
+            _ = try await notesSpine.generateDeep(transcript, call: call)
+        } catch {
+            job.stage = .failed
+            job.error = error.localizedDescription
+            upsertImportJob(job)
+            statusMessage = error.localizedDescription
+            throw error
+        }
+        job.stage = .completed
+        job.fractionComplete = 1
+        upsertImportJob(job)
+        turnsByCall[callID] = turns
+        selectedCallID = callID
+        removePhoneUploadStaging(audioURL)
+        try await refresh()
+        statusMessage = "Finished notes for iPhone recording."
+        return true
     }
 
     private func removePhoneUploadStaging(_ audioURL: URL) {
