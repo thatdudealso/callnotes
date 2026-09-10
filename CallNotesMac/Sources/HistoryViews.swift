@@ -49,10 +49,6 @@ struct HistorySplitView: View {
                 empty
             }
         }
-        .onChange(of: model.selectedCallID) { _, newValue in
-            guard let newValue, let call = model.calls.first(where: { $0.id == newValue }) else { return }
-            Task { await model.select(call) }
-        }
     }
 
     private var empty: some View {

@@ -64,6 +64,11 @@ final class AppModel {
             case .call(let id):
                 showsDashboard = false
                 selectedCallID = id
+                if let call = calls.first(where: { $0.id == id }) {
+                    Task { [weak self] in
+                        await self?.select(call)
+                    }
+                }
             case nil:
                 break
             }
