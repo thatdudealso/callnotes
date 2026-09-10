@@ -455,6 +455,46 @@ import Testing
         #expect(try await store.fetchCalls().count == 1)
     }
 
+    /// `.transcribed` means segments exist and notes still need to run. A later
+    /// POST of the same upload ID must resume, not report the call already done.
+    @Test func transcribedCallWithoutNotesResumesInsteadOfReportingAlreadyStored() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-phone-transcribed-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MemoryStore()
+        let attempts = ProcessingAttempts()
+        let server = MacSyncServer(store: store, receivedUploadsDirectory: root, processingAttemptLimit: 1, onAccepted: { callID, _, _ in
+            guard var call = try await store.fetchCall(id: callID) else { throw ProcessingFailure() }
+            if await attempts.record() == 1 {
+                call.status = .transcribed
+                try await store.upsertCall(call)
+                throw ProcessingFailure()
+            }
+            call.status = .notesReady
+            try await store.upsertCall(call)
+        })
+        let uploadID = UUID()
+        let metadata = CallUploadMetadata(source: .iphoneRecording, startedAt: Date(timeIntervalSince1970: 1_700_000_000), counterpartyName: "Priya")
+
+        #expect(try await server.accept(uploadID: uploadID, metadata: metadata, audio: Data("recording".utf8), fileExtension: "m4a") == .created)
+
+        var retry = MacSyncServer.UploadOutcome.alreadyStored
+        for _ in 0..<200 where retry != .resumed {
+            retry = try await server.accept(uploadID: uploadID, metadata: metadata, audio: Data("recording".utf8), fileExtension: "m4a")
+            if retry != .resumed { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        #expect(retry == .resumed)
+
+        var processed = try await store.fetchCall(id: uploadID)
+        for _ in 0..<200 where processed?.status != .notesReady {
+            try await Task.sleep(for: .milliseconds(10))
+            processed = try await store.fetchCall(id: uploadID)
+        }
+        #expect(processed?.status == .notesReady)
+        #expect(try await store.fetchCalls().count == 1)
+        #expect(await attempts.count == 2)
+    }
+
     /// The phone drops its queued job as soon as it sees 201, so recovery from a
     /// processing failure has to happen on the Mac with no further client POST.
     @Test func macRetriesFailedProcessingLocallyAfterAcknowledgingTheUpload() async throws {

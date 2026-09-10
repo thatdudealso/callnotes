@@ -402,6 +402,49 @@ import Testing
         #expect(FileManager.default.fileExists(atPath: processed.call.audioPath))
     }
 
+    /// Notes failing after transcription still claims the content hash, so a
+    /// later drop of the same inbox file (a new call ID) is a duplicate.
+    @Test func notesFailureStillRejectsASecondInboxDropOfTheSameBytes() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-notes-fail-dup-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("call.wav")
+        try ImportFixtureWriter.writeWAV(to: file, seconds: 0.3)
+
+        let store = MemoryStore()
+        let duplicates = InboxDuplicateIndex()
+        func pipeline() -> ImportPipeline {
+            ImportPipeline(
+                store: store,
+                spine: FileTranscriptionSpine(
+                    speech: ScriptedPCMTranscriber(
+                        near: [RawSegment(start: 0, end: 1, text: "We will ship the pilot next week.", channel: .mixed)],
+                        far: []
+                    ),
+                    diarizer: ScriptedDiarizer(clusters: []),
+                    store: store
+                ),
+                notes: NotesGenerationSpine(
+                    instant: ScriptedNotesProvider(id: .appleFM, health: .unavailable(reason: "test"), outputs: []),
+                    deep: ScriptedNotesProvider(id: .glimmer, health: .unavailable(reason: "ollama is down"), outputs: []),
+                    fallback: ScriptedNotesProvider(id: .fallbackInstruct, health: .unavailable(reason: "ollama is down"), outputs: []),
+                    store: store
+                ),
+                duplicates: duplicates,
+                audioRoot: root.appendingPathComponent("audio", isDirectory: true)
+            )
+        }
+
+        await #expect(throws: Error.self) {
+            try await pipeline().`import`(file, engine: .appleSpeech, job: ImportJob(fileName: file.lastPathComponent, sourceURL: file, callID: UUID()))
+        }
+        await #expect(throws: FileImportError.duplicate) {
+            try await pipeline().`import`(file, engine: .appleSpeech, job: ImportJob(fileName: file.lastPathComponent, sourceURL: file, callID: UUID()))
+        }
+        #expect(try await store.fetchCalls().count == 1)
+    }
+
     @Test func secondDropOfTheSameBytesIsADuplicate() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("callnotes-dup-pipe-\(UUID().uuidString)", isDirectory: true)

@@ -105,7 +105,7 @@ public final class SessionUploadDelegate: NSObject, URLSessionDataDelegate, @unc
     private let coordinator: SessionUploadCoordinator
     private let pinnedFingerprint: @Sendable () -> String?
     private let lock = NSLock()
-    private var transitions: [Task<Void, Never>] = []
+    private var transitions: [UUID: Task<Void, Never>] = [:]
 
     public init(coordinator: SessionUploadCoordinator, pinnedFingerprint: @escaping @Sendable () -> String?) {
         self.coordinator = coordinator
@@ -118,14 +118,15 @@ public final class SessionUploadDelegate: NSObject, URLSessionDataDelegate, @unc
         let coordinator = self.coordinator
         let transition = Task {
             await coordinator.taskCompleted(uploadID: uploadID, error: error, statusCode: statusCode)
+            self.lock.withLock { _ = self.transitions.removeValue(forKey: uploadID) }
         }
-        lock.withLock { transitions.append(transition) }
+        lock.withLock { transitions[uploadID] = transition }
     }
 
     public func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
         let identifier = session.configuration.identifier ?? ""
         let pending = lock.withLock {
-            let snapshot = transitions
+            let snapshot = Array(transitions.values)
             transitions.removeAll()
             return snapshot
         }

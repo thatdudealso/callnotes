@@ -45,20 +45,37 @@ public struct ImportPipeline: Sendable {
 
         let callID = progress.callID ?? UUID()
         let storedURL = try storedAudioURL(callID: callID, sourceExtension: url.pathExtension)
-        if FileManager.default.fileExists(atPath: storedURL.path) {
-            try FileManager.default.removeItem(at: storedURL)
+        let existingCall = try await store.fetchCall(id: callID)
+        let existingSegments = existingCall == nil
+            ? []
+            : try await store.fetchSegments(callID: callID, provider: existingCall?.sttProvider ?? engine)
+        let alreadyTranscribed = !existingSegments.isEmpty
+
+        if !alreadyTranscribed {
+            if FileManager.default.fileExists(atPath: storedURL.path) {
+                try FileManager.default.removeItem(at: storedURL)
+            }
+            try FileManager.default.copyItem(at: url, to: storedURL)
         }
-        try FileManager.default.copyItem(at: url, to: storedURL)
-        let hash = try await duplicates.fingerprint(of: storedURL)
-        if await duplicates.contains(hash) {
-            try? FileManager.default.removeItem(at: storedURL)
+        let hashSource: URL = {
+            if alreadyTranscribed, let path = existingCall?.audioPath {
+                let stored = URL(fileURLWithPath: path)
+                if FileManager.default.fileExists(atPath: stored.path) { return stored }
+            }
+            return storedURL
+        }()
+        let hash = try await duplicates.fingerprint(of: hashSource)
+        if await duplicates.contains(hash), existingCall == nil {
+            if !alreadyTranscribed {
+                try? FileManager.default.removeItem(at: storedURL)
+            }
             progress.stage = .duplicate
             progress.fractionComplete = 1
             emit(progress)
             throw FileImportError.duplicate
         }
 
-        var call = Call(
+        var call = existingCall ?? Call(
             id: callID,
             source: source,
             startedAt: startedAt ?? Date(),
@@ -68,7 +85,11 @@ public struct ImportPipeline: Sendable {
             sttProvider: engine,
             status: .transcribing
         )
-        try await store.upsertCall(call)
+        if !alreadyTranscribed {
+            call.audioPath = storedURL.path
+            call.status = .transcribing
+            try await store.upsertCall(call)
+        }
         progress.callID = callID
         progress.stage = .transcribing
         progress.fractionComplete = 0.1
@@ -84,13 +105,32 @@ public struct ImportPipeline: Sendable {
             merged.sourceURL = url
             self.emit(merged)
         }
-        let processed = try await reportingSpine.process(
-            fileURL: storedURL,
-            call: call,
-            profiles: profiles,
-            job: progress
-        )
+        let processed: ProcessedCall
+        if alreadyTranscribed, let existingCall {
+            let speakers = try await store.fetchCallSpeakers(callID: callID)
+            processed = ProcessedCall(
+                call: existingCall,
+                turns: TurnAttributor.fromStored(
+                    segments: existingSegments,
+                    speakers: speakers,
+                    profiles: profiles
+                ),
+                clusters: [],
+                dualInstanceMode: .nearLiveFarBatch
+            )
+        } else {
+            processed = try await reportingSpine.process(
+                fileURL: storedURL,
+                call: call,
+                profiles: profiles,
+                job: progress
+            )
+        }
         call = processed.call
+        // Claim the bytes as soon as a transcript exists so a second inbox drop
+        // of the same recording is rejected even if notes later fail. A retry of
+        // this same callID is allowed above because `existingCall` is set.
+        _ = await duplicates.register(hash)
 
         if let notes {
             progress.stage = .notes
@@ -111,14 +151,12 @@ public struct ImportPipeline: Sendable {
                 finished.call.notesProvider = deep.provider
                 finished.call.status = .notesReady
             }
-            _ = await duplicates.register(hash)
             progress.stage = .completed
             progress.fractionComplete = 1
             emit(progress)
             return finished
         }
 
-        _ = await duplicates.register(hash)
         progress.stage = .completed
         progress.fractionComplete = 1
         emit(progress)

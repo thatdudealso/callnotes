@@ -21,6 +21,16 @@ final class ShareViewController: UIViewController {
         loadAudio()
     }
 
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        // Staging is consumed by enqueue on Send. Dismiss without Send must
+        // not leave a full-size copy in SharedAudio forever.
+        if queuedJob == nil, let sharedAudioURL {
+            try? FileManager.default.removeItem(at: sharedAudioURL)
+            self.sharedAudioURL = nil
+        }
+    }
+
     private func configureForm() {
         let titleLabel = UILabel()
         titleLabel.text = "CallNotes"

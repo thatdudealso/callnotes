@@ -225,18 +225,28 @@ public actor MacSyncServer {
 
     private func recordProcessingFailure(_ uploadID: UUID) async {
         guard var call = try? await store.fetchCall(id: uploadID), !isProcessed(call) else { return }
-        call.status = .failed
-        try? await store.upsertCall(call)
+        // `.transcribed` already has segments; keep it so a later attempt
+        // resumes notes instead of looking like a total failure.
+        switch call.status {
+        case .uploaded, .transcribing, .recording:
+            call.status = .failed
+            try? await store.upsertCall(call)
+        case .transcribed, .notesReady, .failed:
+            break
+        }
     }
 
     private func finishProcessing(_ uploadID: UUID) {
         processingUploadIDs.remove(uploadID)
     }
 
+    /// Only notes-ready is terminal. `.transcribed` means segments landed and
+    /// notes still need to run, so a 201 whose notes stage threw stays eligible
+    /// for `settleExistingUpload` / local retry.
     private func isProcessed(_ call: Call) -> Bool {
         switch call.status {
-        case .transcribed, .notesReady: true
-        case .recording, .uploaded, .transcribing, .failed: false
+        case .notesReady: true
+        case .recording, .uploaded, .transcribing, .transcribed, .failed: false
         }
     }
 

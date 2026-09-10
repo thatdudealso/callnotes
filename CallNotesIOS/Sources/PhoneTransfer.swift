@@ -114,6 +114,10 @@ enum PhonePairingCoordinator {
         guard ticket.expiresAt >= Date() else { throw PairingError.expiredCode }
         do {
             return try await pair(ticket: ticket, serverURL: ticket.serverURL, deviceName: deviceName)
+        } catch let error as PairingError {
+            throw error
+        } catch let error as NSError where error.domain == "CallNotes.Pairing" {
+            throw error
         } catch {
             let discovered = try await PhoneBonjourResolver.resolve(fingerprint: ticket.certificateFingerprint)
             return try await pair(ticket: ticket, serverURL: discovered, deviceName: deviceName)
