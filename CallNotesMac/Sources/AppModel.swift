@@ -242,7 +242,6 @@ final class AppModel {
             syncBonjourService = service
             syncServer = server
             syncIdentity = identity
-            Task { await server.recoverStagedUploads() }
             let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "CallNotes phone sync")
             syncActivity = activity
             syncServerTask = Task {

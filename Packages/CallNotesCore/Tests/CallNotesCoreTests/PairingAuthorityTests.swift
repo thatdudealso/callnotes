@@ -113,6 +113,24 @@ import Testing
         }
     }
 
+    /// Showing the Devices pane again issues a fresh code and sweeps the codes
+    /// that expired unscanned, so they stop accumulating for the app's lifetime.
+    @Test func issuingATicketSweepsCodesThatExpiredUnscanned() async throws {
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_700_000_000))
+        let authority = PairingAuthority(now: { clock.now }, codeLifetime: 120)
+        let serverURL = URL(string: "https://macbook.local:47800")!
+
+        let abandoned = await authority.issueTicket(serverURL: serverURL, certificateFingerprint: "AABBCC")
+        clock.now = clock.now.addingTimeInterval(121)
+        let replacement = await authority.issueTicket(serverURL: serverURL, certificateFingerprint: "AABBCC")
+
+        // A retained expired code would still be found and reported as expired.
+        await #expect(throws: PairingError.invalidCode) {
+            try await authority.pair(PairingRequest(code: abandoned.code, deviceName: "Late iPhone"))
+        }
+        _ = try await authority.pair(PairingRequest(code: replacement.code, deviceName: "Maya’s iPhone"))
+    }
+
     @Test func certificateFingerprintComparisonRejectsAnotherCertificate() {
         let certificate = Data("mac certificate".utf8)
         let expected = CertificateFingerprint.sha256(of: certificate)

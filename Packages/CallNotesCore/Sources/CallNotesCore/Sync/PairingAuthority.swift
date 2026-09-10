@@ -128,6 +128,7 @@ public actor PairingAuthority {
     }
 
     public func issueTicket(serverURL: URL, certificateFingerprint: String) -> PairingTicket {
+        pruneExpiredCodes()
         let expiration = now().addingTimeInterval(codeLifetime)
         let code = Self.makeCode()
         pendingCodes[code] = PendingCode(code: code, expiresAt: expiration)
@@ -185,6 +186,11 @@ public actor PairingAuthority {
     private func pruneFailedAttempts() {
         let cutoff = now().addingTimeInterval(-attemptWindow)
         failedAttemptDates.removeAll { $0 < cutoff }
+    }
+
+    private func pruneExpiredCodes() {
+        let cutoff = now()
+        pendingCodes = pendingCodes.filter { $0.value.expiresAt >= cutoff }
     }
 
     private func persist() {

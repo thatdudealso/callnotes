@@ -65,10 +65,8 @@ public struct ImportPipeline: Sendable {
             return storedURL
         }()
         let hash = try await duplicates.fingerprint(of: hashSource)
-        if await duplicates.contains(hash), existingCall == nil {
-            if !alreadyTranscribed {
-                try? FileManager.default.removeItem(at: storedURL)
-            }
+        if await duplicates.contains(hash), !alreadyTranscribed {
+            try? FileManager.default.removeItem(at: storedURL)
             progress.stage = .duplicate
             progress.fractionComplete = 1
             emit(progress)
@@ -127,9 +125,10 @@ public struct ImportPipeline: Sendable {
             )
         }
         call = processed.call
-        // Claim the bytes as soon as a transcript exists so a second inbox drop
-        // of the same recording is rejected even if notes later fail. A retry of
-        // this same callID is allowed above because `existingCall` is set.
+        // Claim the bytes as soon as a transcript exists so a second drop of the
+        // same recording is rejected even if notes later fail. Only a callID
+        // that already owns segments is exempt above; a phone upload arrives
+        // with its Call row already written, so its first attempt is checked.
         _ = await duplicates.register(hash)
 
         if let notes {

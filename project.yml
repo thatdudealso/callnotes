@@ -138,6 +138,7 @@ targets:
         CFBundleDisplayName: CallNotes
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CallNotesKeychainAccessGroup: $(AppIdentifierPrefix)com.thatdudealso.callnotes.shared
         NSExtension:
           NSExtensionPointIdentifier: com.apple.share-services
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
@@ -148,7 +149,6 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.thatdudealso.callnotes.ios.ShareExtension
         MARKETING_VERSION: 0.1.0
-        INFOPLIST_KEY_CallNotesKeychainAccessGroup: $(AppIdentifierPrefix)com.thatdudealso.callnotes.shared
         CODE_SIGN_ENTITLEMENTS: CallNotesIOS/ShareExtension/CallNotesShareExtension.entitlements
 
 schemes:

@@ -281,9 +281,9 @@ private final class ExtensionUploadScheduler: SessionUploadTaskStarting, @unchec
         UserDefaults(suiteName: "group.com.thatdudealso.callnotes")?.removeObject(forKey: configurationKey)
     }
 
-    /// Both targets declare exactly one `keychain-access-groups` entry, so the
-    /// keychain resolves an unqualified query to that shared group in the app
-    /// and in this extension alike.
+    /// `PairingKeychain.itemQuery` names the shared access group explicitly,
+    /// reading it from `CallNotesKeychainAccessGroup` in this extension's
+    /// Info.plist, so it resolves the same item the app wrote.
     private static func token(for deviceID: UUID) -> String? {
         guard var query = PairingKeychain.itemQuery(account: deviceID.uuidString) else { return nil }
         query[kSecReturnData] = true
