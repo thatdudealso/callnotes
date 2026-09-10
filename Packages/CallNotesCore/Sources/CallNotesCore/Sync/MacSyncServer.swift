@@ -48,9 +48,21 @@ public actor MacSyncServer {
         await pairing.pairedDevices()
     }
 
+    public func recoverStagedUploads() async {
+        guard onAccepted != nil else { return }
+        let calls = (try? await store.fetchCalls()) ?? []
+        for call in calls where !isProcessed(call) {
+            guard let audioURL = stagedAudioURL(for: call.id) else { continue }
+            let metadata = CallUploadMetadata.loadSidecar(nextTo: audioURL)
+                ?? CallUploadMetadata(source: call.source, startedAt: call.startedAt, counterpartyName: call.counterpartyName)
+            launchProcessing(uploadID: call.id, audioURL: audioURL, metadata: metadata)
+        }
+    }
+
     /// Runs until the containing app cancels the task. The app owns the task
     /// lifetime so it can hold a ProcessInfo activity while serving phones.
     public func run(host: String, identity: MacTLSIdentity) async throws {
+        await recoverStagedUploads()
         let router = Router()
         let pairing = self.pairing
         router.get("health") { _, _ in
