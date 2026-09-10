@@ -168,7 +168,10 @@ import Testing
         #expect(await reopened.pending(now: .distantFuture).map(\.id) == [job.id])
     }
 
-    @Test func acceptedUploadResponseKeepsTheRecordingQueued() async throws {
+    /// 202 is the Mac resuming an upload it already holds, so the phone must
+    /// release its copy instead of re-sending the whole recording on every
+    /// launch until the Mac finally answers 200.
+    @Test func resumedUploadResponseReleasesTheRecording() async throws {
         let harness = try RelaunchHarness()
         defer { harness.tearDown() }
         let job = try await harness.enqueueRecording()
@@ -176,7 +179,20 @@ import Testing
         await harness.coordinator.taskCompleted(uploadID: job.id, error: nil, statusCode: 202)
 
         let reopened = try PendingUploadInbox(directory: harness.inboxDirectory)
-        #expect(await reopened.pending(now: .distantFuture).map(\.id) == [job.id])
+        #expect(await reopened.pending(now: .distantFuture).isEmpty)
+    }
+
+    /// 409 is the Mac accepting this same upload concurrently. The job stays
+    /// exactly as it was: still queued, and not pushed behind a retry backoff.
+    @Test func conflictResponseLeavesTheUploadQueuedWithoutBackoff() async throws {
+        let harness = try RelaunchHarness()
+        defer { harness.tearDown() }
+        let job = try await harness.enqueueRecording()
+
+        await harness.coordinator.taskCompleted(uploadID: job.id, error: nil, statusCode: 409)
+
+        let reopened = try PendingUploadInbox(directory: harness.inboxDirectory)
+        #expect(await reopened.pending().map(\.id) == [job.id])
     }
 
     @Test func concurrentInboxChangesPreserveTheNewUpload() async throws {
@@ -227,13 +243,26 @@ import Testing
     /// The app and the Share Extension must derive one access group, and a
     /// keychain refusal has to name it instead of reading as a file error.
     @Test func pairingKeychainNamesItsSharedAccessGroupWhenAnOperationFails() {
-        #expect(PairingKeychain.accessGroup == SyncConstants.appGroupIdentifier)
         #expect(PairingKeychain.itemQuery(account: "device")[kSecAttrAccessGroup] as? String == PairingKeychain.accessGroup)
         #expect(PairingKeychain.serviceQuery()[kSecAttrAccessGroup] as? String == PairingKeychain.accessGroup)
 
         let message = PairingKeychain.failure(errSecMissingEntitlement).localizedDescription
-        #expect(message.contains(SyncConstants.appGroupIdentifier))
+        #expect(message.contains(PairingKeychain.accessGroup))
         #expect(message.contains("\(errSecMissingEntitlement)"))
+    }
+
+    /// `keychain-access-groups` is entitled as `$(AppIdentifierPrefix)group...`,
+    /// so the group the app requests has to carry the same team prefix the
+    /// signer applied - taken from the group the keychain hands this process.
+    @Test func sharedAccessGroupCarriesTheSignedTeamPrefix() {
+        let shared = SyncConstants.appGroupIdentifier
+
+        #expect(PairingKeychain.sharedAccessGroup(defaultAccessGroup: "A1B2C3D4E5.\(shared)") == "A1B2C3D4E5.\(shared)")
+        #expect(PairingKeychain.sharedAccessGroup(defaultAccessGroup: "A1B2C3D4E5.com.thatdudealso.callnotes.ios") == "A1B2C3D4E5.\(shared)")
+        #expect(PairingKeychain.sharedAccessGroup(defaultAccessGroup: "A1B2C3D4E5.com.thatdudealso.callnotes.ios.ShareExtension") == "A1B2C3D4E5.\(shared)")
+        #expect(PairingKeychain.sharedAccessGroup(defaultAccessGroup: shared) == shared)
+        #expect(PairingKeychain.sharedAccessGroup(defaultAccessGroup: nil) == shared)
+        #expect(PairingKeychain.sharedAccessGroup(defaultAccessGroup: "") == shared)
     }
 
     @Test func onlyFinishedUploadOutcomesReturnCompletionStatuses() {

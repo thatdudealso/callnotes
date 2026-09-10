@@ -71,10 +71,18 @@ public actor SessionUploadCoordinator {
         completionHandlers.store(completionHandler, for: identifier)
     }
 
+    /// 200 stored, 201 created, and 202 resumed all mean the Mac owns the
+    /// recording and is finishing it locally, so the phone copy is done. 409 is
+    /// the Mac accepting the same upload right now: keep the job untouched
+    /// rather than backing it off behind a retry it does not need.
     public func taskCompleted(uploadID: UUID, error: Error?, statusCode: Int? = nil) async {
-        let succeeded = error == nil && (statusCode == 200 || statusCode == 201)
+        let succeeded = error == nil && (statusCode == 200 || statusCode == 201 || statusCode == 202)
         if succeeded {
             try? await inbox.markCompleted(uploadID)
+            await starter.discardRequestBody(for: uploadID)
+            return
+        }
+        if statusCode == 409 {
             await starter.discardRequestBody(for: uploadID)
             return
         }

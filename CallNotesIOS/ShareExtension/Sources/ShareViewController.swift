@@ -14,6 +14,7 @@ final class ShareViewController: UIViewController {
     private var queuedJob: PendingUpload?
     private var didDisappear = false
     private var isSending = false
+    private let sendButton = UIButton(type: .system)
     private var sharedAudioLease: SharedAudioStaging.Lease?
 
     override func viewDidLoad() {
@@ -68,7 +69,7 @@ final class ShareViewController: UIViewController {
         dateRow.axis = .horizontal
         dateRow.alignment = .firstBaseline
         dateRow.spacing = 12
-        let send = UIButton(type: .system)
+        let send = sendButton
         send.configuration = .filled()
         send.configuration?.title = "Send to Mac"
         send.configuration?.image = UIImage(systemName: "arrow.up.circle.fill")
@@ -123,13 +124,16 @@ final class ShareViewController: UIViewController {
     /// pairing is resolved before anything is copied and a second tap restarts
     /// the job the first tap already enqueued.
     @objc private func sendToMac() {
+        guard !isSending else { return }
         guard let sharedAudioURL else { showError("This share item is not an audio file."); return }
         let counterpartyName = nameField.text
         let startedAt = datePicker.date
         isSending = true
+        sendButton.isEnabled = false
         Task {
             defer {
                 self.isSending = false
+                self.sendButton.isEnabled = true
                 if self.didDisappear { self.discardUnsentStaging() }
             }
             do {

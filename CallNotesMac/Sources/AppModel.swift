@@ -274,14 +274,11 @@ final class AppModel {
         }
     }
 
-    func processPhoneUpload(callID: UUID, audioURL: URL, metadata: CallUploadMetadata) async throws {
-        guard isStoreInitialized else { return }
-        if try await resumeNotes(callID: callID, audioURL: audioURL) { return }
-        var job = ImportJob(fileName: audioURL.lastPathComponent, sourceURL: audioURL, stage: .settling, callID: callID)
-        upsertImportJob(job)
+    /// The one owner of which engine an import runs on. Both the inbox and the
+    /// phone-upload path go through here so the rule cannot drift between them.
+    private func makeImportPipeline() async -> (ImportPipeline, STTProviderID) {
         let storedDefault = UserDefaults.standard.string(forKey: "default_engine")
         let configuredDefault: STTProviderID? = storedDefault == "meta" ? .metaMuse : .appleSpeech
-        let duplicates = importDuplicates ?? InboxDuplicateIndex()
         var meta: (any MetaFileTranscribing)?
         if EngineSelection.resolve(override: nil, configuredDefault: configuredDefault) == .metaMuse {
             do {
@@ -297,23 +294,31 @@ final class AppModel {
         )
         if engine != .metaMuse { meta = nil }
         let speech: any PCMTranscriber = engine == .fluidParakeet ? FluidParakeetProvider() : self.speech
-        let spine = FileTranscriptionSpine(
-            speech: speech,
-            diarizer: FluidDiarizer(),
-            store: store,
-            meta: meta
-        )
         let pipeline = ImportPipeline(
             store: store,
-            spine: spine,
+            spine: FileTranscriptionSpine(
+                speech: speech,
+                diarizer: FluidDiarizer(),
+                store: store,
+                meta: meta
+            ),
             notes: notesSpine,
-            duplicates: duplicates,
+            duplicates: importDuplicates ?? InboxDuplicateIndex(),
             onProgress: { [weak self] update in
                 Task { @MainActor in
                     self?.upsertImportJob(update)
                 }
             }
         )
+        return (pipeline, engine)
+    }
+
+    func processPhoneUpload(callID: UUID, audioURL: URL, metadata: CallUploadMetadata) async throws {
+        guard isStoreInitialized else { return }
+        if try await resumeNotes(callID: callID, audioURL: audioURL) { return }
+        var job = ImportJob(fileName: audioURL.lastPathComponent, sourceURL: audioURL, stage: .settling, callID: callID)
+        upsertImportJob(job)
+        let (pipeline, engine) = await makeImportPipeline()
         do {
             let processed = try await pipeline.`import`(
                 audioURL,
@@ -843,41 +848,7 @@ final class AppModel {
         guard isStoreInitialized else { return }
         var job = ImportJob(fileName: url.lastPathComponent, sourceURL: url, stage: .settling)
         upsertImportJob(job)
-        let storedDefault = UserDefaults.standard.string(forKey: "default_engine")
-        let configuredDefault: STTProviderID? = storedDefault == "meta" ? .metaMuse : .appleSpeech
-        let duplicates = importDuplicates ?? InboxDuplicateIndex()
-        var meta: (any MetaFileTranscribing)?
-        if EngineSelection.resolve(override: nil, configuredDefault: configuredDefault) == .metaMuse {
-            do {
-                meta = MetaFileProvider(configuration: try metaConfiguration())
-            } catch {
-                statusMessage = "Meta is not configured. Importing with local transcription."
-            }
-        }
-        let engine = EngineSelection.resolveImport(
-            configuredDefault: configuredDefault,
-            metaIsConfigured: meta != nil,
-            parakeetIsUsable: await FluidParakeetProvider().healthCheck().isUsable
-        )
-        if engine != .metaMuse { meta = nil }
-        let speech: any PCMTranscriber = engine == .fluidParakeet ? FluidParakeetProvider() : self.speech
-        let spine = FileTranscriptionSpine(
-            speech: speech,
-            diarizer: FluidDiarizer(),
-            store: store,
-            meta: meta
-        )
-        let pipeline = ImportPipeline(
-            store: store,
-            spine: spine,
-            notes: notesSpine,
-            duplicates: duplicates,
-            onProgress: { [weak self] update in
-                Task { @MainActor in
-                    self?.upsertImportJob(update)
-                }
-            }
-        )
+        let (pipeline, engine) = await makeImportPipeline()
         do {
             let processed = try await pipeline.`import`(url, engine: engine, source: source)
             job.callID = processed.call.id

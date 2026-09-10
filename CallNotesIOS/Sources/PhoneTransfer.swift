@@ -64,7 +64,7 @@ enum PhonePairingStore {
 
     static func save(_ configuration: PhonePairingConfiguration, token: String) throws {
         var query = PairingKeychain.itemQuery(account: configuration.deviceID.uuidString)
-        SecItemDelete(query as CFDictionary)
+        SecItemDelete(PairingKeychain.serviceQuery() as CFDictionary)
         query[kSecValueData] = Data(token.utf8)
         query[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         let status = SecItemAdd(query as CFDictionary, nil)
