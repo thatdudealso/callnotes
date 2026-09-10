@@ -61,9 +61,53 @@ import Testing
         body.append(audio)
         body.append(Data("\r\n--\(boundary)--\r\n".utf8))
 
-        let parsed = try #require(MultipartCallUpload.parse(body, boundary: boundary))
+        let parsedResult = try MultipartCallUpload.parse(body, boundary: boundary)
+        let parsed = try #require(parsedResult)
         #expect(parsed.audio == audio)
         #expect(parsed.metadata == metadata)
+    }
+
+    @Test func streamedMultipartUploadPreservesAudioWithoutBufferingIt() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-streamed-upload-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let boundary = "CallNotes-stream"
+        let metadata = CallUploadMetadata(source: .iphoneRecording, counterpartyName: "Priya")
+        let audio = Data(repeating: 0x7F, count: 128 * 1024) + Data([0x0D, 0x0A])
+        let request = root.appendingPathComponent("request.multipart")
+        var body = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n".utf8)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        body.append(try encoder.encode(metadata))
+        body.append(Data("\r\n--\(boundary)\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"recording.m4a\"\r\n\r\n".utf8))
+        body.append(audio)
+        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+        try body.write(to: request)
+
+        let uploadResult = try MultipartCallUpload.parseFile(request, boundary: boundary, directory: root, uploadID: UUID())
+        let upload = try #require(uploadResult)
+        #expect(try Data(contentsOf: upload.audioURL) == audio)
+        #expect(upload.metadata == metadata)
+    }
+
+    @Test func concurrentUploadAcceptanceRunsOneImport() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-upload-reservation-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MemoryStore()
+        let counter = UploadCounter()
+        let server = MacSyncServer(store: store, receivedUploadsDirectory: root, onAccepted: { _, _, _ in
+            await counter.record()
+        })
+        let uploadID = UUID()
+        let metadata = CallUploadMetadata(source: .iphoneRecording)
+        async let first = server.accept(uploadID: uploadID, metadata: metadata, audio: Data("first".utf8), fileExtension: "m4a")
+        async let second = server.accept(uploadID: uploadID, metadata: metadata, audio: Data("second".utf8), fileExtension: "m4a")
+        let outcomes = try await [first, second]
+        #expect(outcomes.filter { $0 == .created }.count == 1)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await counter.count == 1)
     }
 
     @Test func reuploadingTheSameRecordingKeepsOneCallAndItsProgress() async throws {
@@ -161,4 +205,9 @@ import Testing
         #expect(processed.call.startedAt == startedAt)
     }
     #endif
+}
+
+private actor UploadCounter {
+    private(set) var count = 0
+    func record() { count += 1 }
 }

@@ -15,6 +15,7 @@ public actor MacSyncServer {
     private let store: any CallStore
     private let receivedUploadsDirectory: URL
     private let onAccepted: (@Sendable (UUID, URL, CallUploadMetadata) async -> Void)?
+    private var acceptingUploadIDs: Set<UUID> = []
 
     public init(
         pairing: PairingAuthority = PairingAuthority(),
@@ -69,17 +70,24 @@ public actor MacSyncServer {
             guard let boundary = contentType.split(separator: "boundary=").last.map(String.init), contentType.contains("multipart/form-data") else {
                 throw HTTPError(.badRequest, message: "Expected multipart audio upload.")
             }
-            let buffer = try await request.body.collect(upTo: .max)
-            guard let body = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes),
-                  let upload = try MultipartCallUpload.parse(body, boundary: boundary)
-            else { throw HTTPError(.badRequest, message: "Malformed audio upload.") }
-            let outcome = try await self.accept(
-                uploadID: uploadID,
-                metadata: upload.metadata,
-                audio: upload.audio,
-                fileExtension: upload.fileExtension
-            )
-            return Response(status: outcome == .created ? .created : .ok)
+            guard await self.reserve(uploadID) else { return Response(status: .ok) }
+            do {
+                try FileManager.default.createDirectory(at: self.receivedUploadsDirectory, withIntermediateDirectories: true)
+                let requestURL = self.receivedUploadsDirectory.appendingPathComponent("\(uploadID.uuidString).request")
+                defer { try? FileManager.default.removeItem(at: requestURL) }
+                try await MultipartCallUpload.write(request.body, to: requestURL)
+                guard let upload = try MultipartCallUpload.parseFile(
+                    requestURL,
+                    boundary: boundary,
+                    directory: self.receivedUploadsDirectory,
+                    uploadID: uploadID
+                ) else { throw HTTPError(.badRequest, message: "Malformed audio upload.") }
+                let outcome = try await self.acceptReserved(uploadID: uploadID, metadata: upload.metadata, audioURL: upload.audioURL)
+                return Response(status: outcome == .created ? .created : .ok)
+            } catch {
+                await self.release(uploadID)
+                throw error
+            }
         }
         let certificate = try NIOSSLCertificate(bytes: Array(identity.certificateDER), format: .der)
         let key = try NIOSSLPrivateKey(bytes: Array(identity.privateKeyPEM.utf8), format: .pem)
@@ -104,10 +112,25 @@ public actor MacSyncServer {
     /// transfer it could not acknowledge never produces a second call and never
     /// overwrites an already processed one.
     func accept(uploadID: UUID, metadata: CallUploadMetadata, audio: Data, fileExtension: String) async throws -> UploadOutcome {
+        guard reserve(uploadID) else { return .alreadyStored }
+        do {
+            try FileManager.default.createDirectory(at: receivedUploadsDirectory, withIntermediateDirectories: true)
+            let audioURL = receivedUploadsDirectory.appendingPathComponent("\(uploadID.uuidString).\(fileExtension)")
+            try audio.write(to: audioURL, options: .atomic)
+            return try await acceptReserved(uploadID: uploadID, metadata: metadata, audioURL: audioURL)
+        } catch {
+            release(uploadID)
+            throw error
+        }
+    }
+
+    private func acceptReserved(uploadID: UUID, metadata: CallUploadMetadata, audioURL: URL) async throws -> UploadOutcome {
+        defer { acceptingUploadIDs.remove(uploadID) }
         if try await store.fetchCall(id: uploadID) != nil { return .alreadyStored }
-        try FileManager.default.createDirectory(at: receivedUploadsDirectory, withIntermediateDirectories: true)
-        let audioURL = receivedUploadsDirectory.appendingPathComponent("\(uploadID.uuidString).\(fileExtension)")
-        try audio.write(to: audioURL, options: .atomic)
+        return try await storeAccepted(uploadID: uploadID, metadata: metadata, audioURL: audioURL)
+    }
+
+    private func storeAccepted(uploadID: UUID, metadata: CallUploadMetadata, audioURL: URL) async throws -> UploadOutcome {
         try metadata.writeSidecar(nextTo: audioURL)
         let call = Call(
             id: uploadID,
@@ -123,6 +146,14 @@ public actor MacSyncServer {
             Task { await onAccepted(uploadID, audioURL, metadata) }
         }
         return .created
+    }
+
+    private func reserve(_ uploadID: UUID) -> Bool {
+        acceptingUploadIDs.insert(uploadID).inserted
+    }
+
+    private func release(_ uploadID: UUID) {
+        acceptingUploadIDs.remove(uploadID)
     }
 
     private static func authorizedDevice(for request: Request, pairing: PairingAuthority) async throws -> PairedDevice {
@@ -164,6 +195,45 @@ public actor MacSyncServer {
 
 enum MultipartCallUpload {
     struct Upload { var metadata: CallUploadMetadata; var audio: Data; var fileExtension: String }
+    struct StagedUpload { var metadata: CallUploadMetadata; var audioURL: URL }
+
+    static func write(_ body: RequestBody, to url: URL) async throws {
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        let output = try FileHandle(forWritingTo: url)
+        defer { try? output.close() }
+        for try await buffer in body {
+            guard let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes) else { continue }
+            try output.write(contentsOf: data)
+        }
+    }
+
+    static func parseFile(_ url: URL, boundary: String, directory: URL, uploadID: UUID) throws -> StagedUpload? {
+        let headerEnd = Data("\r\n\r\n".utf8)
+        let partDelimiter = Data("\r\n--\(boundary)".utf8)
+        var reader = try MultipartFileReader(url: url)
+        defer { try? reader.close() }
+        guard let metadataHeaders = try reader.readUntil(headerEnd),
+              String(decoding: metadataHeaders, as: UTF8.self).contains("name=\"metadata\""),
+              let metadataData = try reader.readUntil(partDelimiter)
+        else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let metadata = try decoder.decode(CallUploadMetadata.self, from: metadataData)
+        guard let audioHeaders = try reader.readUntil(headerEnd) else { return nil }
+        let headers = String(decoding: audioHeaders, as: UTF8.self)
+        guard headers.contains("name=\"audio\"") else { return nil }
+        let filename = headers.components(separatedBy: "filename=\"").dropFirst().first?.split(separator: "\"").first
+        let fileExtension = filename.map { URL(fileURLWithPath: String($0)).pathExtension.lowercased() }.flatMap { $0.isEmpty ? nil : $0 } ?? "m4a"
+        let audioURL = directory.appendingPathComponent("\(uploadID.uuidString).\(fileExtension)")
+        FileManager.default.createFile(atPath: audioURL.path, contents: nil)
+        let output = try FileHandle(forWritingTo: audioURL)
+        defer { try? output.close() }
+        guard try reader.copyUntil(Data("\r\n--\(boundary)--".utf8), to: output) else {
+            try? FileManager.default.removeItem(at: audioURL)
+            return nil
+        }
+        return StagedUpload(metadata: metadata, audioURL: audioURL)
+    }
     static func parse(_ body: Data, boundary: String) throws -> Upload? {
         let delimiter = Data("--\(boundary)".utf8)
         let headerEnd = Data("\r\n\r\n".utf8)
@@ -185,6 +255,49 @@ enum MultipartCallUpload {
         }
         guard let metadata, let audio, !audio.isEmpty else { return nil }
         return Upload(metadata: metadata, audio: audio, fileExtension: fileExtension.isEmpty ? "m4a" : fileExtension)
+    }
+}
+
+private struct MultipartFileReader {
+    private let handle: FileHandle
+    private var buffer = Data()
+
+    init(url: URL) throws { handle = try FileHandle(forReadingFrom: url) }
+
+    mutating func close() throws { try handle.close() }
+
+    mutating func readUntil(_ delimiter: Data) throws -> Data? {
+        while true {
+            if let range = buffer.range(of: delimiter) {
+                let result = Data(buffer[..<range.lowerBound])
+                buffer.removeSubrange(..<range.upperBound)
+                return result
+            }
+            guard try fill(), buffer.count <= 1_048_576 else { return nil }
+        }
+    }
+
+    mutating func copyUntil(_ delimiter: Data, to output: FileHandle) throws -> Bool {
+        while true {
+            if let range = buffer.range(of: delimiter) {
+                try output.write(contentsOf: buffer[..<range.lowerBound])
+                buffer.removeSubrange(..<range.upperBound)
+                return true
+            }
+            let retained = max(0, delimiter.count - 1)
+            if buffer.count > retained {
+                let count = buffer.count - retained
+                try output.write(contentsOf: buffer.prefix(count))
+                buffer.removeFirst(count)
+            }
+            guard try fill() else { return false }
+        }
+    }
+
+    private mutating func fill() throws -> Bool {
+        guard let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty else { return false }
+        buffer.append(chunk)
+        return true
     }
 }
 

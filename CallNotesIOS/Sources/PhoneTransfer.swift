@@ -76,6 +76,13 @@ enum PhonePairingStore {
         return (configuration, token)
     }
 
+    static func loadConfiguration() -> PhonePairingConfiguration? {
+        guard let data = UserDefaults(suiteName: PhoneSharedContainer.appGroupIdentifier)?.data(forKey: defaultsKey),
+              let configuration = try? JSONDecoder().decode(PhonePairingConfiguration.self, from: data)
+        else { return nil }
+        return configuration
+    }
+
     static func remove() {
         guard let (configuration, _)= load(), let accessGroup = try? sharedAccessGroup() else { return }
         let query: [CFString: Any] = [
@@ -101,9 +108,18 @@ enum PhonePairingCoordinator {
     static func pair(ticketPayload: String, deviceName: String) async throws -> PhonePairingConfiguration {
         let ticket = try PairingTicket.fromQRPayload(ticketPayload)
         guard ticket.expiresAt >= Date() else { throw PairingError.expiredCode }
+        do {
+            return try await pair(ticket: ticket, serverURL: ticket.serverURL, deviceName: deviceName)
+        } catch {
+            let discovered = try await PhoneBonjourResolver.resolve()
+            return try await pair(ticket: ticket, serverURL: discovered, deviceName: deviceName)
+        }
+    }
+
+    private static func pair(ticket: PairingTicket, serverURL: URL, deviceName: String) async throws -> PhonePairingConfiguration {
         let delegate = PinnedURLSessionDelegate(fingerprint: ticket.certificateFingerprint)
         let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
-        var request = URLRequest(url: ticket.serverURL.appendingPathComponent("pair"))
+        var request = URLRequest(url: serverURL.appendingPathComponent("pair"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(PairingRequest(code: ticket.code, deviceName: deviceName))
@@ -114,7 +130,7 @@ enum PhonePairingCoordinator {
         }
         let paired = try JSONDecoder().decode(SyncDTO.PairResponse.self, from: data)
         let configuration = PhonePairingConfiguration(
-            serverURL: ticket.serverURL,
+            serverURL: serverURL,
             deviceID: paired.deviceID,
             certificateFingerprint: ticket.certificateFingerprint
         )
@@ -126,6 +142,16 @@ enum PhonePairingCoordinator {
 enum PhoneMirrorCoordinator {
     static func fetch() async throws -> SyncDTO.Mirror {
         guard let (connection, token) = PhonePairingStore.load() else { throw URLError(.userAuthenticationRequired) }
+        do {
+            return try await fetch(connection: connection, token: token)
+        } catch {
+            var discovered = connection
+            discovered.serverURL = try await PhoneBonjourResolver.resolve()
+            return try await fetch(connection: discovered, token: token)
+        }
+    }
+
+    private static func fetch(connection: PhonePairingConfiguration, token: String) async throws -> SyncDTO.Mirror {
         let delegate = PinnedURLSessionDelegate(fingerprint: connection.certificateFingerprint)
         let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
         var request = URLRequest(url: connection.serverURL.appendingPathComponent("mirror"))
@@ -133,6 +159,60 @@ enum PhoneMirrorCoordinator {
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { throw URLError(.cannotLoadFromNetwork) }
         return try JSONDecoder().decode(SyncDTO.Mirror.self, from: data)
+    }
+}
+
+private final class PhoneBonjourResolver: NSObject, NetServiceBrowserDelegate, NetServiceDelegate {
+    private var continuation: CheckedContinuation<URL, Error>?
+    private var browser: NetServiceBrowser?
+    private var service: NetService?
+
+    static func resolve() async throws -> URL {
+        try await PhoneBonjourResolver().resolveService()
+    }
+
+    private func resolveService() async throws -> URL {
+        try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+            let browser = NetServiceBrowser()
+            browser.delegate = self
+            self.browser = browser
+            browser.searchForServices(ofType: "\(SyncConstants.bonjourServiceType).", inDomain: "local.")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                self?.finish(.failure(URLError(.cannotFindHost)))
+            }
+        }
+    }
+
+    func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
+        guard self.service == nil else { return }
+        self.service = service
+        service.delegate = self
+        service.resolve(withTimeout: 5)
+    }
+
+    func netServiceDidResolveAddress(_ sender: NetService) {
+        guard let host = sender.hostName?.trimmingCharacters(in: CharacterSet(charactersIn: ".")), sender.port > 0,
+              let url = URL(string: "https://\(host):\(sender.port)")
+        else {
+            finish(.failure(URLError(.cannotFindHost)))
+            return
+        }
+        finish(.success(url))
+    }
+
+    func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
+        finish(.failure(URLError(.cannotFindHost)))
+    }
+
+    private func finish(_ result: Result<URL, Error>) {
+        browser?.stop()
+        browser = nil
+        service?.stop()
+        service = nil
+        guard let continuation else { return }
+        self.continuation = nil
+        continuation.resume(with: result)
     }
 }
 
@@ -183,6 +263,21 @@ final class BackgroundUploadCoordinator: NSObject, @unchecked Sendable, URLSessi
         configuration.waitsForConnectivity = true
         return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
     }()
+
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let configuration = PhonePairingStore.loadConfiguration()
+        else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        PinnedURLSessionDelegate(fingerprint: configuration.certificateFingerprint)
+            .urlSession(session, didReceive: challenge, completionHandler: completionHandler)
+    }
 
     func handleBackgroundEvents(for identifier: String, completionHandler: @escaping () -> Void) {
         backgroundCompletionHandlers[identifier] = completionHandler
