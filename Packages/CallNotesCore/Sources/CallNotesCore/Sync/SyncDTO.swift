@@ -69,4 +69,5 @@ public enum SyncDTO {
 public enum SyncConstants {
     public static let serverPort = 47_800
     public static let bonjourServiceType = "_callnotes._tcp"
+    public static let appGroupIdentifier = "group.com.thatdudealso.callnotes"
 }

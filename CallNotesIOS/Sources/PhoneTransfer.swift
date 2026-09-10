@@ -5,7 +5,7 @@ import Security
 import UIKit
 
 enum PhoneSharedContainer {
-    static let appGroupIdentifier = "group.com.thatdudealso.callnotes"
+    static let appGroupIdentifier = SyncConstants.appGroupIdentifier
 
     static func directory() throws -> URL {
         guard let url = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) else {
@@ -63,13 +63,12 @@ enum PhonePairingStore {
     static let pairingInvalidatedNotification = Notification.Name("CallNotesPhonePairingInvalidated")
 
     static func save(_ configuration: PhonePairingConfiguration, token: String) throws {
-        guard var query = PairingKeychain.itemQuery(account: configuration.deviceID.uuidString) else {
-            throw CocoaError(.fileWriteUnknown)
-        }
+        var query = PairingKeychain.itemQuery(account: configuration.deviceID.uuidString)
         SecItemDelete(query as CFDictionary)
         query[kSecValueData] = Data(token.utf8)
         query[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        guard SecItemAdd(query as CFDictionary, nil) == errSecSuccess else { throw CocoaError(.fileWriteUnknown) }
+        let status = SecItemAdd(query as CFDictionary, nil)
+        guard status == errSecSuccess else { throw PairingKeychain.failure(status) }
         UserDefaults(suiteName: PhoneSharedContainer.appGroupIdentifier)?.set(try JSONEncoder().encode(configuration), forKey: defaultsKey)
     }
 
@@ -77,7 +76,7 @@ enum PhonePairingStore {
         guard let data = UserDefaults(suiteName: PhoneSharedContainer.appGroupIdentifier)?.data(forKey: defaultsKey),
               let configuration = try? JSONDecoder().decode(PhonePairingConfiguration.self, from: data)
         else { return nil }
-        guard var query = PairingKeychain.itemQuery(account: configuration.deviceID.uuidString) else { return nil }
+        var query = PairingKeychain.itemQuery(account: configuration.deviceID.uuidString)
         query[kSecReturnData] = true
         var result: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
@@ -101,9 +100,7 @@ enum PhonePairingStore {
     }
 
     static func remove() {
-        if let query = PairingKeychain.serviceQuery() {
-            SecItemDelete(query as CFDictionary)
-        }
+        SecItemDelete(PairingKeychain.serviceQuery() as CFDictionary)
         UserDefaults(suiteName: PhoneSharedContainer.appGroupIdentifier)?.removeObject(forKey: defaultsKey)
     }
 }

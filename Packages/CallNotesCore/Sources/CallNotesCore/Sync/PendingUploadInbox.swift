@@ -237,7 +237,6 @@ public enum SharedAudioStaging {
         public init(audioURL: URL) throws {
             self.audioURL = audioURL
             lockURL = audioURL.appendingPathExtension("lock")
-            FileManager.default.createFile(atPath: lockURL.path, contents: nil)
             descriptor = open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
             guard descriptor >= 0, flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
                 if descriptor >= 0 { close(descriptor) }
@@ -264,7 +263,8 @@ public enum SharedAudioStaging {
         let contents = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isRegularFileKey])) ?? []
         for audioURL in contents where audioURL.pathExtension != "lock" {
             let lockURL = audioURL.appendingPathExtension("lock")
-            FileManager.default.createFile(atPath: lockURL.path, contents: nil)
+            // Never recreate the lock file: replacing the inode would drop the
+            // `flock` a live staging copy is holding on the old one.
             let descriptor = open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
             guard descriptor >= 0 else { continue }
             if flock(descriptor, LOCK_EX | LOCK_NB) == 0 {

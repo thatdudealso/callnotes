@@ -13,6 +13,7 @@ final class ShareViewController: UIViewController {
     private var transfer: ExtensionUploadTransfer?
     private var queuedJob: PendingUpload?
     private var didDisappear = false
+    private var isSending = false
     private var sharedAudioLease: SharedAudioStaging.Lease?
 
     override func viewDidLoad() {
@@ -28,8 +29,14 @@ final class ShareViewController: UIViewController {
         super.viewDidDisappear(animated)
         didDisappear = true
         // Staging is consumed by enqueue on Send. Dismiss without Send must
-        // not leave a full-size copy in SharedAudio forever.
-        if queuedJob == nil, let sharedAudioURL {
+        // not leave a full-size copy in SharedAudio forever, but a Send that is
+        // still copying owns the file until it has queued or failed.
+        discardUnsentStaging()
+    }
+
+    private func discardUnsentStaging() {
+        guard !isSending, queuedJob == nil else { return }
+        if let sharedAudioURL {
             try? FileManager.default.removeItem(at: sharedAudioURL)
             self.sharedAudioURL = nil
         }
@@ -119,7 +126,12 @@ final class ShareViewController: UIViewController {
         guard let sharedAudioURL else { showError("This share item is not an audio file."); return }
         let counterpartyName = nameField.text
         let startedAt = datePicker.date
+        isSending = true
         Task {
+            defer {
+                self.isSending = false
+                if self.didDisappear { self.discardUnsentStaging() }
+            }
             do {
                 let transfer = try self.uploadTransfer()
                 try transfer.scheduler.requirePairing()
@@ -275,17 +287,15 @@ private final class ExtensionUploadScheduler: SessionUploadTaskStarting, @unchec
     }
 
     private static func removePairing() {
-        if let query = PairingKeychain.serviceQuery() {
-            SecItemDelete(query as CFDictionary)
-        }
+        SecItemDelete(PairingKeychain.serviceQuery() as CFDictionary)
         UserDefaults(suiteName: "group.com.thatdudealso.callnotes")?.removeObject(forKey: configurationKey)
     }
 
-    /// `PairingKeychain.itemQuery` names the shared access group explicitly,
-    /// reading it from `CallNotesKeychainAccessGroup` in this extension's
-    /// Info.plist, so it resolves the same item the app wrote.
+    /// `PairingKeychain.itemQuery` names the App Group as the access group, the
+    /// one value the app and this extension compute from the same constant, so
+    /// it resolves the item the app wrote.
     private static func token(for deviceID: UUID) -> String? {
-        guard var query = PairingKeychain.itemQuery(account: deviceID.uuidString) else { return nil }
+        var query = PairingKeychain.itemQuery(account: deviceID.uuidString)
         query[kSecReturnData] = true
         var result: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data else { return nil }

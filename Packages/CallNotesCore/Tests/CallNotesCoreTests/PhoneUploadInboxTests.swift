@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import Testing
 
 @testable import CallNotesCore
@@ -200,14 +201,39 @@ import Testing
         #expect(await reopened.pending(now: .distantFuture).count == 1)
     }
 
-    @Test func sharedAudioSweepRemovesOrphanedFiles() throws {
+    /// The app sweeps `SharedAudio` on every launch while the Share Extension
+    /// may still be copying into it, so the sweep must collect only the files
+    /// nobody holds a lease on.
+    @Test func sharedAudioSweepSparesLeasedFilesAndCollectsOrphans() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
         let orphan = directory.appendingPathComponent("orphan.m4a")
         try Data("orphan".utf8).write(to: orphan)
+        let leased = directory.appendingPathComponent("in-flight.m4a")
+        let lease = try SharedAudioStaging.Lease(audioURL: leased)
+        try Data("in flight".utf8).write(to: leased)
+
         SharedAudioStaging.sweepOrphans(in: directory)
         #expect(!FileManager.default.fileExists(atPath: orphan.path))
+        #expect(FileManager.default.fileExists(atPath: leased.path))
+
+        lease.release()
+        SharedAudioStaging.sweepOrphans(in: directory)
+        #expect(!FileManager.default.fileExists(atPath: leased.path))
+    }
+
+    /// The app and the Share Extension must derive one access group, and a
+    /// keychain refusal has to name it instead of reading as a file error.
+    @Test func pairingKeychainNamesItsSharedAccessGroupWhenAnOperationFails() {
+        #expect(PairingKeychain.accessGroup == SyncConstants.appGroupIdentifier)
+        #expect(PairingKeychain.itemQuery(account: "device")[kSecAttrAccessGroup] as? String == PairingKeychain.accessGroup)
+        #expect(PairingKeychain.serviceQuery()[kSecAttrAccessGroup] as? String == PairingKeychain.accessGroup)
+
+        let message = PairingKeychain.failure(errSecMissingEntitlement).localizedDescription
+        #expect(message.contains(SyncConstants.appGroupIdentifier))
+        #expect(message.contains("\(errSecMissingEntitlement)"))
     }
 
     @Test func onlyFinishedUploadOutcomesReturnCompletionStatuses() {

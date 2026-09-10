@@ -635,6 +635,64 @@ import Testing
         #expect(!requested.value.isEmpty)
     }
 
+    /// A phone upload reaches the pipeline with a Call row `MacSyncServer`
+    /// already wrote under a placeholder provider, so the engine the caller
+    /// resolved has to win before the spine picks its path.
+    @Test func phoneUploadHonorsTheSelectedEngineOverThePlaceholderOnItsCallRow() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-upload-engine-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("upload.wav")
+        try ImportFixtureWriter.writeWAV(to: file, seconds: 0.4)
+
+        let store = MemoryStore()
+        let uploadID = UUID()
+        try await store.upsertCall(
+            Call(
+                id: uploadID,
+                source: .iphoneRecording,
+                startedAt: Date(),
+                audioPath: file.path,
+                sttProvider: .appleSpeech,
+                status: .uploaded
+            )
+        )
+
+        let pipeline = ImportPipeline(
+            store: store,
+            spine: FileTranscriptionSpine(
+                speech: ScriptedPCMTranscriber(
+                    near: [RawSegment(start: 0, end: 1, text: "Local Apple transcript.", channel: .mixed)],
+                    far: []
+                ),
+                diarizer: ScriptedDiarizer(clusters: []),
+                store: store,
+                meta: SimulatedMetaFileProvider(
+                    segments: [
+                        RawSegment(start: 0, end: 1, text: "Cloud transcript of the upload.", speakerTag: "speaker_0", channel: .mixed)
+                    ],
+                    billedSeconds: 24
+                )
+            ),
+            duplicates: InboxDuplicateIndex(),
+            audioRoot: root.appendingPathComponent("audio", isDirectory: true)
+        )
+
+        let processed = try await pipeline.`import`(
+            file,
+            engine: .metaMuse,
+            source: .iphoneRecording,
+            job: ImportJob(fileName: file.lastPathComponent, sourceURL: file, callID: uploadID)
+        )
+
+        #expect(processed.call.id == uploadID)
+        #expect(processed.call.sttProvider == .metaMuse)
+        #expect(processed.call.metaBilledSec == 24)
+        #expect(processed.turns.map(\.text) == ["Cloud transcript of the upload."])
+        #expect(try await store.fetchCall(id: uploadID)?.sttProvider == .metaMuse)
+    }
+
     @Test func failedMetaImportPersistsAccruedBilling() async throws {
         let store = MemoryStore()
         let url = FileManager.default.temporaryDirectory

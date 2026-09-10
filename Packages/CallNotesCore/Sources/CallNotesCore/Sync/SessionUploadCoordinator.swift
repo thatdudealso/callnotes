@@ -202,7 +202,7 @@ private final class TransitionGate: @unchecked Sendable {
 public enum SharedUploadSession {
     public static let identifier = "com.thatdudealso.callnotes.share-upload"
 
-    public static func make(identifier: String, appGroupIdentifier: String = "group.com.thatdudealso.callnotes", delegate: SessionUploadDelegate?) -> URLSession {
+    public static func make(identifier: String, appGroupIdentifier: String = SyncConstants.appGroupIdentifier, delegate: SessionUploadDelegate?) -> URLSession {
         let configuration = URLSessionConfiguration.background(withIdentifier: identifier)
         configuration.sharedContainerIdentifier = appGroupIdentifier
         configuration.isDiscretionary = false

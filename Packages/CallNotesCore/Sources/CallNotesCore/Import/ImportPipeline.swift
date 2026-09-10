@@ -85,6 +85,7 @@ public struct ImportPipeline: Sendable {
         )
         if !alreadyTranscribed {
             call.audioPath = storedURL.path
+            call.sttProvider = engine
             call.status = .transcribing
             try await store.upsertCall(call)
         }
