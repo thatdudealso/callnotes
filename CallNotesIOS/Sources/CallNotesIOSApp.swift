@@ -390,6 +390,7 @@ struct PhoneSettingsView: View {
         guard recorder?.record() == true else {
             lease.release()
             recorder = nil
+            Self.deactivateSession()
             throw NSError(domain: "CallNotes.Recorder", code: 2, userInfo: [NSLocalizedDescriptionKey: "Could not start recording."])
         }
         self.lease = lease
@@ -401,12 +402,20 @@ struct PhoneSettingsView: View {
     /// dashboard periods key off this, so a 45-minute meeting must not land
     /// 45 minutes late.
     func stop() throws -> (url: URL, startedAt: Date) {
+        defer { Self.deactivateSession() }
         guard let recorder, let captureStartedAt else { throw CocoaError(.fileNoSuchFile) }
         recorder.stop()
         isRecording = false
         self.recorder = nil
         self.captureStartedAt = nil
         return (recorder.url, captureStartedAt)
+    }
+
+    /// `.record` does not mix, so holding the session after Stop keeps the route,
+    /// the microphone indicator, and the background-audio assertion, and whatever
+    /// the user was playing never resumes.
+    private static func deactivateSession() {
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     /// Held from `start` until the upload queue owns the bytes, so the launch

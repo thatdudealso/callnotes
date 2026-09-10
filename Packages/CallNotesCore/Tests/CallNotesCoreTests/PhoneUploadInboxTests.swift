@@ -750,6 +750,51 @@ import Testing
         #expect(try await store.fetchCalls().count == 1)
     }
 
+    /// Each stuck upload drives a whole transcription spine, so the launch sweep
+    /// must walk the backlog one at a time instead of fanning it out.
+    @Test func startupRecoveryProcessesStuckUploadsOneAtATime() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-recovery-serial-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let store = MemoryStore()
+        var uploadIDs: [UUID] = []
+        for _ in 0..<4 {
+            let uploadID = UUID()
+            uploadIDs.append(uploadID)
+            let audioURL = root.appendingPathComponent("\(uploadID.uuidString).m4a")
+            try Data("recording".utf8).write(to: audioURL)
+            try CallUploadMetadata(source: .iphoneRecording, startedAt: Date()).writeSidecar(nextTo: audioURL)
+            try await store.upsertCall(Call(
+                id: uploadID,
+                source: .iphoneRecording,
+                startedAt: Date(),
+                audioPath: audioURL.path,
+                sttProvider: .appleSpeech,
+                status: .transcribed
+            ))
+        }
+
+        let concurrency = ConcurrencyProbe()
+        let server = MacSyncServer(store: store, receivedUploadsDirectory: root, onAccepted: { callID, _, _ in
+            concurrency.enter()
+            defer { concurrency.leave() }
+            try await Task.sleep(for: .milliseconds(20))
+            guard var call = try await store.fetchCall(id: callID) else { throw ProcessingFailure() }
+            call.status = .notesReady
+            try await store.upsertCall(call)
+        })
+
+        await server.recoverStagedUploads()
+
+        #expect(concurrency.peak == 1)
+        #expect(concurrency.completed == uploadIDs.count)
+        for uploadID in uploadIDs {
+            #expect(try await store.fetchCall(id: uploadID)?.status == .notesReady)
+        }
+    }
+
     /// A call the Mac gave up on must not keep reading as work in progress on
     /// the phone, where the mirrored summary is the only visible status.
     @Test func mirrorDoesNotDescribeAGivenUpRecordingAsStillProcessing() async throws {
@@ -987,4 +1032,26 @@ private final class FakeMirrorStore: MirrorWriting {
 
 private final class ProbeAttempts: @unchecked Sendable {
     var count = 0
+}
+
+
+private final class ConcurrencyProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = 0
+    private(set) var peak = 0
+    private(set) var completed = 0
+
+    func enter() {
+        lock.withLock {
+            active += 1
+            peak = max(peak, active)
+        }
+    }
+
+    func leave() {
+        lock.withLock {
+            active -= 1
+            completed += 1
+        }
+    }
 }

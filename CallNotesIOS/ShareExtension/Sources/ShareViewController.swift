@@ -15,6 +15,7 @@ final class ShareViewController: UIViewController {
     private var isSending = false
     private let sendButton = UIButton(type: .system)
     private var cancelButton: UIBarButtonItem?
+    private var pendingErrorMessage: String?
     private var sharedAudioLease: SharedAudioStaging.Lease?
 
     override func viewDidLoad() {
@@ -25,6 +26,13 @@ final class ShareViewController: UIViewController {
         configureForm()
         sweepOrphanedSharedAudio()
         loadAudio()
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        guard let message = pendingErrorMessage else { return }
+        pendingErrorMessage = nil
+        showError(message)
     }
 
     override func viewDidDisappear(_ animated: Bool) {
@@ -122,6 +130,7 @@ final class ShareViewController: UIViewController {
         guard let item = extensionContext?.inputItems.first as? NSExtensionItem,
               let provider = item.attachments?.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.audio.identifier) })
         else {
+            sendButton.isEnabled = false
             showError("CallNotes can only send audio recordings. Share a recording from Notes, Voice Memos, Files, or Mail.")
             return
         }
@@ -240,7 +249,14 @@ final class ShareViewController: UIViewController {
         return lease
     }
 
+    /// `loadAudio` runs from `viewDidLoad`, before the view is in a window, where
+    /// `present` silently does nothing. Anything raised that early waits for
+    /// `viewDidAppear` instead of vanishing.
     private func showError(_ message: String) {
+        guard viewIfLoaded?.window != nil else {
+            pendingErrorMessage = message
+            return
+        }
         let alert = UIAlertController(title: "Couldn’t queue recording", message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "OK", style: .default))
         present(alert, animated: true)

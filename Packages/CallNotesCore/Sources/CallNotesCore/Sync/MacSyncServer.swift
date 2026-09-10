@@ -48,21 +48,28 @@ public actor MacSyncServer {
         await pairing.pairedDevices()
     }
 
+    /// One stuck upload at a time. Each one drives a whole `FileTranscriptionSpine`,
+    /// so fanning the backlog out would run N SpeechAnalyzer instances against the
+    /// same ANE and N deep-notes requests against the same 60s budget.
     public func recoverStagedUploads() async {
-        guard onAccepted != nil else { return }
+        guard let onAccepted else { return }
         let calls = (try? await store.fetchCalls()) ?? []
         for call in calls where !isProcessed(call) {
             guard let audioURL = stagedAudioURL(for: call.id) else { continue }
+            // The snapshot ages while earlier uploads transcribe, so re-read the
+            // call: an arriving POST may already have carried this one home.
+            guard let current = try? await store.fetchCall(id: call.id), !isProcessed(current) else { continue }
             let metadata = CallUploadMetadata.loadSidecar(nextTo: audioURL)
-                ?? CallUploadMetadata(source: call.source, startedAt: call.startedAt, counterpartyName: call.counterpartyName)
-            launchProcessing(uploadID: call.id, audioURL: audioURL, metadata: metadata)
+                ?? CallUploadMetadata(source: current.source, startedAt: current.startedAt, counterpartyName: current.counterpartyName)
+            guard processingUploadIDs.insert(call.id).inserted else { continue }
+            await process(uploadID: call.id, audioURL: audioURL, metadata: metadata, using: onAccepted)
         }
     }
 
     /// Runs until the containing app cancels the task. The app owns the task
     /// lifetime so it can hold a ProcessInfo activity while serving phones.
     public func run(host: String, identity: MacTLSIdentity) async throws {
-        await recoverStagedUploads()
+        Task { await self.recoverStagedUploads() }
         let router = Router()
         let pairing = self.pairing
         router.get("health") { _, _ in
