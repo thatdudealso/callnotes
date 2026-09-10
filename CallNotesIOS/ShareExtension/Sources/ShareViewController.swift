@@ -12,6 +12,7 @@ final class ShareViewController: UIViewController {
     private var sharedAudioURL: URL?
     private var transfer: ExtensionUploadTransfer?
     private var queuedJob: PendingUpload?
+    private var didDisappear = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -23,6 +24,7 @@ final class ShareViewController: UIViewController {
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
+        didDisappear = true
         // Staging is consumed by enqueue on Send. Dismiss without Send must
         // not leave a full-size copy in SharedAudio forever.
         if queuedJob == nil, let sharedAudioURL {
@@ -90,11 +92,15 @@ final class ShareViewController: UIViewController {
                 return
             }
             DispatchQueue.main.async {
-                self?.sharedAudioURL = stagedURL
+                guard let self, !self.didDisappear else {
+                    try? FileManager.default.removeItem(at: stagedURL)
+                    return
+                }
+                self.sharedAudioURL = stagedURL
                 let metadata = ExtensionRecordingTitleParser.parse(suggestedName ?? "")
-                self?.nameField.text = metadata?.counterpartyName
+                self.nameField.text = metadata?.counterpartyName
                 if let startedAt = metadata?.startedAt {
-                    self?.datePicker.date = startedAt
+                    self.datePicker.date = startedAt
                 }
             }
         }

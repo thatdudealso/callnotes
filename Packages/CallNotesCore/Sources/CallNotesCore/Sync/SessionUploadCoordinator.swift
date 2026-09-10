@@ -72,7 +72,7 @@ public actor SessionUploadCoordinator {
     }
 
     public func taskCompleted(uploadID: UUID, error: Error?, statusCode: Int? = nil) async {
-        let succeeded = error == nil && (statusCode.map { (200..<300).contains($0) } ?? true)
+        let succeeded = error == nil && (statusCode == 200 || statusCode == 201)
         if succeeded {
             try? await inbox.markCompleted(uploadID)
             await starter.discardRequestBody(for: uploadID)
@@ -104,36 +104,53 @@ public actor SessionUploadCoordinator {
 public final class SessionUploadDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let coordinator: SessionUploadCoordinator
     private let pinnedFingerprint: @Sendable () -> String?
+    private let statusCodeForTask: (URLSessionTask) -> Int?
     private let lock = NSLock()
-    private var transitions: [UUID: Task<Void, Never>] = [:]
+    private var transitions: [UUID: (id: UUID, task: Task<Void, Never>)] = [:]
 
-    public init(coordinator: SessionUploadCoordinator, pinnedFingerprint: @escaping @Sendable () -> String?) {
+    public init(
+        coordinator: SessionUploadCoordinator,
+        pinnedFingerprint: @escaping @Sendable () -> String?,
+        statusCodeForTask: @escaping (URLSessionTask) -> Int? = { ($0.response as? HTTPURLResponse)?.statusCode }
+    ) {
         self.coordinator = coordinator
         self.pinnedFingerprint = pinnedFingerprint
+        self.statusCodeForTask = statusCodeForTask
     }
 
     public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let uploadID = task.taskDescription.flatMap(UUID.init(uuidString:)) else { return }
-        let statusCode = (task.response as? HTTPURLResponse)?.statusCode
+        let statusCode = statusCodeForTask(task)
         let coordinator = self.coordinator
+        let transitionID = UUID()
+        let gate = TransitionGate()
         let transition = Task {
+            await gate.wait()
             await coordinator.taskCompleted(uploadID: uploadID, error: error, statusCode: statusCode)
-            self.lock.withLock { _ = self.transitions.removeValue(forKey: uploadID) }
+            self.removeTransition(uploadID, id: transitionID)
         }
-        lock.withLock { transitions[uploadID] = transition }
+        lock.withLock { transitions[uploadID] = (transitionID, transition) }
+        gate.open()
     }
 
     public func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
         let identifier = session.configuration.identifier ?? ""
         let pending = lock.withLock {
-            let snapshot = Array(transitions.values)
+            let snapshot = transitions.values.map(\.task)
             transitions.removeAll()
             return snapshot
         }
         let coordinator = self.coordinator
         Task {
             for transition in pending { await transition.value }
-            await coordinator.finishBackgroundEvents(identifier: identifier)
+            coordinator.finishBackgroundEvents(identifier: identifier)
+        }
+    }
+
+    private func removeTransition(_ uploadID: UUID, id: UUID) {
+        lock.withLock {
+            guard transitions[uploadID]?.id == id else { return }
+            transitions.removeValue(forKey: uploadID)
         }
     }
 
@@ -150,6 +167,32 @@ public final class SessionUploadDelegate: NSObject, URLSessionDataDelegate, @unc
         }
         PinnedURLSessionDelegate(fingerprint: fingerprint)
             .urlSession(session, didReceive: challenge, completionHandler: completionHandler)
+    }
+}
+
+private final class TransitionGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isOpen = false
+    private var waiter: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let resume = lock.withLock {
+                if isOpen { return true }
+                waiter = continuation
+                return false
+            }
+            if resume { continuation.resume() }
+        }
+    }
+
+    func open() {
+        let continuation = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            isOpen = true
+            defer { waiter = nil }
+            return waiter
+        }
+        continuation?.resume()
     }
 }
 

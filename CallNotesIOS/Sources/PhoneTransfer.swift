@@ -50,6 +50,7 @@ struct PhonePairingConfiguration: Codable, Sendable {
 enum PhonePairingStore {
     private static let defaultsKey = "paired_mac"
     private static let keychainService = "com.thatdudealso.callnotes.phone-pairing"
+    static let pairingInvalidatedNotification = Notification.Name("CallNotesPhonePairingInvalidated")
 
     static func save(_ configuration: PhonePairingConfiguration, token: String) throws {
         let defaults = UserDefaults(suiteName: PhoneSharedContainer.appGroupIdentifier)
@@ -118,9 +119,20 @@ enum PhonePairingCoordinator {
             throw error
         } catch let error as NSError where error.domain == "CallNotes.Pairing" {
             throw error
-        } catch {
+        } catch let error as URLError where Self.allowsBonjourFallback(error) {
             let discovered = try await PhoneBonjourResolver.resolve(fingerprint: ticket.certificateFingerprint)
             return try await pair(ticket: ticket, serverURL: discovered, deviceName: deviceName)
+        } catch {
+            throw error
+        }
+    }
+
+    private static func allowsBonjourFallback(_ error: URLError) -> Bool {
+        switch error.code {
+        case .cannotConnectToHost, .timedOut, .networkConnectionLost, .dnsLookupFailed, .notConnectedToInternet, .cannotFindHost:
+            true
+        default:
+            false
         }
     }
 
@@ -370,6 +382,7 @@ final class PhoneUploadScheduler: SessionUploadTaskStarting, @unchecked Sendable
 
     func authorizationRejected() async {
         PhonePairingStore.remove()
+        NotificationCenter.default.post(name: PhonePairingStore.pairingInvalidatedNotification, object: nil)
     }
 
     func discardRequestBody(for uploadID: UUID) async {

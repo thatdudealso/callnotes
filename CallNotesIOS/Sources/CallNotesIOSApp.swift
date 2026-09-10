@@ -159,9 +159,25 @@ final class PhoneAppModel {
     var pairedMacName = "Your Mac"
     var uploadStatus: String?
     var recorder = InPersonRecorder()
+    @ObservationIgnored private var pairingInvalidatedObserver: NSObjectProtocol?
 
     init() {
         isPaired = PhonePairingStore.load() != nil
+        pairingInvalidatedObserver = NotificationCenter.default.addObserver(
+            forName: PhonePairingStore.pairingInvalidatedNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.showUnpairedState()
+            }
+        }
+    }
+
+    deinit {
+        if let pairingInvalidatedObserver {
+            NotificationCenter.default.removeObserver(pairingInvalidatedObserver)
+        }
     }
 
     func resumePendingUploads() async { uploadStatus = await BackgroundUploadCoordinator.shared.resume() }
@@ -177,8 +193,13 @@ final class PhoneAppModel {
     }
     func unpair() {
         PhonePairingStore.remove()
+        showUnpairedState()
+    }
+
+    private func showUnpairedState() {
         isPaired = false
         pairedMacName = "Your Mac"
+        uploadStatus = PhoneSyncError.unpaired.localizedDescription
     }
     func refreshMirror(in context: ModelContext) async {
         do {
@@ -186,7 +207,6 @@ final class PhoneAppModel {
             try MirrorReconciler.apply(mirror, to: SwiftDataMirrorWriter(context: context))
         } catch PhoneSyncError.unpaired {
             unpair()
-            uploadStatus = PhoneSyncError.unpaired.localizedDescription
         } catch { uploadStatus = error.localizedDescription }
     }
     func startRecording() async {

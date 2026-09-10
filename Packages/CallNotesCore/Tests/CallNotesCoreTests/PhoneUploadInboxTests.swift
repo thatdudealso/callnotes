@@ -167,6 +167,24 @@ import Testing
         #expect(await reopened.pending(now: .distantFuture).map(\.id) == [job.id])
     }
 
+    @Test func acceptedUploadResponseKeepsTheRecordingQueued() async throws {
+        let harness = try RelaunchHarness()
+        defer { harness.tearDown() }
+        let job = try await harness.enqueueRecording()
+
+        await harness.coordinator.taskCompleted(uploadID: job.id, error: nil, statusCode: 202)
+
+        let reopened = try PendingUploadInbox(directory: harness.inboxDirectory)
+        #expect(await reopened.pending(now: .distantFuture).map(\.id) == [job.id])
+    }
+
+    @Test func onlyFinishedUploadOutcomesReturnCompletionStatuses() {
+        #expect(MacSyncServer.responseStatus(for: .created) == .created)
+        #expect(MacSyncServer.responseStatus(for: .alreadyStored) == .ok)
+        #expect(MacSyncServer.responseStatus(for: .resumed) == .accepted)
+        #expect(MacSyncServer.responseStatus(for: .inProgress) == .conflict)
+    }
+
     @Test func mirrorRemovalDeletesSegmentsAndNotesSoAReturningCallDoesNotCollide() throws {
         let callID = UUID()
         let store = FakeMirrorStore()
@@ -695,7 +713,11 @@ private struct RelaunchHarness {
         inboxDirectory = root.appendingPathComponent("shared", isDirectory: true)
         sessionIdentifier = "callnotes.test.upload.\(UUID().uuidString)"
         coordinator = try SessionUploadCoordinator(directory: inboxDirectory, starter: scheduler)
-        delegate = SessionUploadDelegate(coordinator: coordinator, pinnedFingerprint: { nil })
+        delegate = SessionUploadDelegate(
+            coordinator: coordinator,
+            pinnedFingerprint: { nil },
+            statusCodeForTask: { _ in 201 }
+        )
         session = SharedUploadSession.make(identifier: sessionIdentifier, appGroupIdentifier: "", delegate: delegate)
     }
 

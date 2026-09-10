@@ -82,7 +82,7 @@ public actor MacSyncServer {
             }
             if let settled = await self.settleExistingUpload(uploadID) {
                 await self.release(uploadID)
-                return Response(status: settled == .created ? .created : .ok)
+                return Response(status: Self.responseStatus(for: settled))
             }
             do {
                 try FileManager.default.createDirectory(at: self.receivedUploadsDirectory, withIntermediateDirectories: true)
@@ -93,7 +93,7 @@ public actor MacSyncServer {
                     uploadID: uploadID
                 ) else { throw HTTPError(.badRequest, message: "Malformed audio upload.") }
                 let outcome = try await self.acceptReserved(uploadID: uploadID, metadata: upload.metadata, audioURL: upload.audioURL)
-                return Response(status: outcome == .created ? .created : .ok)
+                return Response(status: Self.responseStatus(for: outcome))
             } catch {
                 await self.release(uploadID)
                 throw error
@@ -124,6 +124,15 @@ public actor MacSyncServer {
         case inProgress
     }
 
+    static func responseStatus(for outcome: UploadOutcome) -> HTTPResponse.Status {
+        switch outcome {
+        case .created: .created
+        case .alreadyStored: .ok
+        case .resumed: .accepted
+        case .inProgress: .conflict
+        }
+    }
+
     /// Stores at most one call per upload identifier, so a phone that retries a
     /// transfer it could not acknowledge never produces a second call and never
     /// overwrites an already processed one.
@@ -150,9 +159,13 @@ public actor MacSyncServer {
         guard let existing = try await store.fetchCall(id: uploadID) else {
             return try await storeAccepted(uploadID: uploadID, metadata: metadata, audioURL: audioURL)
         }
-        guard !isProcessed(existing), !processingUploadIDs.contains(uploadID) else {
+        if isProcessed(existing) {
             try? FileManager.default.removeItem(at: audioURL)
             return .alreadyStored
+        }
+        if processingUploadIDs.contains(uploadID) {
+            try? FileManager.default.removeItem(at: audioURL)
+            return .inProgress
         }
         var replaced = existing
         replaced.audioPath = audioURL.path
@@ -184,7 +197,8 @@ public actor MacSyncServer {
     /// never leaves the recording stuck. `nil` means the bytes are still needed.
     private func settleExistingUpload(_ uploadID: UUID) async -> UploadOutcome? {
         guard let call = try? await store.fetchCall(id: uploadID) else { return nil }
-        if processingUploadIDs.contains(uploadID) || isProcessed(call) { return .alreadyStored }
+        if isProcessed(call) { return .alreadyStored }
+        if processingUploadIDs.contains(uploadID) { return .inProgress }
         guard let staged = stagedAudioURL(for: uploadID) else { return nil }
         let metadata = CallUploadMetadata.loadSidecar(nextTo: staged)
             ?? CallUploadMetadata(source: call.source, startedAt: call.startedAt, counterpartyName: call.counterpartyName)
