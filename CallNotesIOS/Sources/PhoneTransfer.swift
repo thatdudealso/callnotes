@@ -83,6 +83,12 @@ enum PhonePairingStore {
         return configuration
     }
 
+    static func updateServerURL(_ serverURL: URL) throws {
+        guard var configuration = loadConfiguration() else { throw CocoaError(.fileNoSuchFile) }
+        configuration.serverURL = serverURL
+        UserDefaults(suiteName: PhoneSharedContainer.appGroupIdentifier)?.set(try JSONEncoder().encode(configuration), forKey: defaultsKey)
+    }
+
     static func remove() {
         guard let (configuration, _)= load(), let accessGroup = try? sharedAccessGroup() else { return }
         let query: [CFString: Any] = [
@@ -111,7 +117,7 @@ enum PhonePairingCoordinator {
         do {
             return try await pair(ticket: ticket, serverURL: ticket.serverURL, deviceName: deviceName)
         } catch {
-            let discovered = try await PhoneBonjourResolver.resolve()
+            let discovered = try await PhoneBonjourResolver.resolve(fingerprint: ticket.certificateFingerprint)
             return try await pair(ticket: ticket, serverURL: discovered, deviceName: deviceName)
         }
     }
@@ -146,7 +152,7 @@ enum PhoneMirrorCoordinator {
             return try await fetch(connection: connection, token: token)
         } catch {
             var discovered = connection
-            discovered.serverURL = try await PhoneBonjourResolver.resolve()
+            discovered.serverURL = try await PhoneBonjourResolver.resolve(fingerprint: connection.certificateFingerprint)
             return try await fetch(connection: discovered, token: token)
         }
     }
@@ -166,14 +172,17 @@ private final class PhoneBonjourResolver: NSObject, NetServiceBrowserDelegate, N
     private var continuation: CheckedContinuation<URL, Error>?
     private var browser: NetServiceBrowser?
     private var service: NetService?
+    private var pendingServices: [NetService] = []
+    private var fingerprint = ""
 
-    static func resolve() async throws -> URL {
-        try await PhoneBonjourResolver().resolveService()
+    static func resolve(fingerprint: String) async throws -> URL {
+        try await PhoneBonjourResolver().resolveService(fingerprint: fingerprint)
     }
 
-    private func resolveService() async throws -> URL {
+    private func resolveService(fingerprint: String) async throws -> URL {
         try await withCheckedThrowingContinuation { continuation in
             self.continuation = continuation
+            self.fingerprint = fingerprint
             let browser = NetServiceBrowser()
             browser.delegate = self
             self.browser = browser
@@ -185,24 +194,45 @@ private final class PhoneBonjourResolver: NSObject, NetServiceBrowserDelegate, N
     }
 
     func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
-        guard self.service == nil else { return }
-        self.service = service
-        service.delegate = self
-        service.resolve(withTimeout: 5)
+        pendingServices.append(service)
+        resolveNextService()
     }
 
     func netServiceDidResolveAddress(_ sender: NetService) {
         guard let host = sender.hostName?.trimmingCharacters(in: CharacterSet(charactersIn: ".")), sender.port > 0,
               let url = URL(string: "https://\(host):\(sender.port)")
         else {
-            finish(.failure(URLError(.cannotFindHost)))
+            service = nil
+            resolveNextService()
             return
         }
-        finish(.success(url))
+        Task { [weak self] in
+            guard let self else { return }
+            let delegate = PinnedURLSessionDelegate(fingerprint: self.fingerprint)
+            let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+            do {
+                let (_, response) = try await session.data(from: url.appendingPathComponent("health"))
+                guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else { throw URLError(.cannotConnectToHost) }
+                self.finish(.success(url))
+            } catch {
+                self.service = nil
+                self.resolveNextService()
+            }
+        }
     }
 
     func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
-        finish(.failure(URLError(.cannotFindHost)))
+        service = nil
+        resolveNextService()
+    }
+
+    private func resolveNextService() {
+        guard service == nil else { return }
+        guard !pendingServices.isEmpty else { return }
+        let next = pendingServices.removeFirst()
+        service = next
+        next.delegate = self
+        next.resolve(withTimeout: 5)
     }
 
     private func finish(_ result: Result<URL, Error>) {
@@ -293,13 +323,13 @@ final class BackgroundUploadCoordinator: NSObject, @unchecked Sendable, URLSessi
             let inbox = try PhoneSharedContainer.inbox()
             let activeIDs = await activeTaskIDs()
             for job in await inbox.pending() where !activeIDs.contains(job.id) {
-                try schedule(job, connection: connection, token: token)
+                try schedule(job, connection: connection, token: token, session: session)
             }
             return "Pending recordings will upload in the background."
         } catch { return error.localizedDescription }
     }
 
-    private func schedule(_ job: PendingUpload, connection: PhonePairingConfiguration, token: String) throws {
+    private func schedule(_ job: PendingUpload, connection: PhonePairingConfiguration, token: String, session: URLSession) throws {
         let body = try MultipartUploadBody.make(job: job, directory: PhoneSharedContainer.requestBodiesDirectory())
         var request = URLRequest(url: connection.serverURL.appendingPathComponent("calls").appendingPathComponent(job.id.uuidString))
         request.httpMethod = "POST"
@@ -312,13 +342,26 @@ final class BackgroundUploadCoordinator: NSObject, @unchecked Sendable, URLSessi
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let identifier = task.taskDescription.flatMap(UUID.init(uuidString:)) else { return }
-        Self.discardRequestBody(for: identifier)
         Task {
             guard let inbox = try? PhoneSharedContainer.inbox() else { return }
             if error == nil, let response = task.response as? HTTPURLResponse, (200..<300).contains(response.statusCode) {
                 try? await inbox.markCompleted(identifier)
+                Self.discardRequestBody(for: identifier)
             } else {
+                if let job = await inbox.pending().first(where: { $0.id == identifier }),
+                   let (connection, token) = PhonePairingStore.load(),
+                   let endpoint = try? await PhoneBonjourResolver.resolve(fingerprint: connection.certificateFingerprint)
+                {
+                    var fallback = connection
+                    fallback.serverURL = endpoint
+                    if (try? PhonePairingStore.updateServerURL(endpoint)) != nil,
+                       (try? self.schedule(job, connection: fallback, token: token, session: session)) != nil
+                    {
+                        return
+                    }
+                }
                 try? await inbox.markFailed(identifier)
+                Self.discardRequestBody(for: identifier)
             }
         }
     }
@@ -350,6 +393,7 @@ private enum MultipartUploadBody {
         let boundary = "CallNotes-\(UUID().uuidString)"
         let url = directory.appendingPathComponent(job.id.uuidString).appendingPathExtension("multipart")
         let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        try? FileManager.default.removeItem(at: url)
         FileManager.default.createFile(atPath: url.path, contents: nil)
         let output = try FileHandle(forWritingTo: url)
         defer { try? output.close() }

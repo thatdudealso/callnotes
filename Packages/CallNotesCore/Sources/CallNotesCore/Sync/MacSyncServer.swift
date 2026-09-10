@@ -71,13 +71,14 @@ public actor MacSyncServer {
                 throw HTTPError(.badRequest, message: "Expected multipart audio upload.")
             }
             guard await self.reserve(uploadID) else { return Response(status: .ok) }
+            if await self.hasStoredCall(uploadID) {
+                await self.release(uploadID)
+                return Response(status: .ok)
+            }
             do {
                 try FileManager.default.createDirectory(at: self.receivedUploadsDirectory, withIntermediateDirectories: true)
-                let requestURL = self.receivedUploadsDirectory.appendingPathComponent("\(uploadID.uuidString).request")
-                defer { try? FileManager.default.removeItem(at: requestURL) }
-                try await MultipartCallUpload.write(request.body, to: requestURL)
-                guard let upload = try MultipartCallUpload.parseFile(
-                    requestURL,
+                guard let upload = try await MultipartCallUpload.stream(
+                    request.body,
                     boundary: boundary,
                     directory: self.receivedUploadsDirectory,
                     uploadID: uploadID
@@ -156,6 +157,10 @@ public actor MacSyncServer {
         acceptingUploadIDs.remove(uploadID)
     }
 
+    private func hasStoredCall(_ uploadID: UUID) async -> Bool {
+        (try? await store.fetchCall(id: uploadID)) != nil
+    }
+
     private static func authorizedDevice(for request: Request, pairing: PairingAuthority) async throws -> PairedDevice {
         guard let value = request.headers[.authorization], value.hasPrefix("Bearer "),
               let device = await pairing.authorize(token: String(value.dropFirst("Bearer ".count)))
@@ -197,14 +202,14 @@ enum MultipartCallUpload {
     struct Upload { var metadata: CallUploadMetadata; var audio: Data; var fileExtension: String }
     struct StagedUpload { var metadata: CallUploadMetadata; var audioURL: URL }
 
-    static func write(_ body: RequestBody, to url: URL) async throws {
-        FileManager.default.createFile(atPath: url.path, contents: nil)
-        let output = try FileHandle(forWritingTo: url)
-        defer { try? output.close() }
+    static func stream(_ body: RequestBody, boundary: String, directory: URL, uploadID: UUID) async throws -> StagedUpload? {
+        var parser = try MultipartStreamParser(boundary: boundary, directory: directory, uploadID: uploadID)
+        defer { try? parser.close() }
         for try await buffer in body {
             guard let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes) else { continue }
-            try output.write(contentsOf: data)
+            try parser.append(data)
         }
+        return try parser.finish()
     }
 
     static func parseFile(_ url: URL, boundary: String, directory: URL, uploadID: UUID) throws -> StagedUpload? {
@@ -255,6 +260,100 @@ enum MultipartCallUpload {
         }
         guard let metadata, let audio, !audio.isEmpty else { return nil }
         return Upload(metadata: metadata, audio: audio, fileExtension: fileExtension.isEmpty ? "m4a" : fileExtension)
+    }
+}
+
+private struct MultipartStreamParser {
+    private enum State: Equatable { case metadataHeaders, metadata, audioHeaders, audio, complete }
+    private let headerEnd = Data("\r\n\r\n".utf8)
+    private let partDelimiter: Data
+    private let closingDelimiter: Data
+    private let directory: URL
+    private let uploadID: UUID
+    private var state: State = .metadataHeaders
+    private var buffer = Data()
+    private var metadata: CallUploadMetadata?
+    private var audioURL: URL?
+    private var output: FileHandle?
+
+    init(boundary: String, directory: URL, uploadID: UUID) throws {
+        self.partDelimiter = Data("\r\n--\(boundary)".utf8)
+        self.closingDelimiter = Data("\r\n--\(boundary)--".utf8)
+        self.directory = directory
+        self.uploadID = uploadID
+    }
+
+    mutating func append(_ data: Data) throws {
+        buffer.append(data)
+        var progressed = true
+        while progressed {
+            progressed = false
+            switch state {
+            case .metadataHeaders:
+                if let headers = consume(headerEnd) {
+                    guard String(decoding: headers, as: UTF8.self).contains("name=\"metadata\"") else { throw CocoaError(.fileReadCorruptFile) }
+                    state = .metadata
+                    progressed = true
+                }
+            case .metadata:
+                if let data = consume(partDelimiter) {
+                    let decoder = JSONDecoder()
+                    decoder.dateDecodingStrategy = .iso8601
+                    metadata = try decoder.decode(CallUploadMetadata.self, from: data)
+                    state = .audioHeaders
+                    progressed = true
+                }
+            case .audioHeaders:
+                if let headers = consume(headerEnd) {
+                    let text = String(decoding: headers, as: UTF8.self)
+                    guard text.contains("name=\"audio\"") else { throw CocoaError(.fileReadCorruptFile) }
+                    let filename = text.components(separatedBy: "filename=\"").dropFirst().first?.split(separator: "\"").first
+                    let ext = filename.map { URL(fileURLWithPath: String($0)).pathExtension.lowercased() }.flatMap { $0.isEmpty ? nil : $0 } ?? "m4a"
+                    let url = directory.appendingPathComponent("\(uploadID.uuidString).\(ext)")
+                    FileManager.default.createFile(atPath: url.path, contents: nil)
+                    audioURL = url
+                    output = try FileHandle(forWritingTo: url)
+                    state = .audio
+                    progressed = true
+                }
+            case .audio:
+                if let range = buffer.range(of: closingDelimiter) {
+                    try output?.write(contentsOf: buffer[..<range.lowerBound])
+                    buffer.removeSubrange(..<range.upperBound)
+                    state = .complete
+                    progressed = true
+                } else {
+                    let retained = closingDelimiter.count - 1
+                    if buffer.count > retained {
+                        let count = buffer.count - retained
+                        try output?.write(contentsOf: buffer.prefix(count))
+                        buffer.removeFirst(count)
+                    }
+                }
+            case .complete:
+                break
+            }
+            if state != .audio, state != .complete, buffer.count > 1_048_576 { throw CocoaError(.fileReadCorruptFile) }
+        }
+    }
+
+    mutating func finish() throws -> MultipartCallUpload.StagedUpload? {
+        guard state == .complete, let metadata, let audioURL else {
+            if let audioURL { try? FileManager.default.removeItem(at: audioURL) }
+            return nil
+        }
+        try output?.close()
+        output = nil
+        return .init(metadata: metadata, audioURL: audioURL)
+    }
+
+    mutating func close() throws { try output?.close() }
+
+    private mutating func consume(_ delimiter: Data) -> Data? {
+        guard let range = buffer.range(of: delimiter) else { return nil }
+        let result = Data(buffer[..<range.lowerBound])
+        buffer.removeSubrange(..<range.upperBound)
+        return result
     }
 }
 
