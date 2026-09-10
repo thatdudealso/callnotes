@@ -153,6 +153,8 @@ final class PinnedURLSessionDelegate: NSObject, URLSessionDelegate {
 final class BackgroundUploadCoordinator: NSObject, @unchecked Sendable, URLSessionTaskDelegate, URLSessionDataDelegate {
     static let shared = BackgroundUploadCoordinator()
     private static let sessionIdentifier = "com.thatdudealso.callnotes.phone-upload"
+    private static let shareSessionIdentifier = "com.thatdudealso.callnotes.share-upload"
+    private var backgroundCompletionHandlers: [String: () -> Void] = [:]
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
         configuration.isDiscretionary = false
@@ -160,6 +162,20 @@ final class BackgroundUploadCoordinator: NSObject, @unchecked Sendable, URLSessi
         configuration.waitsForConnectivity = true
         return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
     }()
+    private lazy var shareSession: URLSession = {
+        let configuration = URLSessionConfiguration.background(withIdentifier: Self.shareSessionIdentifier)
+        configuration.sharedContainerIdentifier = PhoneSharedContainer.appGroupIdentifier
+        configuration.isDiscretionary = false
+        configuration.sessionSendsLaunchEvents = true
+        configuration.waitsForConnectivity = true
+        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+    }()
+
+    func handleBackgroundEvents(for identifier: String, completionHandler: @escaping () -> Void) {
+        backgroundCompletionHandlers[identifier] = completionHandler
+        if identifier == Self.sessionIdentifier { _ = session }
+        if identifier == Self.shareSessionIdentifier { _ = shareSession }
+    }
 
     func resume() async -> String {
         guard let (connection, token) = PhonePairingStore.load() else {
@@ -167,7 +183,8 @@ final class BackgroundUploadCoordinator: NSObject, @unchecked Sendable, URLSessi
         }
         do {
             let inbox = try PhoneSharedContainer.inbox()
-            for job in await inbox.pending() {
+            let activeIDs = await activeTaskIDs()
+            for job in await inbox.pending() where !activeIDs.contains(job.id) {
                 try schedule(job, connection: connection, token: token)
             }
             return "Pending recordings will upload in the background."
@@ -176,7 +193,7 @@ final class BackgroundUploadCoordinator: NSObject, @unchecked Sendable, URLSessi
 
     private func schedule(_ job: PendingUpload, connection: PhonePairingConfiguration, token: String) throws {
         let body = try MultipartUploadBody.make(job: job, directory: PhoneSharedContainer.requestBodiesDirectory())
-        var request = URLRequest(url: connection.serverURL.appendingPathComponent("calls"))
+        var request = URLRequest(url: connection.serverURL.appendingPathComponent("calls").appendingPathComponent(job.id.uuidString))
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue(body.contentType, forHTTPHeaderField: "Content-Type")
@@ -187,6 +204,7 @@ final class BackgroundUploadCoordinator: NSObject, @unchecked Sendable, URLSessi
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let identifier = task.taskDescription.flatMap(UUID.init(uuidString:)) else { return }
+        Self.discardRequestBody(for: identifier)
         Task {
             guard let inbox = try? PhoneSharedContainer.inbox() else { return }
             if error == nil, let response = task.response as? HTTPURLResponse, (200..<300).contains(response.statusCode) {
@@ -195,6 +213,25 @@ final class BackgroundUploadCoordinator: NSObject, @unchecked Sendable, URLSessi
                 try? await inbox.markFailed(identifier)
             }
         }
+    }
+
+    private static func discardRequestBody(for identifier: UUID) {
+        guard let directory = try? PhoneSharedContainer.requestBodiesDirectory() else { return }
+        let body = directory.appendingPathComponent(identifier.uuidString).appendingPathExtension("multipart")
+        try? FileManager.default.removeItem(at: body)
+    }
+
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        guard let identifier = session.configuration.identifier,
+              let completionHandler = backgroundCompletionHandlers.removeValue(forKey: identifier)
+        else { return }
+        DispatchQueue.main.async(execute: completionHandler)
+    }
+
+    private func activeTaskIDs() async -> Set<UUID> {
+        let phoneTasks = await session.allTasks
+        let shareTasks = await shareSession.allTasks
+        return Set((phoneTasks + shareTasks).compactMap { $0.taskDescription.flatMap(UUID.init(uuidString:)) })
     }
 }
 

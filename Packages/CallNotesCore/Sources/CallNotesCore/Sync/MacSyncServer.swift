@@ -45,8 +45,11 @@ public actor MacSyncServer {
             _ = try await Self.authorizedDevice(for: request, pairing: pairing)
             return try await Self.mirror(store: self.store)
         }
-        router.post("calls") { request, _ async throws -> Response in
+        router.post("calls/:uploadID") { request, context async throws -> Response in
             _ = try await Self.authorizedDevice(for: request, pairing: pairing)
+            guard let uploadID = UUID(uuidString: try context.parameters.require("uploadID")) else {
+                throw HTTPError(.badRequest, message: "Expected a recording identifier.")
+            }
             let contentType = request.headers[.contentType] ?? ""
             guard let boundary = contentType.split(separator: "boundary=").last.map(String.init), contentType.contains("multipart/form-data") else {
                 throw HTTPError(.badRequest, message: "Expected multipart audio upload.")
@@ -55,13 +58,13 @@ public actor MacSyncServer {
             guard let body = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes),
                   let upload = try MultipartCallUpload.parse(body, boundary: boundary)
             else { throw HTTPError(.badRequest, message: "Malformed audio upload.") }
-            try FileManager.default.createDirectory(at: self.receivedUploadsDirectory, withIntermediateDirectories: true)
-            let filename = "\(UUID().uuidString).\(upload.fileExtension)"
-            let audioURL = self.receivedUploadsDirectory.appendingPathComponent(filename)
-            try upload.audio.write(to: audioURL, options: .atomic)
-            let call = Call(source: upload.metadata.source, startedAt: upload.metadata.startedAt ?? Date(), counterpartyName: upload.metadata.counterpartyName, audioPath: audioURL.path, sttProvider: .appleSpeech, status: .uploaded)
-            try await self.store.upsertCall(call)
-            return Response(status: .created)
+            let outcome = try await self.accept(
+                uploadID: uploadID,
+                metadata: upload.metadata,
+                audio: upload.audio,
+                fileExtension: upload.fileExtension
+            )
+            return Response(status: outcome == .created ? .created : .ok)
         }
         let certificate = try NIOSSLCertificate(bytes: Array(identity.certificateDER), format: .der)
         let key = try NIOSSLPrivateKey(bytes: Array(identity.privateKeyPEM.utf8), format: .pem)
@@ -75,6 +78,32 @@ public actor MacSyncServer {
             configuration: .init(address: .hostname(host, port: SyncConstants.serverPort))
         )
         try await app.runService()
+    }
+
+    enum UploadOutcome: Sendable, Equatable {
+        case created
+        case alreadyStored
+    }
+
+    /// Stores at most one call per upload identifier, so a phone that retries a
+    /// transfer it could not acknowledge never produces a second call and never
+    /// overwrites an already processed one.
+    func accept(uploadID: UUID, metadata: CallUploadMetadata, audio: Data, fileExtension: String) async throws -> UploadOutcome {
+        if try await store.fetchCall(id: uploadID) != nil { return .alreadyStored }
+        try FileManager.default.createDirectory(at: receivedUploadsDirectory, withIntermediateDirectories: true)
+        let audioURL = receivedUploadsDirectory.appendingPathComponent("\(uploadID.uuidString).\(fileExtension)")
+        try audio.write(to: audioURL, options: .atomic)
+        let call = Call(
+            id: uploadID,
+            source: metadata.source,
+            startedAt: metadata.startedAt ?? Date(),
+            counterpartyName: metadata.counterpartyName,
+            audioPath: audioURL.path,
+            sttProvider: .appleSpeech,
+            status: .uploaded
+        )
+        try await store.upsertCall(call)
+        return .created
     }
 
     private static func authorizedDevice(for request: Request, pairing: PairingAuthority) async throws -> PairedDevice {

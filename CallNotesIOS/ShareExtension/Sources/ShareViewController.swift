@@ -122,7 +122,7 @@ private enum ExtensionBackgroundUpload {
               let token = token(for: configuration.deviceID)
         else { return }
         let body = try ExtensionMultipartBody.make(job: job, directory: container.appendingPathComponent("UploadRequests", isDirectory: true))
-        var request = URLRequest(url: configuration.serverURL.appendingPathComponent("calls"))
+        var request = URLRequest(url: configuration.serverURL.appendingPathComponent("calls").appendingPathComponent(job.id.uuidString))
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue(body.contentType, forHTTPHeaderField: "Content-Type")

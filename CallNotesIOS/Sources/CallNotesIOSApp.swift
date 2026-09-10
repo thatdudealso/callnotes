@@ -6,6 +6,7 @@ import SwiftUI
 
 @main
 struct CallNotesIOSApp: App {
+    @UIApplicationDelegateAdaptor(PhoneAppDelegate.self) private var appDelegate
     private let container: ModelContainer
 
     init() {
@@ -15,6 +16,16 @@ struct CallNotesIOSApp: App {
     var body: some Scene {
         WindowGroup { RootTabView() }
             .modelContainer(container)
+    }
+}
+
+final class PhoneAppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        handleEventsForBackgroundURLSession identifier: String,
+        completionHandler: @escaping () -> Void
+    ) {
+        BackgroundUploadCoordinator.shared.handleBackgroundEvents(for: identifier, completionHandler: completionHandler)
     }
 }
 

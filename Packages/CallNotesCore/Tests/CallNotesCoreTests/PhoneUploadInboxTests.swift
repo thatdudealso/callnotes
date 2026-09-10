@@ -47,4 +47,46 @@ import Testing
         #expect(await relaunchedInbox.pending().isEmpty)
         #expect(!FileManager.default.fileExists(atPath: job.audioURL.path))
     }
+
+    #if os(macOS)
+    @Test func reuploadingTheSameRecordingKeepsOneCallAndItsProgress() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-phone-upload-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MemoryStore()
+        let server = MacSyncServer(store: store, receivedUploadsDirectory: root)
+        let uploadID = UUID()
+        let metadata = CallUploadMetadata(
+            source: .iphoneRecording,
+            startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            counterpartyName: "Priya"
+        )
+
+        let first = try await server.accept(
+            uploadID: uploadID,
+            metadata: metadata,
+            audio: Data("recording".utf8),
+            fileExtension: "m4a"
+        )
+        #expect(first == .created)
+        let stored = try #require(try await store.fetchCalls().first)
+        #expect(stored.id == uploadID)
+        #expect(FileManager.default.fileExists(atPath: stored.audioPath))
+
+        var processed = stored
+        processed.status = .notesReady
+        try await store.upsertCall(processed)
+
+        let second = try await server.accept(
+            uploadID: uploadID,
+            metadata: metadata,
+            audio: Data("recording".utf8),
+            fileExtension: "m4a"
+        )
+        #expect(second == .alreadyStored)
+        let calls = try await store.fetchCalls()
+        #expect(calls.count == 1)
+        #expect(calls.first?.status == .notesReady)
+    }
+    #endif
 }
