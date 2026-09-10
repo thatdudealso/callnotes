@@ -29,6 +29,17 @@ enum PhoneSharedContainer {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
+
+    static func sharedAudioDirectory() throws -> URL {
+        let url = try directory().appendingPathComponent("SharedAudio", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    static func sweepOrphanedSharedAudio() {
+        guard let directory = try? sharedAudioDirectory() else { return }
+        SharedAudioStaging.sweepOrphans(in: directory)
+    }
 }
 
 enum PhoneSyncError: Error, LocalizedError {
@@ -426,6 +437,7 @@ final class BackgroundUploadCoordinator: @unchecked Sendable {
     private let shareSession: URLSession
 
     private init() {
+        PhoneSharedContainer.sweepOrphanedSharedAudio()
         let coordinator = try? SessionUploadCoordinator(
             directory: PhoneSharedContainer.uploadsDirectory(),
             starter: scheduler

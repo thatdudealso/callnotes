@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
 
 /// Metadata carried with an audio file uploaded from an iPhone.
 public struct CallUploadMetadata: Codable, Sendable, Equatable {
@@ -77,69 +82,85 @@ public actor PendingUploadInbox {
     private let directory: URL
     private let uploadsDirectory: URL
     private let manifestURL: URL
+    private let manifestLock: ManifestLock
     private var entries: [PendingUpload]
 
     public init(directory: URL) throws {
-        self.directory = directory
-        uploadsDirectory = directory.appendingPathComponent("uploads", isDirectory: true)
-        manifestURL = directory.appendingPathComponent("pending-uploads.json")
+        let uploadsDirectory = directory.appendingPathComponent("uploads", isDirectory: true)
+        let manifestURL = directory.appendingPathComponent("pending-uploads.json")
+        let manifestLock = ManifestLock(url: directory.appendingPathComponent("pending-uploads.lock"))
         try FileManager.default.createDirectory(at: uploadsDirectory, withIntermediateDirectories: true)
-        entries = try Self.loadManifest(at: manifestURL)
+        let entries = try manifestLock.withExclusiveLock { try Self.loadManifest(at: manifestURL) }
+        self.directory = directory
+        self.uploadsDirectory = uploadsDirectory
+        self.manifestURL = manifestURL
+        self.manifestLock = manifestLock
+        self.entries = entries
     }
 
     public func enqueue(audioAt sourceURL: URL, metadata: CallUploadMetadata) throws -> PendingUpload {
-        reload()
-        guard FileManager.default.fileExists(atPath: sourceURL.path) else {
-            throw PendingUploadInboxError.sourceFileMissing
+        try withManifestLock {
+            reload()
+            guard FileManager.default.fileExists(atPath: sourceURL.path) else {
+                throw PendingUploadInboxError.sourceFileMissing
+            }
+            let suffix = sourceURL.pathExtension.isEmpty ? "m4a" : sourceURL.pathExtension
+            let destination = uploadsDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension(suffix)
+            try FileManager.default.copyItem(at: sourceURL, to: destination)
+            let entry = PendingUpload(audioURL: destination, metadata: metadata)
+            entries.append(entry)
+            try persist()
+            return entry
         }
-        let suffix = sourceURL.pathExtension.isEmpty ? "m4a" : sourceURL.pathExtension
-        let destination = uploadsDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension(suffix)
-        try FileManager.default.copyItem(at: sourceURL, to: destination)
-        let entry = PendingUpload(audioURL: destination, metadata: metadata)
-        entries.append(entry)
-        try persist()
-        return entry
     }
 
     public func pending(now: Date = Date()) -> [PendingUpload] {
-        reload()
-        return entries.filter { entry in
-            guard FileManager.default.fileExists(atPath: entry.audioURL.path) else { return false }
-            return entry.nextAttemptAt.map { $0 <= now } ?? true
-        }.sorted { $0.createdAt < $1.createdAt }
+        (try? withManifestLock {
+            reload()
+            return entries.filter { entry in
+                guard FileManager.default.fileExists(atPath: entry.audioURL.path) else { return false }
+                return entry.nextAttemptAt.map { $0 <= now } ?? true
+            }.sorted { $0.createdAt < $1.createdAt }
+        }) ?? []
     }
 
     public func markFailed(_ id: UUID, at date: Date = Date()) throws {
-        reload()
-        guard let index = entries.firstIndex(where: { $0.id == id }) else {
-            throw PendingUploadInboxError.unknownUpload
+        try withManifestLock {
+            reload()
+            guard let index = entries.firstIndex(where: { $0.id == id }) else {
+                throw PendingUploadInboxError.unknownUpload
+            }
+            entries[index].retryCount += 1
+            let delay = min(pow(2, Double(entries[index].retryCount)) * 15, 6 * 60 * 60)
+            entries[index].nextAttemptAt = date.addingTimeInterval(delay)
+            try persist()
         }
-        entries[index].retryCount += 1
-        let delay = min(pow(2, Double(entries[index].retryCount)) * 15, 6 * 60 * 60)
-        entries[index].nextAttemptAt = date.addingTimeInterval(delay)
-        try persist()
     }
 
     /// A rejected token is not a transient failure: the job waits for the user
     /// to pair again rather than sitting out an exponential backoff.
     public func clearBackoff(_ id: UUID) throws {
-        reload()
-        guard let index = entries.firstIndex(where: { $0.id == id }) else {
-            throw PendingUploadInboxError.unknownUpload
+        try withManifestLock {
+            reload()
+            guard let index = entries.firstIndex(where: { $0.id == id }) else {
+                throw PendingUploadInboxError.unknownUpload
+            }
+            entries[index].retryCount = 0
+            entries[index].nextAttemptAt = nil
+            try persist()
         }
-        entries[index].retryCount = 0
-        entries[index].nextAttemptAt = nil
-        try persist()
     }
 
     public func markCompleted(_ id: UUID) throws {
-        reload()
-        guard let index = entries.firstIndex(where: { $0.id == id }) else {
-            throw PendingUploadInboxError.unknownUpload
+        try withManifestLock {
+            reload()
+            guard let index = entries.firstIndex(where: { $0.id == id }) else {
+                throw PendingUploadInboxError.unknownUpload
+            }
+            let entry = entries.remove(at: index)
+            try? FileManager.default.removeItem(at: entry.audioURL)
+            try persist()
         }
-        let entry = entries.remove(at: index)
-        try? FileManager.default.removeItem(at: entry.audioURL)
-        try persist()
     }
 
     /// The manifest, not this actor, is the source of truth: the Share Extension
@@ -156,11 +177,103 @@ public actor PendingUploadInbox {
         try data.write(to: manifestURL, options: .atomic)
     }
 
+    private func withManifestLock<T>(_ operation: () throws -> T) throws -> T {
+        try manifestLock.withExclusiveLock(operation)
+    }
+
     private static func loadManifest(at url: URL) throws -> [PendingUpload] {
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return try decoder.decode([PendingUpload].self, from: Data(contentsOf: url))
+    }
+}
+
+private final class ManifestLock: @unchecked Sendable {
+    private let url: URL
+
+    init(url: URL) { self.url = url }
+
+    func withExclusiveLock<T>(_ operation: () throws -> T) throws -> T {
+        let processLock = ManifestLockRegistry.lock(for: url.path)
+        processLock.lock()
+        defer { processLock.unlock() }
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        let descriptor = open(url.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0, flock(descriptor, LOCK_EX) == 0 else {
+            if descriptor >= 0 { close(descriptor) }
+            throw CocoaError(.fileWriteUnknown)
+        }
+        defer {
+            flock(descriptor, LOCK_UN)
+            close(descriptor)
+        }
+        return try operation()
+    }
+}
+
+private final class ManifestLockRegistry: @unchecked Sendable {
+    private static let shared = ManifestLockRegistry()
+    private let lock = NSLock()
+    private var locks: [String: NSLock] = [:]
+
+    static func lock(for path: String) -> NSLock {
+        shared.lock.withLock {
+            if let lock = shared.locks[path] { return lock }
+            let lock = NSLock()
+            shared.locks[path] = lock
+            return lock
+        }
+    }
+}
+
+public enum SharedAudioStaging {
+    public final class Lease: @unchecked Sendable {
+        public let audioURL: URL
+        private let lockURL: URL
+        private var descriptor: Int32
+        private let lock = NSLock()
+
+        public init(audioURL: URL) throws {
+            self.audioURL = audioURL
+            lockURL = audioURL.appendingPathExtension("lock")
+            FileManager.default.createFile(atPath: lockURL.path, contents: nil)
+            descriptor = open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+            guard descriptor >= 0, flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+                if descriptor >= 0 { close(descriptor) }
+                throw CocoaError(.fileWriteUnknown)
+            }
+        }
+
+        deinit { release() }
+
+        public func release() {
+            let descriptor = lock.withLock { () -> Int32 in
+                let held = self.descriptor
+                self.descriptor = -1
+                return held
+            }
+            guard descriptor >= 0 else { return }
+            flock(descriptor, LOCK_UN)
+            close(descriptor)
+            try? FileManager.default.removeItem(at: lockURL)
+        }
+    }
+
+    public static func sweepOrphans(in directory: URL) {
+        let contents = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isRegularFileKey])) ?? []
+        for audioURL in contents where audioURL.pathExtension != "lock" {
+            let lockURL = audioURL.appendingPathExtension("lock")
+            FileManager.default.createFile(atPath: lockURL.path, contents: nil)
+            let descriptor = open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+            guard descriptor >= 0 else { continue }
+            if flock(descriptor, LOCK_EX | LOCK_NB) == 0 {
+                try? FileManager.default.removeItem(at: audioURL)
+                try? FileManager.default.removeItem(at: lockURL)
+                flock(descriptor, LOCK_UN)
+            }
+            close(descriptor)
+        }
     }
 }
 

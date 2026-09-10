@@ -106,7 +106,7 @@ public final class SessionUploadDelegate: NSObject, URLSessionDataDelegate, @unc
     private let pinnedFingerprint: @Sendable () -> String?
     private let statusCodeForTask: (URLSessionTask) -> Int?
     private let lock = NSLock()
-    private var transitions: [UUID: (id: UUID, task: Task<Void, Never>)] = [:]
+    private var transitions: [UUID: Task<Void, Never>] = [:]
 
     public init(
         coordinator: SessionUploadCoordinator,
@@ -127,16 +127,16 @@ public final class SessionUploadDelegate: NSObject, URLSessionDataDelegate, @unc
         let transition = Task {
             await gate.wait()
             await coordinator.taskCompleted(uploadID: uploadID, error: error, statusCode: statusCode)
-            self.removeTransition(uploadID, id: transitionID)
+            self.removeTransition(id: transitionID)
         }
-        lock.withLock { transitions[uploadID] = (transitionID, transition) }
+        lock.withLock { transitions[transitionID] = transition }
         gate.open()
     }
 
     public func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
         let identifier = session.configuration.identifier ?? ""
         let pending = lock.withLock {
-            let snapshot = transitions.values.map(\.task)
+            let snapshot = Array(transitions.values)
             transitions.removeAll()
             return snapshot
         }
@@ -147,10 +147,9 @@ public final class SessionUploadDelegate: NSObject, URLSessionDataDelegate, @unc
         }
     }
 
-    private func removeTransition(_ uploadID: UUID, id: UUID) {
-        lock.withLock {
-            guard transitions[uploadID]?.id == id else { return }
-            transitions.removeValue(forKey: uploadID)
+    private func removeTransition(id: UUID) {
+        _ = lock.withLock {
+            transitions.removeValue(forKey: id)
         }
     }
 

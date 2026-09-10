@@ -178,6 +178,38 @@ import Testing
         #expect(await reopened.pending(now: .distantFuture).map(\.id) == [job.id])
     }
 
+    @Test func concurrentInboxChangesPreserveTheNewUpload() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let firstSource = root.appendingPathComponent("first.m4a")
+        let secondSource = root.appendingPathComponent("second.m4a")
+        try Data("first".utf8).write(to: firstSource)
+        try Data("second".utf8).write(to: secondSource)
+        let directory = root.appendingPathComponent("uploads", isDirectory: true)
+        let firstProcess = try PendingUploadInbox(directory: directory)
+        let first = try await firstProcess.enqueue(audioAt: firstSource, metadata: .init(source: .iphoneRecording))
+        let appProcess = try PendingUploadInbox(directory: directory)
+        let extensionProcess = try PendingUploadInbox(directory: directory)
+
+        async let completion: Void = appProcess.markCompleted(first.id)
+        async let enqueue: PendingUpload = extensionProcess.enqueue(audioAt: secondSource, metadata: .init(source: .iphoneRecording))
+        _ = try await (completion, enqueue)
+
+        let reopened = try PendingUploadInbox(directory: directory)
+        #expect(await reopened.pending(now: .distantFuture).count == 1)
+    }
+
+    @Test func sharedAudioSweepRemovesOrphanedFiles() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let orphan = directory.appendingPathComponent("orphan.m4a")
+        try Data("orphan".utf8).write(to: orphan)
+        SharedAudioStaging.sweepOrphans(in: directory)
+        #expect(!FileManager.default.fileExists(atPath: orphan.path))
+    }
+
     @Test func onlyFinishedUploadOutcomesReturnCompletionStatuses() {
         #expect(MacSyncServer.responseStatus(for: .created) == .created)
         #expect(MacSyncServer.responseStatus(for: .alreadyStored) == .ok)

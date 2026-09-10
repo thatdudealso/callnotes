@@ -13,12 +13,14 @@ final class ShareViewController: UIViewController {
     private var transfer: ExtensionUploadTransfer?
     private var queuedJob: PendingUpload?
     private var didDisappear = false
+    private var sharedAudioLease: SharedAudioStaging.Lease?
 
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "Send to Mac"
         view.backgroundColor = .systemBackground
         configureForm()
+        sweepOrphanedSharedAudio()
         loadAudio()
     }
 
@@ -31,6 +33,8 @@ final class ShareViewController: UIViewController {
             try? FileManager.default.removeItem(at: sharedAudioURL)
             self.sharedAudioURL = nil
         }
+        sharedAudioLease?.release()
+        sharedAudioLease = nil
     }
 
     private func configureForm() {
@@ -84,19 +88,21 @@ final class ShareViewController: UIViewController {
                 DispatchQueue.main.async { self?.showError(error?.localizedDescription ?? "Could not access the shared audio.") }
                 return
             }
-            let stagedURL: URL
+            let staged: SharedAudioStaging.Lease
             do {
-                stagedURL = try Self.stageSharedAudio(url, inPlace: inPlace)
+                staged = try Self.stageSharedAudio(url, inPlace: inPlace)
             } catch {
                 DispatchQueue.main.async { self?.showError(error.localizedDescription) }
                 return
             }
             DispatchQueue.main.async {
                 guard let self, !self.didDisappear else {
-                    try? FileManager.default.removeItem(at: stagedURL)
+                    try? FileManager.default.removeItem(at: staged.audioURL)
+                    staged.release()
                     return
                 }
-                self.sharedAudioURL = stagedURL
+                self.sharedAudioURL = staged.audioURL
+                self.sharedAudioLease = staged
                 let metadata = ExtensionRecordingTitleParser.parse(suggestedName ?? "")
                 self.nameField.text = metadata?.counterpartyName
                 if let startedAt = metadata?.startedAt {
@@ -124,6 +130,8 @@ final class ShareViewController: UIViewController {
                         audioAt: sharedAudioURL,
                         metadata: .init(source: .iphoneRecording, startedAt: startedAt, counterpartyName: counterpartyName)
                     )
+                    self.sharedAudioLease?.release()
+                    self.sharedAudioLease = nil
                 }
                 if let failure = transfer.scheduler.lastFailure { throw failure }
                 self.extensionContext?.completeRequest(returningItems: nil)
@@ -149,13 +157,19 @@ final class ShareViewController: UIViewController {
         return url
     }
 
-    private nonisolated static func stageSharedAudio(_ source: URL, inPlace: Bool) throws -> URL {
+    private func sweepOrphanedSharedAudio() {
+        guard let container = try? sharedContainer() else { return }
+        SharedAudioStaging.sweepOrphans(in: container.appendingPathComponent("SharedAudio", isDirectory: true))
+    }
+
+    private nonisolated static func stageSharedAudio(_ source: URL, inPlace: Bool) throws -> SharedAudioStaging.Lease {
         guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.thatdudealso.callnotes") else {
             throw CocoaError(.fileNoSuchFile)
         }
         let directory = container.appendingPathComponent("SharedAudio", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let destination = directory.appendingPathComponent(UUID().uuidString).appendingPathExtension(source.pathExtension.isEmpty ? "m4a" : source.pathExtension)
+        let lease = try SharedAudioStaging.Lease(audioURL: destination)
         let accessed = inPlace && source.startAccessingSecurityScopedResource()
         defer { if accessed { source.stopAccessingSecurityScopedResource() } }
         var coordinationError: NSError?
@@ -166,7 +180,7 @@ final class ShareViewController: UIViewController {
         }
         if let coordinationError { throw coordinationError }
         if let copyError { throw copyError }
-        return destination
+        return lease
     }
 
     private func showError(_ message: String) {
@@ -239,6 +253,10 @@ private final class ExtensionUploadScheduler: SessionUploadTaskStarting, @unchec
         try? FileManager.default.removeItem(at: directory.appendingPathComponent(uploadID.uuidString).appendingPathExtension("multipart"))
     }
 
+    func authorizationRejected() async {
+        Self.removePairing()
+    }
+
     private func schedule(job: PendingUpload) throws {
         let (configuration, token) = try requirePairing()
         guard let session = lock.withLock({ self.session }) else { throw CocoaError(.fileNoSuchFile) }
@@ -255,6 +273,11 @@ private final class ExtensionUploadScheduler: SessionUploadTaskStarting, @unchec
     private static func configuration() -> ExtensionPairingConfiguration? {
         guard let data = UserDefaults(suiteName: "group.com.thatdudealso.callnotes")?.data(forKey: configurationKey) else { return nil }
         return try? JSONDecoder().decode(ExtensionPairingConfiguration.self, from: data)
+    }
+
+    private static func removePairing() {
+        SecItemDelete([kSecClass: kSecClassGenericPassword, kSecAttrService: keychainService] as CFDictionary)
+        UserDefaults(suiteName: "group.com.thatdudealso.callnotes")?.removeObject(forKey: configurationKey)
     }
 
     /// Both targets declare exactly one `keychain-access-groups` entry, so the
