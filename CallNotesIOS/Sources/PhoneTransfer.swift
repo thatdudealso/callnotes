@@ -251,6 +251,7 @@ final class BackgroundUploadCoordinator: NSObject, @unchecked Sendable, URLSessi
     private static let sessionIdentifier = "com.thatdudealso.callnotes.phone-upload"
     private static let shareSessionIdentifier = "com.thatdudealso.callnotes.share-upload"
     private var backgroundCompletionHandlers: [String: () -> Void] = [:]
+    private var pendingStateTransitions: [Task<Void, Never>] = []
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
         configuration.isDiscretionary = false
@@ -315,7 +316,7 @@ final class BackgroundUploadCoordinator: NSObject, @unchecked Sendable, URLSessi
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let identifier = task.taskDescription.flatMap(UUID.init(uuidString:)) else { return }
-        Task {
+        let transition = Task {
             guard let inbox = try? PhoneSharedContainer.inbox() else { return }
             if error == nil, let response = task.response as? HTTPURLResponse, (200..<300).contains(response.statusCode) {
                 try? await inbox.markCompleted(identifier)
@@ -337,6 +338,7 @@ final class BackgroundUploadCoordinator: NSObject, @unchecked Sendable, URLSessi
                 Self.discardRequestBody(for: identifier)
             }
         }
+        pendingStateTransitions.append(transition)
     }
 
     private static func discardRequestBody(for identifier: UUID) {
@@ -349,7 +351,12 @@ final class BackgroundUploadCoordinator: NSObject, @unchecked Sendable, URLSessi
         guard let identifier = session.configuration.identifier,
               let completionHandler = backgroundCompletionHandlers.removeValue(forKey: identifier)
         else { return }
-        DispatchQueue.main.async(execute: completionHandler)
+        let transitions = pendingStateTransitions
+        pendingStateTransitions.removeAll()
+        Task {
+            for transition in transitions { await transition.value }
+            DispatchQueue.main.async(execute: completionHandler)
+        }
     }
 
     private func activeTaskIDs() async -> Set<UUID> {

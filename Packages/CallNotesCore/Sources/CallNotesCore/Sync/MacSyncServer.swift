@@ -212,7 +212,7 @@ enum MultipartCallUpload {
 
     static func stream(_ body: RequestBody, boundary: String, directory: URL, uploadID: UUID) async throws -> StagedUpload? {
         var parser = try MultipartStreamParser(boundary: boundary, directory: directory, uploadID: uploadID)
-        defer { try? parser.close() }
+        defer { parser.abort() }
         for try await buffer in body {
             guard let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes) else { continue }
             try parser.append(data)
@@ -318,6 +318,7 @@ private struct MultipartStreamParser {
                     let filename = text.components(separatedBy: "filename=\"").dropFirst().first?.split(separator: "\"").first
                     let ext = MultipartCallUpload.safeAudioExtension(filename.map { URL(fileURLWithPath: String($0)).pathExtension } ?? "")
                     let url = directory.appendingPathComponent("\(uploadID.uuidString).\(ext)")
+                    try? FileManager.default.removeItem(at: url)
                     FileManager.default.createFile(atPath: url.path, contents: nil)
                     audioURL = url
                     output = try FileHandle(forWritingTo: url)
@@ -358,6 +359,13 @@ private struct MultipartStreamParser {
     }
 
     mutating func close() throws { try output?.close() }
+
+    mutating func abort() {
+        try? output?.close()
+        output = nil
+        guard state != .complete, let audioURL else { return }
+        try? FileManager.default.removeItem(at: audioURL)
+    }
 
     private mutating func consume(_ delimiter: Data) -> Data? {
         guard let range = buffer.range(of: delimiter) else { return nil }
