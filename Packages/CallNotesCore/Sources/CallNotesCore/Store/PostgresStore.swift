@@ -404,6 +404,33 @@ public actor PostgresStore: CallStore {
         return records
     }
 
+    public func closeStrandedRecordings(excluding liveCallID: UUID?) async throws -> [Call] {
+        let stranded = try await fetchCalls().filter {
+            StrandedRecordingRepair.isStranded($0, liveCallID: liveCallID)
+        }
+        var repaired: [Call] = []
+        for call in stranded {
+            let closed = StrandedRecordingRepair.closed(
+                call,
+                lastSegmentEndSec: try await lastSegmentEnd(callID: call.id)
+            )
+            try await upsertCall(closed)
+            repaired.append(closed)
+        }
+        return repaired
+    }
+
+    private func lastSegmentEnd(callID: UUID) async throws -> TimeInterval? {
+        let rows = try await client.query(
+            "SELECT max(end_sec) FROM segments WHERE call_id = \(callID)",
+            logger: logger
+        )
+        for try await maxEnd in rows.decode(Float?.self) {
+            return maxEnd.map(TimeInterval.init)
+        }
+        return nil
+    }
+
     /// Deletes synthetic rows inserted by live dashboard tests. Call speakers,
     /// segments, and notes cascade from `calls`; speaker samples cascade from
     /// profiles. Always invoke from a failure path as well as the success path.

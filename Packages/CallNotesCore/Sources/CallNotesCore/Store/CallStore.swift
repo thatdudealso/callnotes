@@ -24,6 +24,7 @@ public protocol CallStore: Sendable {
     func upsertNotes(_ record: NotesRecord) async throws
     func fetchNotes(callID: UUID) async throws -> [NotesRecord]
     func fetchPreferredNotesByCall() async throws -> [UUID: NotesRecord]
+    func closeStrandedRecordings(excluding liveCallID: UUID?) async throws -> [Call]
 }
 
 extension CallStore {

@@ -246,6 +246,57 @@ import Testing
         #expect(snapshot.calls.map(\.id) == [call.id])
     }
 
+    @Test func strandedRecordingIsClosedAtItsLastSegmentInsteadOfExtrapolating() async throws {
+        let store = MemoryStore()
+        let stranded = recordingCall(startedAt: now.addingTimeInterval(-7 * 86_400))
+        try await store.upsertCall(stranded)
+        try await store.replaceSegments(
+            callID: stranded.id,
+            provider: .appleSpeech,
+            [
+                Segment(callID: stranded.id, seq: 0, startSec: 0, endSec: 90, channel: .near, text: "one", provider: .appleSpeech),
+                Segment(callID: stranded.id, seq: 1, startSec: 90, endSec: 180.75, channel: .far, text: "two", provider: .appleSpeech),
+            ]
+        )
+
+        let repaired = try #require(try await store.closeStrandedRecordings(excluding: nil).first)
+        let analytics = try await store.fetchDashboardAnalytics(asOf: now)
+
+        #expect(repaired.durationSec == 180)
+        #expect(repaired.endedAt == stranded.startedAt.addingTimeInterval(180.75))
+        #expect(repaired.status == .transcribed)
+        #expect(analytics.totals.totalDurationSec == 180)
+    }
+
+    @Test func strandedRecordingWithoutSegmentsClosesAtZeroAndIsMarkedFailed() async throws {
+        let store = MemoryStore()
+        let stranded = recordingCall(startedAt: now.addingTimeInterval(-7 * 86_400))
+        try await store.upsertCall(stranded)
+
+        let repaired = try #require(try await store.closeStrandedRecordings(excluding: nil).first)
+        let analytics = try await store.fetchDashboardAnalytics(asOf: now)
+
+        #expect(repaired.durationSec == 0)
+        #expect(repaired.endedAt == stranded.startedAt)
+        #expect(repaired.status == .failed)
+        #expect(analytics.totals.totalDurationSec == 0)
+    }
+
+    @Test func liveRecordingIsLeftAloneAndKeepsExtrapolatingToNow() async throws {
+        let store = MemoryStore()
+        let live = recordingCall(startedAt: now.addingTimeInterval(-120))
+        try await store.upsertCall(live)
+
+        let repaired = try await store.closeStrandedRecordings(excluding: live.id)
+        let persisted = try #require(await store.fetchCall(id: live.id))
+        let analytics = try await store.fetchDashboardAnalytics(asOf: now)
+
+        #expect(repaired.isEmpty)
+        #expect(persisted.status == .recording)
+        #expect(persisted.endedAt == nil)
+        #expect(analytics.totals.totalDurationSec == 120)
+    }
+
     @Test func batchedPreferredNotesMatchThePerCallPreference() async throws {
         let store = MemoryStore()
         let deep = fixtureCall(counterparty: "Avery", startedAt: now, duration: 60)
@@ -355,6 +406,36 @@ import Testing
             #expect(batchedNotes[profileCall.id] == perCallNotes)
             #expect(batchedNotes[profileCall.id]?.provider == .glimmer)
 
+            let stranded = recordingCall(startedAt: now.addingTimeInterval(-7 * 86_400))
+            try await store.upsertCall(stranded)
+            callIDs.append(stranded.id)
+            try await store.replaceSegments(
+                callID: stranded.id,
+                provider: .appleSpeech,
+                [
+                    Segment(callID: stranded.id, seq: 0, startSec: 0, endSec: 180.75, channel: .near, text: "one", provider: .appleSpeech)
+                ]
+            )
+            let live = recordingCall(startedAt: now.addingTimeInterval(-120))
+            try await store.upsertCall(live)
+            callIDs.append(live.id)
+
+            let closed = try await store.closeStrandedRecordings(excluding: live.id)
+            let persistedStranded = try #require(await store.fetchCall(id: stranded.id))
+            let persistedLive = try #require(await store.fetchCall(id: live.id))
+
+            #expect(closed.map(\.id) == [stranded.id])
+            #expect(persistedStranded.durationSec == 180)
+            #expect(persistedStranded.status == .transcribed)
+            #expect(persistedLive.status == .recording)
+            #expect(persistedLive.endedAt == nil)
+
+            let repairedSnapshot = try await store.fetchDashboardAnalytics(asOf: now)
+            let strandedRow = try #require(repairedSnapshot.calls.first { $0.id == stranded.id })
+            let liveRow = try #require(repairedSnapshot.calls.first { $0.id == live.id })
+            #expect(strandedRow.durationSec == 180)
+            #expect(liveRow.durationSec == 120)
+
             let shoutedName = profile.displayName.uppercased()
             let shoutedCall = fixtureCall(
                 counterparty: shoutedName,
@@ -410,6 +491,17 @@ import Testing
     }
 
     private static let fixtureAudioPath = "/tmp/dashboard-fixture.caf"
+
+    private func recordingCall(startedAt: Date) -> Call {
+        Call(
+            source: .macManual,
+            startedAt: startedAt,
+            counterpartyName: "Avery",
+            audioPath: Self.fixtureAudioPath,
+            sttProvider: .appleSpeech,
+            status: .recording
+        )
+    }
 
     private func fixtureNotes(callID: UUID, provider: NotesProviderID, at createdAt: Date) -> NotesRecord {
         NotesRecord(

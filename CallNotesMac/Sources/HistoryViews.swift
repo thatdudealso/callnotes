@@ -151,6 +151,7 @@ private struct CounterpartyNameField: View {
             if !editing { commit() }
         }
         .onChange(of: call.id) { _, _ in rebind() }
+        .onDisappear { commit() }
         .onChange(of: call.counterpartyName) { _, name in
             guard !isEditing, let draft, draft.callID == call.id, !draft.isDirty else { return }
             self.draft = Draft(callID: call.id, committedName: name ?? "", text: name ?? "")

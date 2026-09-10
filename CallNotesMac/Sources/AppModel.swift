@@ -151,6 +151,7 @@ final class AppModel {
         statusMessage = nil
         startInboxWatcher()
         do {
+            _ = try await postgres.closeStrandedRecordings(excluding: instantCallAtHangUp?.id)
             try await refresh()
             observeDashboardChanges()
         } catch {

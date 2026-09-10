@@ -112,6 +112,22 @@ public actor MemoryStore: CallStore {
         notes.compactMapValues(NotesRecord.preferred(in:))
     }
 
+    public func closeStrandedRecordings(excluding liveCallID: UUID?) async throws -> [Call] {
+        var repaired: [Call] = []
+        for call in calls.values where StrandedRecordingRepair.isStranded(call, liveCallID: liveCallID) {
+            let closed = StrandedRecordingRepair.closed(
+                call,
+                lastSegmentEndSec: segments[call.id]?.map(\.endSec).max()
+            )
+            calls[closed.id] = closed
+            repaired.append(closed)
+        }
+        if !repaired.isEmpty {
+            dashboardObservers.notify()
+        }
+        return repaired
+    }
+
     private func removeDashboardObserver(_ id: UUID) {
         dashboardObservers.remove(id)
     }
