@@ -379,6 +379,21 @@ public actor PostgresStore: CallStore {
         return records
     }
 
+    /// Deletes synthetic rows inserted by live dashboard tests. Call speakers,
+    /// segments, and notes cascade from `calls`; speaker samples cascade from
+    /// profiles. Always invoke from a failure path as well as the success path.
+    func removeTestFixtures(callIDs: [UUID], profileIDs: [UUID] = []) async throws {
+        for id in callIDs {
+            try await client.query("DELETE FROM calls WHERE id = \(id)", logger: logger)
+        }
+        for id in profileIDs {
+            try await client.query("DELETE FROM speaker_profiles WHERE id = \(id)", logger: logger)
+        }
+        if !callIDs.isEmpty {
+            notifyDashboardObservers()
+        }
+    }
+
     public static func makeIfAvailable() async -> PostgresStore? {
         let candidates = StoreConfiguration.localCandidates()
         var seen = Set<String>()

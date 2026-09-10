@@ -201,53 +201,89 @@ import Testing
 
     @Test func seededPostgresFixturePreservesContactAndCostTruth() async throws {
         guard let store = await PostgresStore.makeIfAvailable() else { return }
-        let fixtureName = "Dashboard fixture \(UUID().uuidString)"
-        let calls = [
-            fixtureCall(counterparty: fixtureName, startedAt: now.addingTimeInterval(-120), duration: 120),
-            fixtureCall(counterparty: fixtureName, startedAt: now.addingTimeInterval(-60), duration: 180, engine: .metaMuse, billedSeconds: 60),
-        ]
-        for call in calls { try await store.upsertCall(call) }
+        let leftover = try await store.fetchCalls().filter { $0.audioPath == "/tmp/dashboard-fixture.caf" }
+        try await store.removeTestFixtures(callIDs: leftover.map(\.id))
+        try await withIsolatedPostgresFixtures(store) { callIDs, profileIDs in
+            let fixtureName = "Dashboard fixture \(UUID().uuidString)"
+            let calls = [
+                fixtureCall(counterparty: fixtureName, startedAt: now.addingTimeInterval(-120), duration: 120),
+                fixtureCall(
+                    counterparty: fixtureName,
+                    startedAt: now.addingTimeInterval(-60),
+                    duration: 180,
+                    engine: .metaMuse,
+                    billedSeconds: 60
+                ),
+            ]
+            for call in calls {
+                try await store.upsertCall(call)
+                callIDs.append(call.id)
+            }
 
-        let snapshot = try await store.fetchDashboardAnalytics(asOf: now)
-        let contact = try #require(snapshot.contacts.first { $0.name == fixtureName })
-        let seededCalls = snapshot.calls.filter { Set(calls.map(\.id)).contains($0.id) }
+            let snapshot = try await store.fetchDashboardAnalytics(asOf: now)
+            let contact = try #require(snapshot.contacts.first { $0.name == fixtureName })
+            let seededCalls = snapshot.calls.filter { Set(calls.map(\.id)).contains($0.id) }
 
-        #expect(contact.callCount == 2)
-        #expect(contact.totalDurationSec == 300)
-        #expect(seededCalls.reduce(0) { $0 + $1.durationSec } == 300)
-        #expect(abs(seededCalls.reduce(0) { $0 + $1.costDollars } - 0.003) < 0.000_000_1)
+            #expect(contact.callCount == 2)
+            #expect(contact.totalDurationSec == 300)
+            #expect(seededCalls.reduce(0) { $0 + $1.durationSec } == 300)
+            #expect(abs(seededCalls.reduce(0) { $0 + $1.costDollars } - 0.003) < 0.000_000_1)
 
-        var retranscribed = fixtureCall(
-            counterparty: "\(fixtureName) reprocessed",
-            startedAt: now,
-            duration: 60
-        )
-        try await store.upsertCall(retranscribed)
-        retranscribed.sttProvider = .metaMuse
-        retranscribed.metaBilledSec = 60
-        try await store.upsertCall(retranscribed)
+            var retranscribed = fixtureCall(
+                counterparty: "\(fixtureName) reprocessed",
+                startedAt: now,
+                duration: 60
+            )
+            try await store.upsertCall(retranscribed)
+            callIDs.append(retranscribed.id)
+            retranscribed.sttProvider = .metaMuse
+            retranscribed.metaBilledSec = 60
+            try await store.upsertCall(retranscribed)
 
-        let refreshed = try await store.fetchDashboardAnalytics(asOf: now)
-        let mixed = try #require(refreshed.calls.first { $0.id == retranscribed.id })
-        #expect(mixed.engine == .mixed)
-        #expect(abs(mixed.costDollars - 0.003) < 0.000_000_1)
+            let refreshed = try await store.fetchDashboardAnalytics(asOf: now)
+            let mixed = try #require(refreshed.calls.first { $0.id == retranscribed.id })
+            #expect(mixed.engine == .mixed)
+            #expect(abs(mixed.costDollars - 0.003) < 0.000_000_1)
 
-        let profile = SpeakerProfile(
-            displayName: "\(fixtureName) profile",
-            centroid: [0],
-            embeddingModel: EmbeddingModel.weSpeakerV2
-        )
-        let profileCall = fixtureCall(counterparty: nil, startedAt: now, duration: 60)
-        try await store.upsertSpeakerProfile(profile)
-        try await store.upsertCall(profileCall)
-        try await store.replaceCallSpeakers(
-            callID: profileCall.id,
-            speakers: [CallSpeaker(callID: profileCall.id, clusterKey: "far", profileID: profile.id, confidence: 0.9)]
-        )
+            let profile = SpeakerProfile(
+                displayName: "\(fixtureName) profile",
+                centroid: [0],
+                embeddingModel: EmbeddingModel.weSpeakerV2
+            )
+            let profileCall = fixtureCall(counterparty: nil, startedAt: now, duration: 60)
+            try await store.upsertSpeakerProfile(profile)
+            profileIDs.append(profile.id)
+            try await store.upsertCall(profileCall)
+            callIDs.append(profileCall.id)
+            try await store.replaceCallSpeakers(
+                callID: profileCall.id,
+                speakers: [CallSpeaker(callID: profileCall.id, clusterKey: "far", profileID: profile.id, confidence: 0.9)]
+            )
 
-        let profileSnapshot = try await store.fetchDashboardAnalytics(asOf: now)
-        let resolved = try #require(profileSnapshot.calls.first { $0.id == profileCall.id })
-        #expect(resolved.counterpartyName == profile.displayName)
+            let profileSnapshot = try await store.fetchDashboardAnalytics(asOf: now)
+            let resolved = try #require(profileSnapshot.calls.first { $0.id == profileCall.id })
+            #expect(resolved.counterpartyName == profile.displayName)
+        }
+    }
+
+    private func withIsolatedPostgresFixtures(
+        _ store: PostgresStore,
+        _ work: (inout [UUID], inout [UUID]) async throws -> Void
+    ) async throws {
+        var callIDs: [UUID] = []
+        var profileIDs: [UUID] = []
+        do {
+            try await work(&callIDs, &profileIDs)
+        } catch {
+            try? await store.removeTestFixtures(callIDs: callIDs, profileIDs: profileIDs)
+            throw error
+        }
+        try await store.removeTestFixtures(callIDs: callIDs, profileIDs: profileIDs)
+        for id in callIDs {
+            #expect(try await store.fetchCall(id: id) == nil)
+        }
+        let remainingProfiles = try await store.fetchSpeakerProfiles()
+        #expect(remainingProfiles.allSatisfy { !profileIDs.contains($0.id) })
     }
 
     private func fixtureCall(
