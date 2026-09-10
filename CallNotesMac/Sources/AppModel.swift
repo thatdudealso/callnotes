@@ -328,9 +328,12 @@ final class AppModel {
             upsertImportJob(job)
             turnsByCall[processed.call.id] = processed.turns
             selectedCallID = processed.call.id
+            removePhoneUploadStaging(audioURL)
             try await refresh()
             statusMessage = "Imported iPhone recording."
         } catch FileImportError.duplicate {
+            try? await store.deleteCall(id: callID)
+            removePhoneUploadStaging(audioURL)
             job.stage = .duplicate
             job.fractionComplete = 1
             upsertImportJob(job)
@@ -340,6 +343,11 @@ final class AppModel {
             upsertImportJob(job)
             statusMessage = error.localizedDescription
         }
+    }
+
+    private func removePhoneUploadStaging(_ audioURL: URL) {
+        try? FileManager.default.removeItem(at: audioURL)
+        try? FileManager.default.removeItem(at: CallUploadMetadata.sidecarURL(nextTo: audioURL))
     }
 
     private func updateDashboardTicker() {

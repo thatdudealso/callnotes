@@ -57,15 +57,25 @@ final class ShareViewController: UIViewController {
               let provider = item.attachments?.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.audio.identifier) })
         else { return }
         let suggestedName = provider.suggestedName
-        provider.loadInPlaceFileRepresentation(forTypeIdentifier: UTType.audio.identifier) { [weak self] url, _, _ in
-            guard let url else { return }
+        provider.loadInPlaceFileRepresentation(forTypeIdentifier: UTType.audio.identifier) { [weak self] url, inPlace, error in
+            guard let url else {
+                DispatchQueue.main.async { self?.showError(error?.localizedDescription ?? "Could not access the shared audio.") }
+                return
+            }
+            let stagedURL: URL
+            do {
+                stagedURL = try Self.stageSharedAudio(url, inPlace: inPlace)
+            } catch {
+                DispatchQueue.main.async { self?.showError(error.localizedDescription) }
+                return
+            }
             DispatchQueue.main.async {
-                self?.sharedAudioURL = url
+                self?.sharedAudioURL = stagedURL
                 let metadata = ExtensionRecordingTitleParser.parse(suggestedName ?? "")
                 self?.sharedMetadata = metadata
                 self?.nameField.text = metadata?.counterpartyName
                 if let startedAt = metadata?.startedAt {
-                    self?.dateField.text = startedAt.formatted(date: .abbreviated, time: .shortened)
+                    self?.dateField.text = Self.dateFormatter.string(from: startedAt)
                 }
             }
         }
@@ -74,7 +84,7 @@ final class ShareViewController: UIViewController {
     @objc private func sendToMac() {
         guard let sharedAudioURL else { showError("This share item is not an audio file."); return }
         let counterpartyName = nameField.text
-        let startedAt = sharedMetadata?.startedAt
+        let startedAt = Self.dateFormatter.date(from: dateField.text ?? "") ?? sharedMetadata?.startedAt
         Task {
             do {
                 let container = try self.sharedContainer()
@@ -98,6 +108,35 @@ final class ShareViewController: UIViewController {
         return url
     }
 
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        formatter.locale = .current
+        formatter.timeZone = .current
+        return formatter
+    }()
+
+    private static func stageSharedAudio(_ source: URL, inPlace: Bool) throws -> URL {
+        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.thatdudealso.callnotes") else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let directory = container.appendingPathComponent("SharedAudio", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appendingPathComponent(UUID().uuidString).appendingPathExtension(source.pathExtension.isEmpty ? "m4a" : source.pathExtension)
+        let accessed = inPlace && source.startAccessingSecurityScopedResource()
+        defer { if accessed { source.stopAccessingSecurityScopedResource() } }
+        var coordinationError: NSError?
+        var copyError: Error?
+        NSFileCoordinator().coordinate(readingItemAt: source, options: [], error: &coordinationError) { readableURL in
+            do { try FileManager.default.copyItem(at: readableURL, to: destination) }
+            catch { copyError = error }
+        }
+        if let coordinationError { throw coordinationError }
+        if let copyError { throw copyError }
+        return destination
+    }
+
     private func showError(_ message: String) {
         let alert = UIAlertController(title: "Couldn’t queue recording", message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "OK", style: .default))
@@ -118,9 +157,9 @@ private enum ExtensionBackgroundUpload {
 
     static func schedule(job: PendingUpload, in container: URL) throws {
         guard let data = UserDefaults(suiteName: "group.com.thatdudealso.callnotes")?.data(forKey: configurationKey),
-              let configuration = try? JSONDecoder().decode(ExtensionPairingConfiguration.self, from: data),
-              let token = token(for: configuration.deviceID)
-        else { return }
+              let configuration = try? JSONDecoder().decode(ExtensionPairingConfiguration.self, from: data)
+        else { throw URLError(.userAuthenticationRequired) }
+        guard let token = token(for: configuration.deviceID) else { throw URLError(.userAuthenticationRequired) }
         let body = try ExtensionMultipartBody.make(job: job, directory: container.appendingPathComponent("UploadRequests", isDirectory: true))
         var request = URLRequest(url: configuration.serverURL.appendingPathComponent("calls").appendingPathComponent(job.id.uuidString))
         request.httpMethod = "POST"
@@ -138,7 +177,11 @@ private enum ExtensionBackgroundUpload {
     }
 
     private static func token(for deviceID: UUID) -> String? {
-        let query: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: keychainService, kSecAttrAccount: deviceID.uuidString, kSecReturnData: true]
+        let task = SecTaskCreateFromSelf(nil)
+        guard let groups = SecTaskCopyValueForEntitlement(task, "keychain-access-groups" as CFString, nil) as? [String],
+              let accessGroup = groups.first(where: { $0.hasSuffix(".com.thatdudealso.callnotes.shared") })
+        else { return nil }
+        let query: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: keychainService, kSecAttrAccount: deviceID.uuidString, kSecAttrAccessGroup: accessGroup, kSecReturnData: true]
         var result: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data else { return nil }
         return String(data: data, encoding: .utf8)
@@ -167,14 +210,17 @@ private enum ExtensionMultipartBody {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let boundary = "CallNotes-\(UUID().uuidString)"
         let url = directory.appendingPathComponent(job.id.uuidString).appendingPathExtension("multipart")
-        var data = Data()
         let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
-        data.append("--\(boundary)\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n".data(using: .utf8)!)
-        data.append(try encoder.encode(job.metadata))
-        data.append("\r\n--\(boundary)\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"\(job.audioURL.lastPathComponent)\"\r\nContent-Type: audio/mp4\r\n\r\n".data(using: .utf8)!)
-        data.append(try Data(contentsOf: job.audioURL))
-        data.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
-        try data.write(to: url, options: .atomic)
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        let output = try FileHandle(forWritingTo: url)
+        defer { try? output.close() }
+        try output.write(contentsOf: "--\(boundary)\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n".data(using: .utf8)!)
+        try output.write(contentsOf: encoder.encode(job.metadata))
+        try output.write(contentsOf: "\r\n--\(boundary)\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"\(job.audioURL.lastPathComponent)\"\r\nContent-Type: audio/mp4\r\n\r\n".data(using: .utf8)!)
+        let input = try FileHandle(forReadingFrom: job.audioURL)
+        defer { try? input.close() }
+        while let chunk = try input.read(upToCount: 64 * 1024), !chunk.isEmpty { try output.write(contentsOf: chunk) }
+        try output.write(contentsOf: "\r\n--\(boundary)--\r\n".data(using: .utf8)!)
         return Body(url: url, contentType: "multipart/form-data; boundary=\(boundary)")
     }
 }

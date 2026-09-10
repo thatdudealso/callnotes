@@ -18,6 +18,7 @@ public struct MacTLSIdentity: Sendable {
         if let certificate = try? Data(contentsOf: certificateURL),
            let key = try? String(contentsOf: keyURL, encoding: .utf8)
         {
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keyURL.path)
             certificateDER = certificate
             privateKeyPEM = key
             return
@@ -41,6 +42,7 @@ public struct MacTLSIdentity: Sendable {
         let pem = try key.serializeAsPEM().pemString
         try der.write(to: certificateURL, options: .atomic)
         try pem.write(to: keyURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keyURL.path)
         certificateDER = der
         privateKeyPEM = pem
     }

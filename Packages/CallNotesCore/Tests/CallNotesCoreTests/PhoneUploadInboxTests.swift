@@ -49,6 +49,23 @@ import Testing
     }
 
     #if os(macOS)
+    @Test func multipartUploadPreservesTrailingAudioCRLF() throws {
+        let boundary = "CallNotes-test"
+        let metadata = CallUploadMetadata(source: .iphoneRecording, counterpartyName: "Priya")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let audio = Data([0x01, 0x0D, 0x0A, 0x0D, 0x0A])
+        var body = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n".utf8)
+        body.append(try encoder.encode(metadata))
+        body.append(Data("\r\n--\(boundary)\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"recording.m4a\"\r\n\r\n".utf8))
+        body.append(audio)
+        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+
+        let parsed = try #require(MultipartCallUpload.parse(body, boundary: boundary))
+        #expect(parsed.audio == audio)
+        #expect(parsed.metadata == metadata)
+    }
+
     @Test func reuploadingTheSameRecordingKeepsOneCallAndItsProgress() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("callnotes-phone-upload-\(UUID().uuidString)", isDirectory: true)

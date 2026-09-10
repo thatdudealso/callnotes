@@ -19,6 +19,14 @@ public actor MemoryStore: CallStore {
         dashboardObservers.notify()
     }
 
+    public func deleteCall(id: UUID) async throws {
+        calls[id] = nil
+        segments[id] = nil
+        callSpeakers[id] = nil
+        notes[id] = nil
+        dashboardObservers.notify()
+    }
+
     public func fetchCalls() async throws -> [Call] {
         calls.values.sorted { $0.startedAt > $1.startedAt }
     }

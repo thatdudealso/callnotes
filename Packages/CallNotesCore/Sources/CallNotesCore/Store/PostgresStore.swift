@@ -99,6 +99,11 @@ public actor PostgresStore: CallStore {
         dashboardObservers.notify()
     }
 
+    public func deleteCall(id: UUID) async throws {
+        try await client.query("DELETE FROM calls WHERE id = \(id)", logger: logger)
+        dashboardObservers.notify()
+    }
+
     private static let selectCalls: PostgresQuery = """
         SELECT id, source, started_at, ended_at, duration_sec, counterparty_name, counterparty_number,
                audio_path, audio_channels, sample_rate, stt_provider, diarization_provider, notes_provider,

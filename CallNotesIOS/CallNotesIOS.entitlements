@@ -4,5 +4,7 @@
 <dict>
     <key>com.apple.security.application-groups</key>
     <array><string>group.com.thatdudealso.callnotes</string></array>
+    <key>keychain-access-groups</key>
+    <array><string>$(AppIdentifierPrefix)com.thatdudealso.callnotes.shared</string></array>
 </dict>
 </plist>

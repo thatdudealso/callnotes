@@ -50,7 +50,11 @@ public actor MacSyncServer {
         }
         router.post("pair") { request, context async throws -> SyncDTO.PairResponse in
             let payload = try await request.decode(as: PairingRequest.self, context: context)
-            return try await pairing.pair(payload)
+            do {
+                return try await pairing.pair(payload)
+            } catch let error as PairingError {
+                throw HTTPError(.badRequest, message: error.localizedDescription)
+            }
         }
         router.get("mirror") { request, _ async throws -> SyncDTO.Mirror in
             _ = try await Self.authorizedDevice(for: request, pairing: pairing)
@@ -116,7 +120,7 @@ public actor MacSyncServer {
         )
         try await store.upsertCall(call)
         if let onAccepted {
-            await onAccepted(uploadID, audioURL, metadata)
+            Task { await onAccepted(uploadID, audioURL, metadata) }
         }
         return .created
     }
@@ -141,15 +145,24 @@ public actor MacSyncServer {
                 startedAt: call.startedAt,
                 source: call.source.rawValue,
                 status: call.status.rawValue,
-                segments: segments.map { .init(id: "\(call.id.uuidString)-\($0.seq)", speaker: $0.channel.rawValue.capitalized, text: $0.text, startSec: $0.startSec) },
+                segments: try await mirroredSegments(segments, callID: call.id, store: store),
                 note: note.map { .init(summary: $0.body.summary, decisions: $0.body.decisions, actionItems: $0.body.actionItems.map(\.text)) }
             ))
         }
         return SyncDTO.Mirror(calls: mirrored)
     }
+
+    private static func mirroredSegments(_ segments: [Segment], callID: UUID, store: any CallStore) async throws -> [SyncDTO.MirroredSegment] {
+        let speakers = try await store.fetchCallSpeakers(callID: callID)
+        let profiles = try await store.fetchSpeakerProfiles()
+        let turns = TurnAttributor.fromStored(segments: segments, speakers: speakers, profiles: profiles)
+        return zip(segments, turns).map { segment, turn in
+            .init(id: "\(callID.uuidString)-\(segment.seq)", speaker: turn.speakerName, text: segment.text, startSec: segment.startSec)
+        }
+    }
 }
 
-private enum MultipartCallUpload {
+enum MultipartCallUpload {
     struct Upload { var metadata: CallUploadMetadata; var audio: Data; var fileExtension: String }
     static func parse(_ body: Data, boundary: String) throws -> Upload? {
         let delimiter = Data("--\(boundary)".utf8)
@@ -161,7 +174,7 @@ private enum MultipartCallUpload {
         for part in body.multipartParts(separatedBy: delimiter) {
             guard let headerRange = part.range(of: headerEnd) else { continue }
             let headers = String(decoding: part[..<headerRange.lowerBound], as: UTF8.self)
-            let content = Data(part[headerRange.upperBound...]).trimmingCRLF()
+            let content = Data(part[headerRange.upperBound...]).removingTrailingFramingCRLF()
             if headers.contains("name=\"metadata\"") { metadata = try metadataDecoder.decode(CallUploadMetadata.self, from: content) }
             if headers.contains("name=\"audio\"") {
                 audio = content
@@ -176,11 +189,9 @@ private enum MultipartCallUpload {
 }
 
 private extension Data {
-    func trimmingCRLF() -> Data {
-        var start = startIndex; var end = endIndex
-        while start < end, self[start] == 13 || self[start] == 10 { formIndex(after: &start) }
-        while start < end, self[index(before: end)] == 13 || self[index(before: end)] == 10 { formIndex(before: &end) }
-        return Data(self[start..<end])
+    func removingTrailingFramingCRLF() -> Data {
+        guard count >= 2, suffix(2) == Data("\r\n".utf8) else { return self }
+        return Data(dropLast(2))
     }
 }
 
@@ -189,10 +200,10 @@ private extension Data {
         var parts: [Data] = []
         var start = startIndex
         while let range = range(of: delimiter, options: [], in: start..<endIndex) {
-            if start != range.lowerBound { parts.append(Data(self[start..<range.lowerBound]).trimmingCRLF()) }
+            if start != range.lowerBound { parts.append(Data(self[start..<range.lowerBound])) }
             start = range.upperBound
         }
-        if start < endIndex { parts.append(Data(self[start..<endIndex]).trimmingCRLF()) }
+        if start < endIndex { parts.append(Data(self[start..<endIndex])) }
         return parts
     }
 }

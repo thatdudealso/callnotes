@@ -4,6 +4,7 @@ import Foundation
 public protocol CallStore: Sendable {
     func migrate() async throws
     func upsertCall(_ call: Call) async throws
+    func deleteCall(id: UUID) async throws
     func fetchCalls() async throws -> [Call]
     func fetchCall(id: UUID) async throws -> Call?
     func fetchDashboardAnalytics(asOf: Date) async throws -> DashboardAnalytics

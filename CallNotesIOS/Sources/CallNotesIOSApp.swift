@@ -276,12 +276,18 @@ struct PhoneSettingsView: View {
     @Published private(set) var isRecording = false
     private var recorder: AVAudioRecorder?
     func start() async throws {
+        guard await AVAudioApplication.requestRecordPermission() else {
+            throw NSError(domain: "CallNotes.Recorder", code: 1, userInfo: [NSLocalizedDescriptionKey: "CallNotes needs microphone access to record."])
+        }
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.record, mode: .measurement)
         try session.setActive(true)
         let url = try PhoneSharedContainer.recordingsDirectory().appendingPathComponent(UUID().uuidString).appendingPathExtension("m4a")
         recorder = try AVAudioRecorder(url: url, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 44_100, AVNumberOfChannelsKey: 1])
-        recorder?.record(); isRecording = true
+        guard recorder?.record() == true else {
+            throw NSError(domain: "CallNotes.Recorder", code: 2, userInfo: [NSLocalizedDescriptionKey: "Could not start recording."])
+        }
+        isRecording = true
     }
     func stop() throws -> URL {
         guard let recorder else { throw CocoaError(.fileNoSuchFile) }

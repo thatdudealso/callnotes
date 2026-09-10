@@ -48,6 +48,7 @@ enum PhonePairingStore {
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: keychainService,
             kSecAttrAccount: configuration.deviceID.uuidString,
+            kSecAttrAccessGroup: try sharedAccessGroup(),
             kSecValueData: Data(token.utf8),
             kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
         ]
@@ -57,12 +58,14 @@ enum PhonePairingStore {
 
     static func load() -> (PhonePairingConfiguration, String)? {
         guard let data = UserDefaults(suiteName: PhoneSharedContainer.appGroupIdentifier)?.data(forKey: defaultsKey),
-              let configuration = try? JSONDecoder().decode(PhonePairingConfiguration.self, from: data)
+              let configuration = try? JSONDecoder().decode(PhonePairingConfiguration.self, from: data),
+              let accessGroup = try? sharedAccessGroup()
         else { return nil }
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: keychainService,
             kSecAttrAccount: configuration.deviceID.uuidString,
+            kSecAttrAccessGroup: accessGroup,
             kSecReturnData: true,
         ]
         var result: CFTypeRef?
@@ -74,14 +77,23 @@ enum PhonePairingStore {
     }
 
     static func remove() {
-        guard let (configuration, _) = load() else { return }
+        guard let (configuration, _)= load(), let accessGroup = try? sharedAccessGroup() else { return }
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: keychainService,
             kSecAttrAccount: configuration.deviceID.uuidString,
+            kSecAttrAccessGroup: accessGroup,
         ]
         SecItemDelete(query as CFDictionary)
         UserDefaults(suiteName: PhoneSharedContainer.appGroupIdentifier)?.removeObject(forKey: defaultsKey)
+    }
+
+    private static func sharedAccessGroup() throws -> String {
+        let task = SecTaskCreateFromSelf(nil)
+        guard let groups = SecTaskCopyValueForEntitlement(task, "keychain-access-groups" as CFString, nil) as? [String],
+              let group = groups.first(where: { $0.hasSuffix(".com.thatdudealso.callnotes.shared") })
+        else { throw CocoaError(.fileNoSuchFile) }
+        return group
     }
 }
 
@@ -97,7 +109,8 @@ enum PhonePairingCoordinator {
         request.httpBody = try JSONEncoder().encode(PairingRequest(code: ticket.code, deviceName: deviceName))
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw URLError(.cannotConnectToHost)
+            let message = String(data: data, encoding: .utf8)
+            throw NSError(domain: "CallNotes.Pairing", code: (response as? HTTPURLResponse)?.statusCode ?? -1, userInfo: [NSLocalizedDescriptionKey: message?.isEmpty == false ? message! : "Could not pair with this Mac."])
         }
         let paired = try JSONDecoder().decode(SyncDTO.PairResponse.self, from: data)
         let configuration = PhonePairingConfiguration(
@@ -241,14 +254,17 @@ private enum MultipartUploadBody {
     static func make(job: PendingUpload, directory: URL) throws -> Body {
         let boundary = "CallNotes-\(UUID().uuidString)"
         let url = directory.appendingPathComponent(job.id.uuidString).appendingPathExtension("multipart")
-        var data = Data()
         let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
-        data.append("--\(boundary)\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n".data(using: .utf8)!)
-        data.append(try encoder.encode(job.metadata))
-        data.append("\r\n--\(boundary)\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"\(job.audioURL.lastPathComponent)\"\r\nContent-Type: audio/mp4\r\n\r\n".data(using: .utf8)!)
-        data.append(try Data(contentsOf: job.audioURL))
-        data.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
-        try data.write(to: url, options: .atomic)
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        let output = try FileHandle(forWritingTo: url)
+        defer { try? output.close() }
+        try output.write(contentsOf: "--\(boundary)\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n".data(using: .utf8)!)
+        try output.write(contentsOf: encoder.encode(job.metadata))
+        try output.write(contentsOf: "\r\n--\(boundary)\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"\(job.audioURL.lastPathComponent)\"\r\nContent-Type: audio/mp4\r\n\r\n".data(using: .utf8)!)
+        let input = try FileHandle(forReadingFrom: job.audioURL)
+        defer { try? input.close() }
+        while let chunk = try input.read(upToCount: 64 * 1024), !chunk.isEmpty { try output.write(contentsOf: chunk) }
+        try output.write(contentsOf: "\r\n--\(boundary)--\r\n".data(using: .utf8)!)
         return Body(url: url, contentType: "multipart/form-data; boundary=\(boundary)")
     }
 }
