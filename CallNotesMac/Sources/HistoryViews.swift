@@ -140,6 +140,7 @@ private struct CounterpartyNameField: View {
     let call: Call
 
     @State private var draft = ""
+    @State private var editingCallID: UUID?
     @FocusState private var isEditing: Bool
 
     var body: some View {
@@ -154,14 +155,18 @@ private struct CounterpartyNameField: View {
                 guard !isEditing else { return }
                 draft = name ?? ""
             }
-            .task(id: call.id) { draft = call.counterpartyName ?? "" }
+            .task(id: call.id) {
+                editingCallID = call.id
+                draft = call.counterpartyName ?? ""
+            }
     }
 
     @MainActor
     private func commit() {
+        guard let editingCallID, editingCallID == call.id else { return }
         let normalized = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard normalized != (call.counterpartyName ?? "") else { return }
-        Task { await model.updateCounterpartyName(for: call.id, name: normalized) }
+        Task { await model.updateCounterpartyName(for: editingCallID, name: normalized) }
     }
 }
 

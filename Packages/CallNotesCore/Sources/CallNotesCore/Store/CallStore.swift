@@ -26,7 +26,7 @@ public protocol CallStore: Sendable {
 }
 
 extension CallStore {
-    public func fetchDashboardAnalytics(asOf: Date = .now) async throws -> DashboardAnalytics {
+    public func fetchDashboardAnalytics(asOf: Date) async throws -> DashboardAnalytics {
         DashboardAnalytics.make(from: try await fetchCalls(), now: asOf)
     }
 
