@@ -29,7 +29,7 @@ public enum FileAudioLoader {
     ) throws -> LoadedAudio {
         let file: AVAudioFile
         do {
-            file = try AVAudioFile(forReading: url)
+            file = try AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false)
         } catch {
             throw FileImportError.invalidAudio("CallNotes could not decode this audio file")
         }
@@ -44,8 +44,8 @@ public enum FileAudioLoader {
         buffer.frameLength = frames
 
         let channelCount = Int(file.processingFormat.channelCount)
-        var near = int16Channel(buffer, channel: 0)
-        var far = channelCount >= 2 ? int16Channel(buffer, channel: 1) : Data()
+        var near = try int16Channel(buffer, channel: 0)
+        var far = channelCount >= 2 ? try int16Channel(buffer, channel: 1) : Data()
         let sourceRate = file.processingFormat.sampleRate
         if Int(sourceRate.rounded()) != targetSampleRate {
             near = resample(near, from: sourceRate, to: Double(targetSampleRate))
@@ -64,7 +64,7 @@ public enum FileAudioLoader {
         )
     }
 
-    private static func int16Channel(_ buffer: AVAudioPCMBuffer, channel: Int) -> Data {
+    private static func int16Channel(_ buffer: AVAudioPCMBuffer, channel: Int) throws -> Data {
         let frames = Int(buffer.frameLength)
         guard frames > 0 else { return Data() }
         let channelCount = Int(buffer.format.channelCount)
@@ -94,6 +94,8 @@ public enum FileAudioLoader {
                     samples[index] = clipToInt16(source[index])
                 }
             }
+        } else {
+            throw FileImportError.invalidAudio("CallNotes could not read this audio file's sample format")
         }
         return samples.withUnsafeBytes { Data($0) }
     }

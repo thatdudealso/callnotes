@@ -181,6 +181,22 @@ import Testing
         #expect(merged.map(\.text).joined(separator: " ") == "I agree with that plan")
     }
 
+    @Test func overlapDeduperKeepsBothSpeakersAcrossASimultaneousRetaggedSeam() {
+        let merged = ImportTranscriptOverlapDeduper.merge(
+            previous: [
+                RawSegment(start: 564, end: 570, text: "yes", speakerTag: "speaker_0", channel: .mixed),
+                RawSegment(start: 565, end: 570, text: "yes", speakerTag: "speaker_1", channel: .mixed),
+            ],
+            incoming: [
+                RawSegment(start: 0, end: 2, text: "yes next", speakerTag: "speaker_2", channel: .mixed),
+            ],
+            incomingOffset: 565
+        )
+
+        #expect(merged.map(\.text).joined(separator: " ") == "yes yes next")
+        #expect(merged.map(\.speakerTag) == ["speaker_0", "speaker_1", "speaker_2"])
+    }
+
     @Test func fileSpineChunksATenMinuteImportAndStitchesWithoutDupOrDrop() async throws {
         let store = MemoryStore()
         let pcm = Data(count: 16_000 * 601 * 2)
@@ -497,6 +513,61 @@ import Testing
     }
 }
 
+@Suite struct FileAudioLoaderFormatTests {
+    @Test func int32AndInt24SourcesDecodeToNonSilentPCM() throws {
+        for (fileExtension, bitDepth) in [("wav", 32), ("aiff", 24)] {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("callnotes-pcm\(bitDepth)-\(UUID().uuidString).\(fileExtension)")
+            try ImportFixtureWriter.writeLinearPCMFile(to: url, seconds: 0.5, bitDepth: bitDepth, isFloat: false)
+            defer { try? FileManager.default.removeItem(at: url) }
+
+            let storedFormat = try AVAudioFile(forReading: url).fileFormat
+            let stored = storedFormat.streamDescription.pointee
+            #expect(stored.mBitsPerChannel == UInt32(bitDepth))
+            #expect(stored.mFormatFlags & kAudioFormatFlagIsFloat == 0)
+
+            let loaded = try FileAudioLoader.load(url)
+            #expect(loaded.sampleRate == 16_000)
+            #expect(loaded.near.count / 2 == 8_000)
+            #expect(peakAmplitude(of: loaded.near) > 8_000)
+        }
+    }
+
+    @Test func float64SourceDecodesToNonSilentPCM() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-pcm64-\(UUID().uuidString).wav")
+        try ImportFixtureWriter.writeFloat64WAV(to: url, seconds: 0.5)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let storedFormat = try AVAudioFile(forReading: url).fileFormat
+        let stored = storedFormat.streamDescription.pointee
+        #expect(stored.mBitsPerChannel == 64)
+        #expect(stored.mFormatFlags & kAudioFormatFlagIsFloat != 0)
+
+        let loaded = try FileAudioLoader.load(url)
+        #expect(loaded.sampleRate == 16_000)
+        #expect(loaded.near.count / 2 == 8_000)
+        #expect(peakAmplitude(of: loaded.near) > 8_000)
+    }
+
+    @Test func undecodableFileFailsInsteadOfImportingSilence() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-not-audio-\(UUID().uuidString).wav")
+        try Data("not an audio file".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        #expect(throws: FileImportError.self) {
+            try FileAudioLoader.load(url)
+        }
+    }
+
+    private func peakAmplitude(of pcm16: Data) -> Int {
+        pcm16.withUnsafeBytes { raw in
+            raw.bindMemory(to: Int16.self).reduce(0) { max($0, abs(Int($1))) }
+        }
+    }
+}
+
 private final class LockBox<Value>: @unchecked Sendable {
     var value: Value
     init(_ value: Value) { self.value = value }
@@ -544,6 +615,63 @@ enum ImportFixtureWriter {
         wav.append(contentsOf: UInt32(sampleRate * 2).littleEndianBytes)
         wav.append(contentsOf: UInt16(2).littleEndianBytes)
         wav.append(contentsOf: UInt16(16).littleEndianBytes)
+        wav.append(contentsOf: "data".utf8)
+        wav.append(contentsOf: UInt32(pcm.count).littleEndianBytes)
+        wav.append(pcm)
+        try wav.write(to: url)
+    }
+
+    static func writeLinearPCMFile(
+        to url: URL,
+        seconds: Double,
+        sampleRate: Int = 16_000,
+        bitDepth: Int,
+        isFloat: Bool
+    ) throws {
+        let frames = max(1, Int(seconds * Double(sampleRate)))
+        let settings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatLinearPCM),
+            AVSampleRateKey: sampleRate,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: bitDepth,
+            AVLinearPCMIsFloatKey: isFloat,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+        let file = try AVAudioFile(forWriting: url, settings: settings)
+        guard
+            let buffer = AVAudioPCMBuffer(
+                pcmFormat: file.processingFormat,
+                frameCapacity: AVAudioFrameCount(frames)
+            ),
+            let channel = buffer.floatChannelData
+        else {
+            throw FileImportError.invalidAudio("Could not build a linear PCM fixture buffer")
+        }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        for index in 0..<frames {
+            channel[0][index] = Float(sin(2 * Double.pi * 440 * Double(index) / Double(sampleRate)) * 0.5)
+        }
+        try file.write(from: buffer)
+    }
+
+    static func writeFloat64WAV(to url: URL, seconds: Double, sampleRate: Int = 16_000) throws {
+        let frames = max(1, Int(seconds * Double(sampleRate)))
+        var pcm = Data()
+        for index in 0..<frames {
+            var sample = sin(2 * Double.pi * 440 * Double(index) / Double(sampleRate)) * 0.5
+            withUnsafeBytes(of: &sample) { pcm.append(contentsOf: $0) }
+        }
+        var wav = Data("RIFF".utf8)
+        wav.append(contentsOf: UInt32(36 + pcm.count).littleEndianBytes)
+        wav.append(contentsOf: "WAVEfmt ".utf8)
+        wav.append(contentsOf: UInt32(16).littleEndianBytes)
+        wav.append(contentsOf: UInt16(3).littleEndianBytes)
+        wav.append(contentsOf: UInt16(1).littleEndianBytes)
+        wav.append(contentsOf: UInt32(sampleRate).littleEndianBytes)
+        wav.append(contentsOf: UInt32(sampleRate * 8).littleEndianBytes)
+        wav.append(contentsOf: UInt16(8).littleEndianBytes)
+        wav.append(contentsOf: UInt16(64).littleEndianBytes)
         wav.append(contentsOf: "data".utf8)
         wav.append(contentsOf: UInt32(pcm.count).littleEndianBytes)
         wav.append(pcm)
