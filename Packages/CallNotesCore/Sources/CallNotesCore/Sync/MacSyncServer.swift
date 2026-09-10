@@ -116,6 +116,7 @@ public actor MacSyncServer {
     /// transfer it could not acknowledge never produces a second call and never
     /// overwrites an already processed one.
     func accept(uploadID: UUID, metadata: CallUploadMetadata, audio: Data, fileExtension: String) async throws -> UploadOutcome {
+        guard !audio.isEmpty else { throw HTTPError(.badRequest, message: "Audio upload is empty.") }
         guard reserve(uploadID) else { return .inProgress }
         do {
             try FileManager.default.createDirectory(at: receivedUploadsDirectory, withIntermediateDirectories: true)

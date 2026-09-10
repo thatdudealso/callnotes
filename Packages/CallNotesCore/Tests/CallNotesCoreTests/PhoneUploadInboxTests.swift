@@ -61,6 +61,41 @@ import Testing
         #expect(await relaunchedProcess.pending().map(\.id) == [job.id])
     }
 
+    @Test func relaunchedSessionCoordinatorCompletesThenSignalsBackgroundLifecycle() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("recording.m4a")
+        try Data("recording".utf8).write(to: source)
+        let inbox = try PendingUploadInbox(directory: root.appendingPathComponent("shared", isDirectory: true))
+        let job = try await inbox.enqueue(audioAt: source, metadata: .init(source: .iphoneRecording))
+        let starter = UploadStarter()
+        let relaunched = try SessionUploadCoordinator(directory: root.appendingPathComponent("shared", isDirectory: true), starter: starter)
+        await relaunched.resume()
+        #expect(await starter.started == [job.id])
+        let signal = CompletionSignal()
+        await relaunched.handleBackgroundEvents(identifier: "share-upload") { signal.mark() }
+        await relaunched.taskCompleted(uploadID: job.id, error: nil)
+        await relaunched.finishBackgroundEvents(identifier: "share-upload")
+        let reopened = try PendingUploadInbox(directory: root.appendingPathComponent("shared", isDirectory: true))
+        #expect(await reopened.pending().isEmpty)
+        #expect(signal.didRun)
+    }
+
+    @Test func relaunchedSessionCoordinatorKeepsFailedUpload() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("recording.m4a")
+        try Data("recording".utf8).write(to: source)
+        let inbox = try PendingUploadInbox(directory: root.appendingPathComponent("shared", isDirectory: true))
+        let job = try await inbox.enqueue(audioAt: source, metadata: .init(source: .iphoneRecording))
+        let coordinator = try SessionUploadCoordinator(directory: root.appendingPathComponent("shared", isDirectory: true), starter: UploadStarter())
+        await coordinator.taskCompleted(uploadID: job.id, error: URLError(.networkConnectionLost))
+        let reopened = try PendingUploadInbox(directory: root.appendingPathComponent("shared", isDirectory: true))
+        #expect(await reopened.pending(now: .distantFuture).map(\.id) == [job.id])
+    }
+
     #if os(macOS)
     @Test func multipartUploadPreservesTrailingAudioCRLF() throws {
         let boundary = "CallNotes-test"
@@ -151,6 +186,18 @@ import Testing
         let audioURL = root.appendingPathComponent("\(uploadID.uuidString).m4a")
         #expect(try Data(contentsOf: audioURL) == audio)
         #expect(CallUploadMetadata.loadSidecar(nextTo: audioURL) == metadata)
+    }
+
+    @Test func directEmptyAudioIsRejectedWithoutCreatingCall() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MemoryStore()
+        let uploadID = UUID()
+        let server = MacSyncServer(store: store, receivedUploadsDirectory: root)
+        await #expect(throws: Error.self) {
+            try await server.accept(uploadID: uploadID, metadata: .init(source: .iphoneRecording), audio: Data(), fileExtension: "m4a")
+        }
+        #expect(try await store.fetchCall(id: uploadID) == nil)
     }
 
     @Test func reuploadingTheSameRecordingKeepsOneCallAndItsProgress() async throws {
@@ -253,4 +300,16 @@ import Testing
 private actor UploadCounter {
     private(set) var count = 0
     func record() { count += 1 }
+}
+
+private actor UploadStarter: SessionUploadTaskStarting {
+    private(set) var started: [UUID] = []
+    func start(uploadID: UUID) { started.append(uploadID) }
+}
+
+private final class CompletionSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var didRun: Bool { lock.withLock { value } }
+    func mark() { lock.withLock { value = true } }
 }
