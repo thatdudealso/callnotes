@@ -45,7 +45,8 @@ public struct FileTranscriptionSpine: Sendable {
                     profiles: profiles,
                     job: progress,
                     meta: meta,
-                    billing: metaBilling
+                    billing: metaBilling,
+                    stage: &stage
                 )
             }
 
@@ -63,30 +64,44 @@ public struct FileTranscriptionSpine: Sendable {
             emit(progress)
 
             let config = STTSessionConfig(sampleRate: loaded.sampleRate)
+            let nearPlans = ImportFileChunker.plan(
+                totalFrames: loaded.near.count / 2,
+                sampleRate: loaded.sampleRate
+            )
+            let farPlans = loaded.isStereo
+                ? ImportFileChunker.plan(totalFrames: loaded.far.count / 2, sampleRate: loaded.sampleRate)
+                : []
+            progress.chunkCount = nearPlans.count + farPlans.count
             let raw: [RawSegment]
             if loaded.isStereo {
                 let near = try await transcribeChunked(
                     pcm: loaded.near,
+                    plans: nearPlans,
                     channel: .near,
                     sampleRate: loaded.sampleRate,
                     config: config,
-                    job: &progress
+                    job: &progress,
+                    completedChunks: 0
                 )
                 let far = try await transcribeChunked(
                     pcm: loaded.far,
+                    plans: farPlans,
                     channel: .far,
                     sampleRate: loaded.sampleRate,
                     config: config,
-                    job: &progress
+                    job: &progress,
+                    completedChunks: nearPlans.count
                 )
                 raw = (near + far).sorted { $0.start < $1.start }
             } else {
                 raw = try await transcribeChunked(
                     pcm: loaded.near,
+                    plans: nearPlans,
                     channel: .mixed,
                     sampleRate: loaded.sampleRate,
                     config: config,
-                    job: &progress
+                    job: &progress,
+                    completedChunks: 0
                 )
             }
             guard !raw.isEmpty else { throw FileImportError.emptyTranscript }
@@ -120,16 +135,11 @@ public struct FileTranscriptionSpine: Sendable {
             let segments = TurnAttributor.toSegments(turns, callID: working.id, provider: speech.id)
             stage = "persistence"
             try await store.replaceSegments(callID: working.id, provider: speech.id, segments)
-            let mappings = clusters.map { cluster -> CallSpeaker in
-                let match = turns.first { $0.clusterKey == cluster.key }
-                return CallSpeaker(
-                    callID: working.id,
-                    clusterKey: cluster.key,
-                    profileID: match?.speakerID,
-                    confidence: match?.speakerID == nil ? 0 : 1,
-                    labelOverride: match?.speakerName
-                )
-            }
+            let mappings = TurnAttributor.callSpeakers(
+                for: turns,
+                clusters: clusters,
+                callID: working.id
+            )
             try await store.replaceCallSpeakers(callID: working.id, speakers: mappings)
 
             working.status = .transcribed
@@ -167,12 +177,14 @@ public struct FileTranscriptionSpine: Sendable {
         profiles: [SpeakerProfile],
         job: ImportJob,
         meta: any MetaFileTranscribing,
-        billing: MetaImportBilling
+        billing: MetaImportBilling,
+        stage: inout String
     ) async throws -> ProcessedCall {
         var working = call
         var progress = job
         progress.stage = .transcribing
         emit(progress)
+        stage = "transcription"
         let result = try await meta.transcribeWithReceipt(fileURL: fileURL, config: STTSessionConfig())
         await billing.add(result.billedSeconds)
         working.metaBilledSec += result.billedSeconds
@@ -191,6 +203,7 @@ public struct FileTranscriptionSpine: Sendable {
             working.endedAt = working.startedAt.addingTimeInterval(loaded.duration)
         }
 
+        stage = "diarization"
         let diarizeURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(working.id.uuidString)-meta-diarize.caf")
         defer { try? FileManager.default.removeItem(at: diarizeURL) }
@@ -209,9 +222,11 @@ public struct FileTranscriptionSpine: Sendable {
         }
         working.diarizationProvider = diarizer.providerID
 
+        stage = "attribution"
         let localSegments = result.segments.map { segment -> RawSegment in
             var segment = segment
             segment.speakerTag = ClusterAssigner.assign(segment: segment, clusters: clusters)
+                ?? segment.speakerTag
             return segment
         }
         let turns = TurnAttributor.attributeMono(
@@ -220,17 +235,13 @@ public struct FileTranscriptionSpine: Sendable {
             profiles: profiles
         )
         let segments = TurnAttributor.toSegments(turns, callID: working.id, provider: .metaMuse)
+        stage = "persistence"
         try await store.replaceSegments(callID: working.id, provider: .metaMuse, segments)
-        let mappings = clusters.map { cluster -> CallSpeaker in
-            let match = turns.first { $0.clusterKey == cluster.key }
-            return CallSpeaker(
-                callID: working.id,
-                clusterKey: cluster.key,
-                profileID: match?.speakerID,
-                confidence: match?.speakerID == nil ? 0 : 1,
-                labelOverride: match?.speakerName
-            )
-        }
+        let mappings = TurnAttributor.callSpeakers(
+            for: turns,
+            clusters: clusters,
+            callID: working.id
+        )
         try await store.replaceCallSpeakers(callID: working.id, speakers: mappings)
         working.status = .transcribed
         working.error = nil
@@ -246,19 +257,19 @@ public struct FileTranscriptionSpine: Sendable {
 
     private func transcribeChunked(
         pcm: Data,
+        plans: [ImportFileChunk],
         channel: SegmentChannel,
         sampleRate: Int,
         config: STTSessionConfig,
-        job: inout ImportJob
+        job: inout ImportJob,
+        completedChunks: Int
     ) async throws -> [RawSegment] {
-        let frames = pcm.count / 2
-        let plans = ImportFileChunker.plan(totalFrames: frames, sampleRate: sampleRate)
-        job.chunkCount = max(job.chunkCount, plans.count)
+        job.chunkCount = max(job.chunkCount, completedChunks + plans.count)
         var merged: [RawSegment] = []
         for (index, chunk) in plans.enumerated() {
-            job.chunkIndex = index
+            job.chunkIndex = completedChunks + index
             job.stage = .transcribing
-            job.fractionComplete = Double(index) / Double(max(plans.count, 1)) * 0.8
+            job.fractionComplete = Double(job.chunkIndex) / Double(max(job.chunkCount, 1)) * 0.8
             emit(job)
             let slice = try ImportFileChunker.pcmSlice(pcm, chunk: chunk)
             let relative = try await speech.transcribePCM(slice, channel: channel, config: config)

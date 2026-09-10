@@ -221,7 +221,7 @@ import Testing
 
         #expect(turns.map(\.speakerName) == ["Speaker 2", "Speaker 2", "Speaker 2"])
         #expect(turns.allSatisfy { $0.speakerID == nil })
-        #expect(turns.allSatisfy { $0.clusterKey == nil })
+        #expect(turns.allSatisfy { $0.clusterKey == TurnAttributor.unassignedClusterKey })
     }
 
     @Test func monoUnassignedLabelDoesNotCollideWithADiarizedSpeaker() {
@@ -236,8 +236,21 @@ import Testing
         let turns = TurnAttributor.attributeMono(segments: segments, clusters: clusters, profiles: [owner])
 
         #expect(turns.map(\.speakerName) == ["Speaker 2", "Speaker 3"])
-        #expect(turns.map(\.clusterKey) == ["A", nil])
+        #expect(turns.map(\.clusterKey) == ["A", TurnAttributor.unassignedClusterKey])
         #expect(turns.allSatisfy { $0.speakerID == nil })
+    }
+
+    @Test func monoProviderTagsWithoutLocalClustersGetDistinctLabels() {
+        let segments = [
+            RawSegment(start: 0, end: 5, text: "hello", speakerTag: "speaker_0", channel: .mixed),
+            RawSegment(start: 6, end: 10, text: "hi back", speakerTag: "speaker_1", channel: .mixed),
+            RawSegment(start: 11, end: 15, text: "and again", speakerTag: "speaker_0", channel: .mixed),
+        ]
+
+        let turns = TurnAttributor.attributeMono(segments: segments, clusters: [], profiles: [owner])
+
+        #expect(turns.map(\.speakerName) == ["Speaker 2", "Speaker 3", "Speaker 2"])
+        #expect(turns.map(\.clusterKey) == ["speaker_0", "speaker_1", "speaker_0"])
     }
 
     @Test func clusterFromAnotherEmbeddingModelRemainsUnassigned() {

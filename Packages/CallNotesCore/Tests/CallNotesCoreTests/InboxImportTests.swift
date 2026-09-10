@@ -55,6 +55,26 @@ import Testing
         #expect(try await index.remember(url) == false)
     }
 
+    @Test func startedWatcherIsReleasedWhenNothingElseHoldsIt() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-watch-lifetime-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        weak var released: InboxWatcher?
+        do {
+            let watcher = InboxWatcher(directory: directory, pollInterval: 60)
+            watcher.start()
+            released = watcher
+            #expect(released != nil)
+        }
+
+        for _ in 0..<100 where released != nil {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(released == nil)
+    }
+
     @Test func watcherScanEmitsASettledFileOnce() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("callnotes-watch-\(UUID().uuidString)", isDirectory: true)
@@ -452,6 +472,7 @@ import Testing
         let persisted = try await store.fetchCall(id: call.id)
         #expect(persisted?.status == .failed)
         #expect(persisted?.metaBilledSec == 570)
+        #expect(persisted?.errorStage == "transcription")
     }
 
     @Test func emptyMetaTranscriptPersistsAccruedBilling() async throws {
@@ -480,6 +501,130 @@ import Testing
         let persisted = try await store.fetchCall(id: call.id)
         #expect(persisted?.status == .failed)
         #expect(persisted?.metaBilledSec == 570)
+        #expect(persisted?.errorStage == "transcription")
+    }
+
+    @Test func metaImportKeepsProviderSpeakersWhenLocalDiarizationIsEmpty() async throws {
+        let store = MemoryStore()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-meta-tags-\(UUID().uuidString).caf")
+        try ChannelAudio.writeMonoCAF(pcm16: Data(count: 32_000), sampleRate: 16_000, to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let call = Call(
+            source: .fileImport,
+            startedAt: Date(),
+            audioPath: url.path,
+            sttProvider: .metaMuse,
+            status: .uploaded
+        )
+        let spine = FileTranscriptionSpine(
+            speech: ScriptedPCMTranscriber(near: [], far: []),
+            diarizer: ScriptedDiarizer(clusters: []),
+            store: store,
+            meta: SimulatedMetaFileProvider(
+                segments: [
+                    RawSegment(start: 0, end: 1, text: "Morning.", speakerTag: "speaker_0", channel: .mixed),
+                    RawSegment(start: 2, end: 3, text: "Morning to you.", speakerTag: "speaker_1", channel: .mixed),
+                ],
+                billedSeconds: 1
+            )
+        )
+
+        let processed = try await spine.process(fileURL: url, call: call, profiles: [])
+
+        #expect(processed.turns.map(\.text) == ["Morning.", "Morning to you."])
+        #expect(Set(processed.turns.map(\.speakerName)).count == 2)
+
+        let reloaded = TurnAttributor.fromStored(
+            segments: try await store.fetchSegments(callID: call.id, provider: .metaMuse),
+            speakers: try await store.fetchCallSpeakers(callID: call.id),
+            profiles: []
+        )
+        #expect(reloaded.map(\.speakerName) == processed.turns.map(\.speakerName))
+        #expect(Set(reloaded.map(\.speakerName)).count == 2)
+    }
+
+    @Test func unassignedImportSpeakerLabelSurvivesAReload() async throws {
+        let store = MemoryStore()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-unassigned-\(UUID().uuidString).caf")
+        try ChannelAudio.writeMonoCAF(pcm16: Data(count: 16_000 * 2 * 12), sampleRate: 16_000, to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let call = Call(
+            source: .fileImport,
+            startedAt: Date(),
+            audioPath: url.path,
+            sttProvider: .appleSpeech,
+            status: .uploaded
+        )
+        let speech = ScriptedPCMTranscriber(
+            near: [
+                RawSegment(start: 0, end: 5, text: "Inside the cluster.", channel: .mixed),
+                RawSegment(start: 8, end: 11, text: "Outside every cluster.", channel: .mixed),
+            ],
+            far: []
+        )
+        let spine = FileTranscriptionSpine(
+            speech: speech,
+            diarizer: ScriptedDiarizer(clusters: [
+                DiarizedCluster(
+                    key: "A",
+                    ranges: [0...5],
+                    embedding: [0, 0, 1],
+                    embeddingModel: EmbeddingModel.weSpeakerV2
+                )
+            ]),
+            store: store
+        )
+        let owner = SpeakerProfile(
+            displayName: "Me",
+            isOwner: true,
+            centroid: [1, 0, 0],
+            embeddingModel: EmbeddingModel.weSpeakerV2
+        )
+        try await store.upsertSpeakerProfile(owner)
+
+        let processed = try await spine.process(fileURL: url, call: call, profiles: [owner])
+        #expect(processed.turns.map(\.speakerName) == ["Speaker 2", "Speaker 3"])
+
+        let reloaded = TurnAttributor.fromStored(
+            segments: try await store.fetchSegments(callID: call.id, provider: .appleSpeech),
+            speakers: try await store.fetchCallSpeakers(callID: call.id),
+            profiles: [owner]
+        )
+        #expect(reloaded.map(\.speakerName) == ["Speaker 2", "Speaker 3"])
+    }
+
+    @Test func stereoImportProgressNeverGoesBackward() async throws {
+        let store = MemoryStore()
+        let channel = Data(count: 16_000 * 601 * 2)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-stereo-progress-\(UUID().uuidString).caf")
+        try ChannelAudio.writeStereoCAF(near: channel, far: channel, sampleRate: 16_000, to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let ticks = LockBox<[ImportJob]>([])
+        var spine = FileTranscriptionSpine(
+            speech: ScriptedPCMTranscriber(
+                near: [RawSegment(start: 0, end: 1, text: "Near speech.", channel: .near)],
+                far: [RawSegment(start: 0, end: 1, text: "Far speech.", channel: .far)]
+            ),
+            diarizer: ScriptedDiarizer(clusters: []),
+            store: store
+        )
+        spine.onProgress = { job in ticks.value.append(job) }
+
+        _ = try await spine.process(
+            fileURL: url,
+            call: Call(source: .fileImport, startedAt: Date(), audioPath: url.path, sttProvider: .appleSpeech),
+            profiles: []
+        )
+
+        let transcribing = ticks.value.filter { $0.stage == .transcribing }
+        #expect(transcribing.map(\.chunkCount).max() == 4)
+        #expect(transcribing.map(\.chunkIndex).max() == 3)
+        #expect(zip(transcribing, transcribing.dropFirst()).allSatisfy { $0.chunkIndex <= $1.chunkIndex })
+        #expect(zip(transcribing, transcribing.dropFirst()).allSatisfy { $0.fractionComplete <= $1.fractionComplete })
+        #expect(transcribing.contains { $0.statusLine.contains("chunk 4 of 4") })
     }
 
     @Test func parakeetBatchModeIsWiredThroughTheSameSpine() async throws {
@@ -570,6 +715,33 @@ import Testing
         #expect(peakAmplitude(of: loaded.near) > 8_000)
     }
 
+    @Test func multiBatchStereoSourceResamplesBothChannelsWithoutGaps() throws {
+        let seconds = FileAudioLoader.decodeBatchSeconds * 2.5
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-stereo-batches-\(UUID().uuidString).wav")
+        try ImportFixtureWriter.writeConstantStereoWAV(
+            to: url,
+            seconds: seconds,
+            sampleRate: 44_100,
+            near: 0.5,
+            far: -0.25
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let loaded = try FileAudioLoader.load(url)
+        let nearSamples = samples(of: loaded.near)
+        let farSamples = samples(of: loaded.far)
+        let expectedFrames = Int(seconds * 16_000)
+
+        #expect(loaded.channelCount == 2)
+        #expect(loaded.isStereo)
+        #expect(abs(nearSamples.count - expectedFrames) <= 2)
+        #expect(abs(farSamples.count - expectedFrames) <= 2)
+        #expect(nearSamples.allSatisfy { abs(Int($0) - 16_384) <= 2 })
+        #expect(farSamples.allSatisfy { abs(Int($0) + 8_192) <= 2 })
+        #expect(abs(loaded.duration - seconds) < 0.01)
+    }
+
     @Test func undecodableFileFailsInsteadOfImportingSilence() throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("callnotes-not-audio-\(UUID().uuidString).wav")
@@ -579,6 +751,10 @@ import Testing
         #expect(throws: FileImportError.self) {
             try FileAudioLoader.load(url)
         }
+    }
+
+    private func samples(of pcm16: Data) -> [Int16] {
+        pcm16.withUnsafeBytes { Array($0.bindMemory(to: Int16.self)) }
     }
 
     private func peakAmplitude(of pcm16: Data) -> Int {
@@ -671,6 +847,41 @@ enum ImportFixtureWriter {
         buffer.frameLength = AVAudioFrameCount(frames)
         for index in 0..<frames {
             channel[0][index] = Float(sin(2 * Double.pi * 440 * Double(index) / Double(sampleRate)) * 0.5)
+        }
+        try file.write(from: buffer)
+    }
+
+    static func writeConstantStereoWAV(
+        to url: URL,
+        seconds: Double,
+        sampleRate: Int,
+        near: Float,
+        far: Float
+    ) throws {
+        let frames = max(1, Int(seconds * Double(sampleRate)))
+        let settings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatLinearPCM),
+            AVSampleRateKey: sampleRate,
+            AVNumberOfChannelsKey: 2,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+        let file = try AVAudioFile(forWriting: url, settings: settings)
+        guard
+            let buffer = AVAudioPCMBuffer(
+                pcmFormat: file.processingFormat,
+                frameCapacity: AVAudioFrameCount(frames)
+            ),
+            let channels = buffer.floatChannelData
+        else {
+            throw FileImportError.invalidAudio("Could not build a stereo fixture buffer")
+        }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        for index in 0..<frames {
+            channels[0][index] = near
+            channels[1][index] = far
         }
         try file.write(from: buffer)
     }

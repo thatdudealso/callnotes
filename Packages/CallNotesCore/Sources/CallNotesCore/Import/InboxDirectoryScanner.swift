@@ -118,27 +118,38 @@ public final class InboxWatcher: @unchecked Sendable {
         stopFSEvents()
         let path = directory.path as CFString
         let paths = [path] as CFArray
+        let handle = InboxWatcherHandle(self)
         var context = FSEventStreamContext(
             version: 0,
-            info: Unmanaged.passUnretained(self).toOpaque(),
-            retain: nil,
-            release: nil,
+            info: Unmanaged.passUnretained(handle).toOpaque(),
+            retain: { pointer in
+                guard let pointer else { return nil }
+                return UnsafeRawPointer(Unmanaged<InboxWatcherHandle>.fromOpaque(pointer).retain().toOpaque())
+            },
+            release: { pointer in
+                guard let pointer else { return }
+                Unmanaged<InboxWatcherHandle>.fromOpaque(pointer).release()
+            },
             copyDescription: nil
         )
-        let callback: FSEventStreamCallback = { _, info, count, eventPaths, _, _ in
+        let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
             guard let info else { return }
-            let watcher = Unmanaged<InboxWatcher>.fromOpaque(info).takeUnretainedValue()
+            let handle = Unmanaged<InboxWatcherHandle>.fromOpaque(info).takeUnretainedValue()
+            guard let watcher = handle.watcher else { return }
             Task { await watcher.scanNow() }
         }
-        guard let stream = FSEventStreamCreate(
-            kCFAllocatorDefault,
-            callback,
-            &context,
-            paths,
-            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
-            0.3,
-            UInt32(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagUseCFTypes)
-        ) else { return }
+        let created = withExtendedLifetime(handle) {
+            FSEventStreamCreate(
+                kCFAllocatorDefault,
+                callback,
+                &context,
+                paths,
+                FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+                0.3,
+                UInt32(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagUseCFTypes)
+            )
+        }
+        guard let stream = created else { return }
         eventStream = stream
         FSEventStreamSetDispatchQueue(stream, DispatchQueue(label: "callnotes.inbox.fsevents"))
         FSEventStreamStart(stream)
@@ -153,3 +164,16 @@ public final class InboxWatcher: @unchecked Sendable {
     }
 #endif
 }
+
+#if os(macOS)
+/// The FSEvents stream retains this box, never the watcher, so the watcher can
+/// still deinit; the weak reference is nil once that starts, which keeps a
+/// callback in flight on the stream queue from resurrecting it.
+private final class InboxWatcherHandle: @unchecked Sendable {
+    weak var watcher: InboxWatcher?
+
+    init(_ watcher: InboxWatcher) {
+        self.watcher = watcher
+    }
+}
+#endif

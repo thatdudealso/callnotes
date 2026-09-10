@@ -23,6 +23,10 @@ public enum FileAudioLoader {
         public var mixed: Data { isStereo ? mix(near, far) : near }
     }
 
+    /// Decoded in bounded batches so peak memory does not scale with the
+    /// recording length; the resampler carries its phase across batches.
+    static let decodeBatchSeconds: Double = 30
+
     public static func load(
         _ url: URL,
         targetSampleRate: Int = AudioConstants.localSampleRate
@@ -33,28 +37,49 @@ public enum FileAudioLoader {
         } catch {
             throw FileImportError.invalidAudio("CallNotes could not decode this audio file")
         }
-        let frames = AVAudioFrameCount(file.length)
-        guard frames > 0 else {
+        guard file.length > 0 else {
             throw FileImportError.invalidAudio("The imported audio file is empty")
         }
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: frames) else {
+        let format = file.processingFormat
+        guard format.commonFormat == .pcmFormatFloat32, !format.isInterleaved else {
+            throw FileImportError.invalidAudio("CallNotes could not read this audio file's sample format")
+        }
+        let channelCount = Int(format.channelCount)
+        let sourceRate = format.sampleRate
+        let batchFrames = AVAudioFrameCount(max(1, Int(decodeBatchSeconds * sourceRate)))
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: batchFrames) else {
             throw FileImportError.invalidAudio("CallNotes could not allocate an import audio buffer")
         }
-        try file.read(into: buffer)
-        guard buffer.frameLength > 0 else {
+
+        var nearResampler = StreamingPCMResampler(
+            inputSampleRate: sourceRate,
+            outputSampleRate: Double(targetSampleRate)
+        )
+        var farResampler = nearResampler
+        var near = Data()
+        var far = Data()
+        let expectedBytes = Int(Double(file.length) * Double(targetSampleRate) / sourceRate) * 2
+        near.reserveCapacity(expectedBytes)
+        if channelCount >= 2 { far.reserveCapacity(expectedBytes) }
+
+        var decodedFrames = 0
+        while file.framePosition < file.length {
+            try file.read(into: buffer)
+            let frames = Int(buffer.frameLength)
+            guard frames > 0 else { break }
+            decodedFrames += frames
+            guard let channels = buffer.floatChannelData else {
+                throw FileImportError.invalidAudio("CallNotes could not read this audio file's sample format")
+            }
+            near.append(int16Data(resampler: &nearResampler, source: channels[0], frames: frames))
+            if channelCount >= 2 {
+                far.append(int16Data(resampler: &farResampler, source: channels[1], frames: frames))
+            }
+        }
+        guard decodedFrames > 0 else {
             throw FileImportError.invalidAudio("CallNotes could not decode any audio from this file")
         }
 
-        let channelCount = Int(file.processingFormat.channelCount)
-        var near = try int16Channel(buffer, channel: 0)
-        var far = channelCount >= 2 ? try int16Channel(buffer, channel: 1) : Data()
-        let sourceRate = file.processingFormat.sampleRate
-        if Int(sourceRate.rounded()) != targetSampleRate {
-            near = resample(near, from: sourceRate, to: Double(targetSampleRate))
-            if !far.isEmpty {
-                far = resample(far, from: sourceRate, to: Double(targetSampleRate))
-            }
-        }
         let frameCount = near.count / MemoryLayout<Int16>.size
         let duration = Double(frameCount) / Double(targetSampleRate)
         return LoadedAudio(
@@ -66,33 +91,18 @@ public enum FileAudioLoader {
         )
     }
 
-    private static func int16Channel(_ buffer: AVAudioPCMBuffer, channel: Int) throws -> Data {
-        let frames = Int(buffer.frameLength)
-        guard frames > 0 else { return Data() }
-        let channelCount = Int(buffer.format.channelCount)
-        guard channel >= 0, channel < channelCount else { return Data() }
-        guard
-            buffer.format.commonFormat == .pcmFormatFloat32,
-            !buffer.format.isInterleaved,
-            let channels = buffer.floatChannelData
-        else {
-            throw FileImportError.invalidAudio("CallNotes could not read this audio file's sample format")
-        }
-        let source = UnsafeBufferPointer(start: channels[channel], count: frames)
-        var samples = [Int16](repeating: 0, count: frames)
-        for index in 0..<frames {
-            samples[index] = clipToInt16(source[index])
+    private static func int16Data(
+        resampler: inout StreamingPCMResampler,
+        source: UnsafeMutablePointer<Float>,
+        frames: Int
+    ) -> Data {
+        let batch = Array(UnsafeBufferPointer(start: source, count: frames))
+        let resampled = resampler.resampleMono(batch)
+        var samples = [Int16](repeating: 0, count: resampled.count)
+        for index in 0..<resampled.count {
+            samples[index] = clipToInt16(resampled[index])
         }
         return samples.withUnsafeBytes { Data($0) }
-    }
-
-    private static func resample(_ pcm: Data, from inputRate: Double, to outputRate: Double) -> Data {
-        let samples = pcm.withUnsafeBytes { raw in
-            Array(raw.bindMemory(to: Int16.self))
-        }
-        let floats = PCMResampler.int16ToFloat(samples)
-        let resampled = PCMResampler.resampleMono(input: floats, inputSampleRate: inputRate, outputSampleRate: outputRate)
-        return PCMResampler.floatToInt16(resampled).withUnsafeBytes { Data($0) }
     }
 
     private static func clipToInt16(_ value: Float) -> Int16 {
