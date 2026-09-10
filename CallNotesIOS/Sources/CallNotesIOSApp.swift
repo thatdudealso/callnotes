@@ -31,6 +31,7 @@ final class PhoneAppDelegate: NSObject, UIApplicationDelegate {
 
 struct RootTabView: View {
     @State private var model = PhoneAppModel()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         TabView {
@@ -39,6 +40,9 @@ struct RootTabView: View {
             Tab("Settings", systemImage: "gearshape") { PhoneSettingsView(model: model) }
         }
         .task { await model.resumePendingUploads() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { model.refreshPairingState() }
+        }
     }
 }
 
@@ -196,6 +200,15 @@ final class PhoneAppModel {
         showUnpairedState()
     }
 
+    func refreshPairingState() {
+        guard PhonePairingStore.load() != nil else {
+            showUnpairedState()
+            return
+        }
+        isPaired = true
+        if pairedMacName == "Your Mac" { pairedMacName = "Paired Mac" }
+    }
+
     private func showUnpairedState() {
         isPaired = false
         pairedMacName = "Your Mac"
@@ -253,6 +266,7 @@ struct CallsView: View {
             }
         }
         .task { await model.refreshMirror(in: modelContext) }
+        .onAppear { model.refreshPairingState() }
     }
 }
 
@@ -345,6 +359,7 @@ struct PhoneSettingsView: View {
                 Section("Retention") { LabeledContent("Shared recording files", value: "Until uploaded") }
                 if let status = model.uploadStatus { Section("Uploads") { Text(status).foregroundStyle(.secondary) } }
             }.navigationTitle("Settings")
+            .onAppear { model.refreshPairingState() }
             .sheet(isPresented: $showingScanner) { QRScannerSheet { code in
                 pairingCode = code
                 Task { await model.pair(ticketPayload: code) }
