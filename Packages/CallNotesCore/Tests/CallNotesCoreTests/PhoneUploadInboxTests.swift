@@ -251,6 +251,24 @@ import Testing
         #expect(message.contains("\(errSecMissingEntitlement)"))
     }
 
+    /// A process relaunched before first unlock cannot read its own probe item.
+    /// Pinning that miss would leave the unentitled bare group in place until the
+    /// app is killed, so only a resolution that reached the keychain is kept.
+    @Test func accessGroupRetriesUntilTheSignedGroupResolves() {
+        let signed = "A1B2C3D4E5.\(SyncConstants.appGroupIdentifier)"
+        let attempts = ProbeAttempts()
+        let resolver = PairingKeychain.ResolvedAccessGroup(signedDefaultAccessGroup: {
+            attempts.count += 1
+            return attempts.count > 2 ? signed : nil
+        })
+
+        #expect(resolver.value() == SyncConstants.appGroupIdentifier)
+        #expect(resolver.value() == SyncConstants.appGroupIdentifier)
+        #expect(resolver.value() == signed)
+        #expect(resolver.value() == signed)
+        #expect(attempts.count == 3)
+    }
+
     /// `keychain-access-groups` is entitled as `$(AppIdentifierPrefix)group...`,
     /// so the group the app requests has to carry the same team prefix the
     /// signer applied - taken from the group the keychain hands this process.
@@ -912,4 +930,8 @@ private final class FakeMirrorStore: MirrorWriting {
 
     func upsertNote(_ note: SyncDTO.MirroredNote, callID: UUID) throws { notes[callID] = note }
     func commit() throws {}
+}
+
+private final class ProbeAttempts: @unchecked Sendable {
+    var count = 0
 }

@@ -166,7 +166,11 @@ enum PhoneMirrorCoordinator {
         } catch {
             var discovered = connection
             discovered.serverURL = try await PhoneBonjourResolver.resolve(fingerprint: connection.certificateFingerprint)
-            return try await fetch(connection: discovered, token: token)
+            let mirror = try await fetch(connection: discovered, token: token)
+            if discovered.serverURL != connection.serverURL {
+                try? PhonePairingStore.updateServerURL(discovered.serverURL)
+            }
+            return mirror
         }
     }
 

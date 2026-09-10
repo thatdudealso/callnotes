@@ -24,7 +24,34 @@ public enum PairingKeychainError: Error, LocalizedError, Equatable {
 /// a build setting that may not have expanded.
 public enum PairingKeychain {
     public static let service = "com.thatdudealso.callnotes.phone-pairing"
-    public static let accessGroup: String = sharedAccessGroup(defaultAccessGroup: signedDefaultAccessGroup())
+
+    /// Only a resolution that actually reached the keychain is remembered. A
+    /// process relaunched before first unlock cannot read its own probe item, and
+    /// pinning that miss would leave the unentitled bare group in place until the
+    /// app is killed, so an unresolved lookup is retried on the next use.
+    public static var accessGroup: String { resolvedAccessGroup.value() }
+
+    private static let resolvedAccessGroup = ResolvedAccessGroup(signedDefaultAccessGroup: signedDefaultAccessGroup)
+
+    final class ResolvedAccessGroup: @unchecked Sendable {
+        private let signedDefaultAccessGroup: @Sendable () -> String?
+        private let lock = NSLock()
+        private var resolved: String?
+
+        init(signedDefaultAccessGroup: @escaping @Sendable () -> String?) {
+            self.signedDefaultAccessGroup = signedDefaultAccessGroup
+        }
+
+        func value() -> String {
+            lock.lock()
+            defer { lock.unlock() }
+            if let resolved { return resolved }
+            guard let signed = signedDefaultAccessGroup() else { return SyncConstants.appGroupIdentifier }
+            let group = sharedAccessGroup(defaultAccessGroup: signed)
+            resolved = group
+            return group
+        }
+    }
 
     static func sharedAccessGroup(defaultAccessGroup: String?) -> String {
         let shared = SyncConstants.appGroupIdentifier
@@ -53,6 +80,9 @@ public enum PairingKeychain {
             insert[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
             insert[kSecReturnAttributes] = true
             status = SecItemAdd(insert as CFDictionary, &result)
+            if status == errSecDuplicateItem {
+                status = SecItemCopyMatching(lookup as CFDictionary, &result)
+            }
         }
         guard status == errSecSuccess, let attributes = result as? [String: Any] else { return nil }
         return attributes[kSecAttrAccessGroup as String] as? String

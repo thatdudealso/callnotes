@@ -10,7 +10,6 @@ final class ShareViewController: UIViewController {
     private let nameField = UITextField()
     private let datePicker = UIDatePicker()
     private var sharedAudioURL: URL?
-    private var transfer: ExtensionUploadTransfer?
     private var queuedJob: PendingUpload?
     private var didDisappear = false
     private var isSending = false
@@ -158,11 +157,15 @@ final class ShareViewController: UIViewController {
     }
 
     /// `URLSession` forbids two live sessions with the same background
-    /// identifier, so the extension builds its transfer exactly once.
+    /// identifier, and iOS serves consecutive shares from one warm extension
+    /// process with a fresh controller each time, so the transfer belongs to the
+    /// process rather than to any one controller.
+    private static var processTransfer: ExtensionUploadTransfer?
+
     private func uploadTransfer() throws -> ExtensionUploadTransfer {
-        if let transfer { return transfer }
+        if let transfer = Self.processTransfer { return transfer }
         let built = try ExtensionUploadTransfer(container: sharedContainer())
-        transfer = built
+        Self.processTransfer = built
         return built
     }
 
