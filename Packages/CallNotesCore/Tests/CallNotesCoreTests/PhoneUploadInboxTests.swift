@@ -251,6 +251,49 @@ import Testing
         #expect(message.contains("\(errSecMissingEntitlement)"))
     }
 
+    /// `GET /mirror` is encoded by Hummingbird's default response encoder, which
+    /// is `.iso8601`. A client decoder that disagrees reads `startedAt` as a
+    /// `Double` and the phone never renders a single call.
+    @Test func mirrorSurvivesTheWireFormatTheServerActuallyEncodes() throws {
+        let callID = UUID()
+        let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let mirror = SyncDTO.Mirror(calls: [
+            SyncDTO.MirroredCall(
+                id: callID,
+                title: "Call with Priya",
+                summary: "Discussed the rollout",
+                startedAt: startedAt,
+                source: "iphone_recording",
+                status: "notes_ready",
+                segments: [.init(id: "\(callID.uuidString)-0", speaker: "Priya", text: "Hello.", startSec: 0)],
+                note: .init(summary: "Rollout", decisions: ["Ship"], actionItems: ["Email Priya"])
+            )
+        ])
+
+        let serverEncoder = JSONEncoder()
+        serverEncoder.dateEncodingStrategy = .iso8601
+        let body = try serverEncoder.encode(mirror)
+
+        let decoded = try SyncCoder.decoder().decode(SyncDTO.Mirror.self, from: body)
+
+        #expect(decoded.calls.count == 1)
+        #expect(decoded.calls[0].id == callID)
+        #expect(decoded.calls[0].startedAt == startedAt)
+        #expect(decoded.calls[0].segments.map(\.text) == ["Hello."])
+        #expect(decoded.calls[0].note?.actionItems == ["Email Priya"])
+    }
+
+    /// Hummingbird wraps a thrown `HTTPError` message in `{"error":{"message":}}`.
+    /// The user gets the sentence, never the envelope.
+    @Test func serverErrorBodyYieldsTheSentenceNotTheEnvelope() throws {
+        let consumed = "That pairing code is no longer valid. Show a new QR code on your Mac."
+        let envelope = try #require(#"{"error":{"message":"\#(consumed)"}}"#.data(using: .utf8))
+
+        #expect(SyncErrorBody.message(from: envelope) == consumed)
+        #expect(SyncErrorBody.message(from: Data("plain failure text".utf8)) == "plain failure text")
+        #expect(SyncErrorBody.message(from: Data()) == nil)
+    }
+
     /// The unpaired case is the first thing a new user hits, so it has to read
     /// as a pairing instruction rather than fall back to a Foundation status.
     @Test func notPairedErrorExplainsThePairingStepItself() {

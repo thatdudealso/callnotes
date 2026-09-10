@@ -123,20 +123,11 @@ enum PhonePairingCoordinator {
             throw error
         } catch let error as NSError where error.domain == "CallNotes.Pairing" {
             throw error
-        } catch let error as URLError where Self.allowsBonjourFallback(error) {
+        } catch let error as URLError where PhoneBonjourFallback.allows(error) {
             let discovered = try await PhoneBonjourResolver.resolve(fingerprint: ticket.certificateFingerprint)
             return try await pair(ticket: ticket, serverURL: discovered, deviceName: deviceName)
         } catch {
             throw error
-        }
-    }
-
-    private static func allowsBonjourFallback(_ error: URLError) -> Bool {
-        switch error.code {
-        case .cannotConnectToHost, .timedOut, .networkConnectionLost, .dnsLookupFailed, .notConnectedToInternet, .cannotFindHost:
-            true
-        default:
-            false
         }
     }
 
@@ -147,13 +138,13 @@ enum PhonePairingCoordinator {
         var request = URLRequest(url: serverURL.appendingPathComponent("pair"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(PairingRequest(code: ticket.code, deviceName: deviceName))
+        request.httpBody = try SyncCoder.encoder().encode(PairingRequest(code: ticket.code, deviceName: deviceName))
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            let message = String(data: data, encoding: .utf8)
-            throw NSError(domain: "CallNotes.Pairing", code: (response as? HTTPURLResponse)?.statusCode ?? -1, userInfo: [NSLocalizedDescriptionKey: message?.isEmpty == false ? message! : "Could not pair with this Mac."])
+            let message = SyncErrorBody.message(from: data) ?? "Could not pair with this Mac."
+            throw NSError(domain: "CallNotes.Pairing", code: (response as? HTTPURLResponse)?.statusCode ?? -1, userInfo: [NSLocalizedDescriptionKey: message])
         }
-        let paired = try JSONDecoder().decode(SyncDTO.PairResponse.self, from: data)
+        let paired = try SyncCoder.decoder().decode(SyncDTO.PairResponse.self, from: data)
         let configuration = PhonePairingConfiguration(
             serverURL: serverURL,
             deviceID: paired.deviceID,
@@ -164,14 +155,27 @@ enum PhonePairingCoordinator {
     }
 }
 
+/// The one rule for when the paired Mac is worth rediscovering. Only a transport
+/// failure means the stored address is stale; an HTTP status or an undecodable
+/// body is the Mac answering, and must reach the user instead of being retried
+/// against the same server behind a five-second sweep.
+enum PhoneBonjourFallback {
+    static func allows(_ error: URLError) -> Bool {
+        switch error.code {
+        case .cannotConnectToHost, .timedOut, .networkConnectionLost, .dnsLookupFailed, .notConnectedToInternet, .cannotFindHost:
+            true
+        default:
+            false
+        }
+    }
+}
+
 enum PhoneMirrorCoordinator {
     static func fetch() async throws -> SyncDTO.Mirror {
         guard let (connection, token) = PhonePairingStore.load() else { throw PairingCredentialError.notPaired }
         do {
             return try await fetch(connection: connection, token: token)
-        } catch PhoneSyncError.unpaired {
-            throw PhoneSyncError.unpaired
-        } catch {
+        } catch let error as URLError where PhoneBonjourFallback.allows(error) {
             var discovered = connection
             discovered.serverURL = try await PhoneBonjourResolver.resolve(fingerprint: connection.certificateFingerprint)
             let mirror = try await fetch(connection: discovered, token: token)
@@ -191,8 +195,11 @@ enum PhoneMirrorCoordinator {
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw URLError(.cannotLoadFromNetwork) }
         guard http.statusCode != 401 else { throw PhoneSyncError.unpaired }
-        guard (200..<300).contains(http.statusCode) else { throw URLError(.cannotLoadFromNetwork) }
-        return try JSONDecoder().decode(SyncDTO.Mirror.self, from: data)
+        guard (200..<300).contains(http.statusCode) else {
+            let message = SyncErrorBody.message(from: data) ?? "Your Mac could not send your calls (HTTP \(http.statusCode))."
+            throw NSError(domain: "CallNotes.Mirror", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+        return try SyncCoder.decoder().decode(SyncDTO.Mirror.self, from: data)
     }
 }
 

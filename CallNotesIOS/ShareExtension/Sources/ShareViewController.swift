@@ -20,6 +20,7 @@ final class ShareViewController: UIViewController {
         super.viewDidLoad()
         title = "Send to Mac"
         view.backgroundColor = .systemBackground
+        configureNavigationBar()
         configureForm()
         sweepOrphanedSharedAudio()
         loadAudio()
@@ -42,6 +43,33 @@ final class ShareViewController: UIViewController {
         }
         sharedAudioLease?.release()
         sharedAudioLease = nil
+    }
+
+    /// The principal class is a plain view controller, so the share sheet gets no
+    /// Cancel/Post chrome of its own. Without this the only way out is the
+    /// system's interactive dismissal, and the title never appears.
+    private func configureNavigationBar() {
+        let bar = UINavigationBar()
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        let item = UINavigationItem(title: title ?? "Send to Mac")
+        let cancel = UIBarButtonItem(
+            systemItem: .cancel,
+            primaryAction: UIAction { [weak self] _ in self?.cancelShare() }
+        )
+        cancel.accessibilityLabel = "Cancel sharing"
+        item.leftBarButtonItem = cancel
+        bar.setItems([item], animated: false)
+        view.addSubview(bar)
+        NSLayoutConstraint.activate([
+            bar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            bar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            bar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+        ])
+    }
+
+    private func cancelShare() {
+        discardUnsentStaging()
+        extensionContext?.cancelRequest(withError: CocoaError(.userCancelled))
     }
 
     private func configureForm() {
@@ -170,7 +198,7 @@ final class ShareViewController: UIViewController {
     }
 
     private func sharedContainer() throws -> URL {
-        guard let url = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.thatdudealso.callnotes") else {
+        guard let url = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: SyncConstants.appGroupIdentifier) else {
             throw CocoaError(.fileNoSuchFile)
         }
         return url
@@ -182,7 +210,7 @@ final class ShareViewController: UIViewController {
     }
 
     private nonisolated static func stageSharedAudio(_ source: URL, inPlace: Bool) throws -> SharedAudioStaging.Lease {
-        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.thatdudealso.callnotes") else {
+        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: SyncConstants.appGroupIdentifier) else {
             throw CocoaError(.fileNoSuchFile)
         }
         let directory = container.appendingPathComponent("SharedAudio", isDirectory: true)
@@ -289,13 +317,13 @@ private final class ExtensionUploadScheduler: SessionUploadTaskStarting, @unchec
     }
 
     private static func configuration() -> ExtensionPairingConfiguration? {
-        guard let data = UserDefaults(suiteName: "group.com.thatdudealso.callnotes")?.data(forKey: configurationKey) else { return nil }
+        guard let data = UserDefaults(suiteName: SyncConstants.appGroupIdentifier)?.data(forKey: configurationKey) else { return nil }
         return try? JSONDecoder().decode(ExtensionPairingConfiguration.self, from: data)
     }
 
     private static func removePairing() {
         SecItemDelete(PairingKeychain.serviceQuery() as CFDictionary)
-        UserDefaults(suiteName: "group.com.thatdudealso.callnotes")?.removeObject(forKey: configurationKey)
+        UserDefaults(suiteName: SyncConstants.appGroupIdentifier)?.removeObject(forKey: configurationKey)
     }
 
     /// `PairingKeychain.itemQuery` names the App Group as the access group, the
