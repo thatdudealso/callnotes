@@ -147,14 +147,17 @@ public struct DashboardAnalytics: Sendable, Equatable {
     /// open-ended row would otherwise grow its own duration forever.
     static let incompleteProcessingStatuses: Set<CallStatus> = [.uploaded, .transcribing]
 
+    /// A failure stamps `endedAt` when processing gave up, not when the call ended,
+    /// so a row that failed before its audio was measured has no talk time to report.
     static func isIncomplete(_ call: Call) -> Bool {
-        call.durationSec == nil
-            && call.endedAt == nil
-            && incompleteProcessingStatuses.contains(call.status)
+        guard call.durationSec == nil else { return false }
+        if call.status == .failed { return true }
+        return call.endedAt == nil && incompleteProcessingStatuses.contains(call.status)
     }
 
     private static func duration(for call: Call, now: Date) -> Int {
         if let duration = call.durationSec { return max(0, duration) }
+        if isIncomplete(call) { return 0 }
         if let endedAt = call.endedAt {
             return max(0, Int(endedAt.timeIntervalSince(call.startedAt).rounded(.down)))
         }

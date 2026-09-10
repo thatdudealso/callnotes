@@ -568,27 +568,39 @@ public actor PostgresStore: CallStore {
     ) async throws -> (contacts: [DashboardContact], resolvedNames: [UUID: String]) {
         let rows = try await connection.query(
             """
-            WITH edited AS (
+            WITH marked AS (
               SELECT
-                calls.id AS call_id,
-                calls.started_at AS started_at,
+                calls.*,
+                (
+                  calls.duration_sec IS NULL
+                  AND (
+                    calls.status = \(CallStatus.failed.rawValue)
+                    OR (
+                      calls.ended_at IS NULL
+                      AND calls.status = ANY(\(Self.incompleteProcessingStatuses))
+                    )
+                  )
+                ) AS is_incomplete
+              FROM calls
+            ),
+            edited AS (
+              SELECT
+                marked.id AS call_id,
+                marked.started_at AS started_at,
                 GREATEST(0, COALESCE(
-                  calls.duration_sec,
+                  marked.duration_sec,
                   CASE
-                    WHEN calls.ended_at IS NOT NULL
-                      THEN FLOOR(EXTRACT(EPOCH FROM (calls.ended_at - calls.started_at)))::int
-                    WHEN calls.status = \(CallStatus.recording.rawValue)
-                      THEN FLOOR(EXTRACT(EPOCH FROM (\(asOf) - calls.started_at)))::int
+                    WHEN marked.is_incomplete THEN 0
+                    WHEN marked.ended_at IS NOT NULL
+                      THEN FLOOR(EXTRACT(EPOCH FROM (marked.ended_at - marked.started_at)))::int
+                    WHEN marked.status = \(CallStatus.recording.rawValue)
+                      THEN FLOOR(EXTRACT(EPOCH FROM (\(asOf) - marked.started_at)))::int
                     ELSE 0
                   END
                 )) AS duration_sec,
-                (
-                  calls.duration_sec IS NULL
-                  AND calls.ended_at IS NULL
-                  AND calls.status = ANY(\(Self.incompleteProcessingStatuses))
-                ) AS is_incomplete,
-                NULLIF(btrim(calls.counterparty_name, \(identityWhitespace)), '') AS edited_name
-              FROM calls
+                marked.is_incomplete AS is_incomplete,
+                NULLIF(btrim(marked.counterparty_name, \(identityWhitespace)), '') AS edited_name
+              FROM marked
             ),
             resolved AS (
               SELECT

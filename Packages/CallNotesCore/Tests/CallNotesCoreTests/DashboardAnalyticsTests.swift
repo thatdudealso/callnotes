@@ -267,6 +267,41 @@ import Testing
         #expect(analytics.periods.allSatisfy { $0.totalDurationSec <= 120 })
     }
 
+    @Test func failedCallStampedAtGiveUpTimeAddsNoTalkTimeAndIsMarkedIncomplete() throws {
+        let failed = failedImportCall(startedAt: now.addingTimeInterval(-600), gaveUpAt: now)
+        let calls = [
+            failed,
+            fixtureCall(counterparty: "Avery", startedAt: now.addingTimeInterval(-60), duration: 120),
+        ]
+
+        let analytics = DashboardAnalytics.make(from: calls, now: now, calendar: calendar)
+        let failedRow = try #require(analytics.calls.first { $0.id == failed.id })
+        let avery = try #require(analytics.contacts.first { $0.name == "Avery" })
+
+        #expect(failedRow.isIncomplete)
+        #expect(failedRow.durationSec == 0)
+        #expect(analytics.totals.totalDurationSec == 120)
+        #expect(analytics.totals.incompleteCallCount == 1)
+        #expect(avery.callCount == 2)
+        #expect(avery.totalDurationSec == 120)
+        #expect(avery.averageDurationSec == 120)
+        #expect(analytics.periods.allSatisfy { $0.totalDurationSec <= 120 })
+    }
+
+    @Test func failedCallKeepsAMeasuredDurationAndItsBilledCost() throws {
+        var failed = failedImportCall(startedAt: now.addingTimeInterval(-600), gaveUpAt: now)
+        failed.durationSec = 300
+        failed.metaBilledSec = 300
+
+        let analytics = DashboardAnalytics.make(from: [failed], now: now, calendar: calendar)
+        let row = try #require(analytics.calls.first { $0.id == failed.id })
+
+        #expect(!row.isIncomplete)
+        #expect(row.durationSec == 300)
+        #expect(analytics.totals.totalDurationSec == 300)
+        #expect(row.costDollars == MetaCostMeter.costDollars(billedSeconds: 300))
+    }
+
     @Test func openEndedRecordingStillExtrapolatesWhileIncompleteProcessingDoesNot() throws {
         let live = processingCall(startedAt: now.addingTimeInterval(-120), status: .recording)
         let stalled = processingCall(startedAt: now.addingTimeInterval(-120), status: .uploaded)
@@ -552,6 +587,32 @@ import Testing
             #expect(stalledContact.totalDurationSec == 120)
             #expect(stalledContact.averageDurationSec == 120)
 
+            let failedName = "\(fixtureName) failed"
+            let failedImport = failedImportCall(
+                counterparty: failedName,
+                startedAt: now.addingTimeInterval(-600),
+                gaveUpAt: now
+            )
+            try await store.upsertCall(failedImport)
+            callIDs.append(failedImport.id)
+            let failedSibling = fixtureCall(
+                counterparty: failedName,
+                startedAt: now.addingTimeInterval(-60),
+                duration: 90
+            )
+            try await store.upsertCall(failedSibling)
+            callIDs.append(failedSibling.id)
+
+            let failedSnapshot = try await store.fetchDashboardAnalytics(asOf: now)
+            let failedRow = try #require(failedSnapshot.calls.first { $0.id == failedImport.id })
+            let failedContact = try #require(failedSnapshot.contacts.first { $0.name == failedName })
+
+            #expect(failedRow.durationSec == 0)
+            #expect(failedRow.isIncomplete)
+            #expect(failedContact.callCount == 2)
+            #expect(failedContact.totalDurationSec == 90)
+            #expect(failedContact.averageDurationSec == 90)
+
             let shoutedName = profile.displayName.uppercased()
             let shoutedCall = fixtureCall(
                 counterparty: shoutedName,
@@ -640,6 +701,26 @@ import Testing
 
     private func recordingCall(startedAt: Date) -> Call {
         processingCall(startedAt: startedAt, status: .recording)
+    }
+
+    /// Mirrors what an import that dies before its audio is measured leaves behind:
+    /// `endedAt` stamped when processing gave up and no `durationSec` at all.
+    private func failedImportCall(
+        counterparty: String = "Avery",
+        startedAt: Date,
+        gaveUpAt: Date
+    ) -> Call {
+        Call(
+            source: .fileImport,
+            startedAt: startedAt,
+            endedAt: gaveUpAt,
+            counterpartyName: counterparty,
+            audioPath: Self.fixtureAudioPath,
+            sttProvider: .metaMuse,
+            status: .failed,
+            error: "Transcript was empty.",
+            errorStage: "transcription"
+        )
     }
 
     private func processingCall(
