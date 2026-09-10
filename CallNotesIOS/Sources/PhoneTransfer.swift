@@ -156,25 +156,42 @@ enum PhoneMirrorCoordinator {
     }
 }
 
+/// Finds the paired Mac when its QR hostname stops resolving. Every discovered
+/// `_callnotes._tcp` candidate is tried until one serves the pinned certificate.
 private final class PhoneBonjourResolver: NSObject, NetServiceBrowserDelegate, NetServiceDelegate, @unchecked Sendable {
+    private let lock = NSLock()
     private var continuation: CheckedContinuation<URL, Error>?
     private var browser: NetServiceBrowser?
     private var service: NetService?
     private var pendingServices: [NetService] = []
     private var fingerprint = ""
+    private var isFinished = false
 
     static func resolve(fingerprint: String) async throws -> URL {
         try await PhoneBonjourResolver().resolveService(fingerprint: fingerprint)
     }
 
+    /// `NetServiceBrowser` and `NetService` deliver their callbacks through the
+    /// run loop they are scheduled on, and Swift's cooperative pool threads run
+    /// none, so all discovery is driven from the main run loop.
     private func resolveService(fingerprint: String) async throws -> URL {
         try await withCheckedThrowingContinuation { continuation in
-            self.continuation = continuation
-            self.fingerprint = fingerprint
-            let browser = NetServiceBrowser()
-            browser.delegate = self
-            self.browser = browser
-            browser.searchForServices(ofType: "\(SyncConstants.bonjourServiceType).", inDomain: "local.")
+            lock.withLock {
+                self.continuation = continuation
+                self.fingerprint = fingerprint
+            }
+            DispatchQueue.main.async { [self] in
+                let browser = NetServiceBrowser()
+                let started = lock.withLock { () -> Bool in
+                    guard !isFinished else { return false }
+                    self.browser = browser
+                    return true
+                }
+                guard started else { return }
+                browser.delegate = self
+                browser.schedule(in: .main, forMode: .common)
+                browser.searchForServices(ofType: "\(SyncConstants.bonjourServiceType).", inDomain: "local.")
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [self] in
                 finish(.failure(URLError(.cannotFindHost)))
             }
@@ -182,7 +199,7 @@ private final class PhoneBonjourResolver: NSObject, NetServiceBrowserDelegate, N
     }
 
     func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
-        pendingServices.append(service)
+        lock.withLock { pendingServices.append(service) }
         resolveNextService()
     }
 
@@ -190,46 +207,77 @@ private final class PhoneBonjourResolver: NSObject, NetServiceBrowserDelegate, N
         guard let host = sender.hostName?.trimmingCharacters(in: CharacterSet(charactersIn: ".")), sender.port > 0,
               let url = URL(string: "https://\(host):\(sender.port)")
         else {
-            service = nil
+            clearCurrentService()
             resolveNextService()
             return
         }
+        let fingerprint = lock.withLock { self.fingerprint }
         Task { [self] in
-            let delegate = PinnedURLSessionDelegate(fingerprint: self.fingerprint)
+            let delegate = PinnedURLSessionDelegate(fingerprint: fingerprint)
             let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
             do {
                 let (_, response) = try await session.data(from: url.appendingPathComponent("health"))
                 guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else { throw URLError(.cannotConnectToHost) }
-                self.finish(.success(url))
+                finish(.success(url))
             } catch {
-                self.service = nil
-                self.resolveNextService()
+                clearCurrentService()
+                resolveNextService()
             }
         }
     }
 
     func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
-        service = nil
+        clearCurrentService()
         resolveNextService()
     }
 
-    private func resolveNextService() {
-        guard service == nil else { return }
-        guard !pendingServices.isEmpty else { return }
-        let next = pendingServices.removeFirst()
-        service = next
-        next.delegate = self
-        next.resolve(withTimeout: 5)
+    private func clearCurrentService() {
+        let current = lock.withLock { () -> NetService? in
+            let current = service
+            service = nil
+            return current
+        }
+        guard let current else { return }
+        let box = UncheckedBox(current)
+        DispatchQueue.main.async { box.value.stop() }
     }
 
+    private func resolveNextService() {
+        let next = lock.withLock { () -> NetService? in
+            guard !isFinished, service == nil, !pendingServices.isEmpty else { return nil }
+            let next = pendingServices.removeFirst()
+            service = next
+            return next
+        }
+        guard let next else { return }
+        let box = UncheckedBox(next)
+        DispatchQueue.main.async { [self] in
+            box.value.delegate = self
+            box.value.schedule(in: .main, forMode: .common)
+            box.value.resolve(withTimeout: 5)
+        }
+    }
+
+    /// Resolves the continuation exactly once: the five-second timeout and a
+    /// candidate's health check race, and each can arrive on a different thread.
     private func finish(_ result: Result<URL, Error>) {
-        browser?.stop()
-        browser = nil
-        service?.stop()
-        service = nil
-        guard let continuation else { return }
-        self.continuation = nil
-        continuation.resume(with: result)
+        let (continuation, browser, service) = lock.withLock { () -> (CheckedContinuation<URL, Error>?, NetServiceBrowser?, NetService?) in
+            let taken = self.continuation
+            self.continuation = nil
+            isFinished = true
+            let browser = self.browser
+            self.browser = nil
+            let service = self.service
+            self.service = nil
+            pendingServices.removeAll()
+            return (taken, browser, service)
+        }
+        let box = UncheckedBox((browser, service))
+        DispatchQueue.main.async {
+            box.value.0?.stop()
+            box.value.1?.stop()
+        }
+        continuation?.resume(with: result)
     }
 }
 
@@ -324,11 +372,11 @@ final class BackgroundUploadCoordinator: @unchecked Sendable {
     }
 
     func handleBackgroundEvents(for identifier: String, completionHandler: @escaping () -> Void) {
+        let box = UncheckedBox(completionHandler)
         guard let coordinator else {
-            DispatchQueue.main.async(execute: completionHandler)
+            DispatchQueue.main.async { box.value() }
             return
         }
-        let box = UncheckedBox(completionHandler)
         Task {
             await coordinator.handleBackgroundEvents(identifier: identifier) {
                 DispatchQueue.main.async { box.value() }

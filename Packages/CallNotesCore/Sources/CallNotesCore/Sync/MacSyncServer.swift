@@ -15,6 +15,8 @@ public actor MacSyncServer {
     private let store: any CallStore
     private let receivedUploadsDirectory: URL
     private let onAccepted: (@Sendable (UUID, URL, CallUploadMetadata) async throws -> Void)?
+    private let processingRetryDelay: Duration
+    private let processingAttemptLimit: Int
     private var acceptingUploadIDs: Set<UUID> = []
     private var processingUploadIDs: Set<UUID> = []
 
@@ -22,11 +24,15 @@ public actor MacSyncServer {
         pairing: PairingAuthority = PairingAuthority(),
         store: any CallStore = MemoryStore(),
         receivedUploadsDirectory: URL? = nil,
+        processingRetryDelay: Duration = .seconds(30),
+        processingAttemptLimit: Int = 4,
         onAccepted: (@Sendable (UUID, URL, CallUploadMetadata) async throws -> Void)? = nil
     ) {
         self.pairing = pairing
         self.store = store
         self.receivedUploadsDirectory = receivedUploadsDirectory ?? FileManager.default.temporaryDirectory.appendingPathComponent("CallNotesPhoneUploads", isDirectory: true)
+        self.processingRetryDelay = processingRetryDelay
+        self.processingAttemptLimit = max(1, processingAttemptLimit)
         self.onAccepted = onAccepted
     }
 
@@ -186,9 +192,37 @@ public actor MacSyncServer {
         guard let onAccepted else { return }
         guard processingUploadIDs.insert(uploadID).inserted else { return }
         Task {
-            try? await onAccepted(uploadID, audioURL, metadata)
-            self.finishProcessing(uploadID)
+            await self.process(uploadID: uploadID, audioURL: audioURL, metadata: metadata, using: onAccepted)
         }
+    }
+
+    /// A processing failure after a 201 is recoverable here, not on the phone:
+    /// the phone has already dropped its queued job, so the Mac keeps the
+    /// staging audio, records the failure, and retries locally.
+    private func process(
+        uploadID: UUID,
+        audioURL: URL,
+        metadata: CallUploadMetadata,
+        using onAccepted: @Sendable (UUID, URL, CallUploadMetadata) async throws -> Void
+    ) async {
+        for attempt in 0..<processingAttemptLimit {
+            do {
+                try await onAccepted(uploadID, audioURL, metadata)
+                finishProcessing(uploadID)
+                return
+            } catch {
+                await recordProcessingFailure(uploadID)
+                guard attempt + 1 < processingAttemptLimit else { break }
+                try? await Task.sleep(for: processingRetryDelay)
+            }
+        }
+        finishProcessing(uploadID)
+    }
+
+    private func recordProcessingFailure(_ uploadID: UUID) async {
+        guard var call = try? await store.fetchCall(id: uploadID), !isProcessed(call) else { return }
+        call.status = .failed
+        try? await store.upsertCall(call)
     }
 
     private func finishProcessing(_ uploadID: UUID) {
@@ -257,7 +291,6 @@ public actor MacSyncServer {
 }
 
 enum MultipartCallUpload {
-    struct Upload { var metadata: CallUploadMetadata; var audio: Data; var fileExtension: String }
     struct StagedUpload { var metadata: CallUploadMetadata; var audioURL: URL }
 
     static func safeAudioExtension(_ candidate: String) -> String {
@@ -275,58 +308,9 @@ enum MultipartCallUpload {
         return try parser.finish()
     }
 
-    static func parseFile(_ url: URL, boundary: String, directory: URL, uploadID: UUID) throws -> StagedUpload? {
-        let headerEnd = Data("\r\n\r\n".utf8)
-        let partDelimiter = Data("\r\n--\(boundary)".utf8)
-        var reader = try MultipartFileReader(url: url)
-        defer { try? reader.close() }
-        guard let metadataHeaders = try reader.readUntil(headerEnd),
-              String(decoding: metadataHeaders, as: UTF8.self).contains("name=\"metadata\""),
-              let metadataData = try reader.readUntil(partDelimiter)
-        else { return nil }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let metadata = try decoder.decode(CallUploadMetadata.self, from: metadataData)
-        guard let audioHeaders = try reader.readUntil(headerEnd) else { return nil }
-        let headers = String(decoding: audioHeaders, as: UTF8.self)
-        guard headers.contains("name=\"audio\"") else { return nil }
-        let filename = headers.components(separatedBy: "filename=\"").dropFirst().first?.split(separator: "\"").first
-        let fileExtension = safeAudioExtension(filename.map { URL(fileURLWithPath: String($0)).pathExtension } ?? "")
-        let audioURL = directory.appendingPathComponent("\(uploadID.uuidString).\(fileExtension)")
-        FileManager.default.createFile(atPath: audioURL.path, contents: nil)
-        let output = try FileHandle(forWritingTo: audioURL)
-        defer { try? output.close() }
-        guard try reader.copyUntil(Data("\r\n--\(boundary)--".utf8), to: output) else {
-            try? FileManager.default.removeItem(at: audioURL)
-            return nil
-        }
-        return StagedUpload(metadata: metadata, audioURL: audioURL)
-    }
-    static func parse(_ body: Data, boundary: String) throws -> Upload? {
-        let delimiter = Data("--\(boundary)".utf8)
-        let headerEnd = Data("\r\n\r\n".utf8)
-        let metadataDecoder = JSONDecoder(); metadataDecoder.dateDecodingStrategy = .iso8601
-        var metadata: CallUploadMetadata?
-        var audio: Data?
-        var fileExtension = "m4a"
-        for part in body.multipartParts(separatedBy: delimiter) {
-            guard let headerRange = part.range(of: headerEnd) else { continue }
-            let headers = String(decoding: part[..<headerRange.lowerBound], as: UTF8.self)
-            let content = Data(part[headerRange.upperBound...]).removingTrailingFramingCRLF()
-            if headers.contains("name=\"metadata\"") { metadata = try metadataDecoder.decode(CallUploadMetadata.self, from: content) }
-            if headers.contains("name=\"audio\"") {
-                audio = content
-                if let filename = headers.components(separatedBy: "filename=\"").dropFirst().first?.split(separator: "\"").first {
-                    fileExtension = URL(fileURLWithPath: String(filename)).pathExtension.lowercased()
-                }
-            }
-        }
-        guard let metadata, let audio, !audio.isEmpty else { return nil }
-        return Upload(metadata: metadata, audio: audio, fileExtension: fileExtension.isEmpty ? "m4a" : fileExtension)
-    }
 }
 
-private struct MultipartStreamParser {
+struct MultipartStreamParser {
     private enum State: Equatable { case metadataHeaders, metadata, audioHeaders, audio, complete }
     private let headerEnd = Data("\r\n\r\n".utf8)
     private let partDelimiter: Data
@@ -413,8 +397,6 @@ private struct MultipartStreamParser {
         return .init(metadata: metadata, audioURL: audioURL)
     }
 
-    mutating func close() throws { try output?.close() }
-
     mutating func abort() {
         try? output?.close()
         output = nil
@@ -430,66 +412,4 @@ private struct MultipartStreamParser {
     }
 }
 
-private struct MultipartFileReader {
-    private let handle: FileHandle
-    private var buffer = Data()
-
-    init(url: URL) throws { handle = try FileHandle(forReadingFrom: url) }
-
-    mutating func close() throws { try handle.close() }
-
-    mutating func readUntil(_ delimiter: Data) throws -> Data? {
-        while true {
-            if let range = buffer.range(of: delimiter) {
-                let result = Data(buffer[..<range.lowerBound])
-                buffer.removeSubrange(..<range.upperBound)
-                return result
-            }
-            guard try fill(), buffer.count <= 1_048_576 else { return nil }
-        }
-    }
-
-    mutating func copyUntil(_ delimiter: Data, to output: FileHandle) throws -> Bool {
-        while true {
-            if let range = buffer.range(of: delimiter) {
-                try output.write(contentsOf: buffer[..<range.lowerBound])
-                buffer.removeSubrange(..<range.upperBound)
-                return true
-            }
-            let retained = max(0, delimiter.count - 1)
-            if buffer.count > retained {
-                let count = buffer.count - retained
-                try output.write(contentsOf: buffer.prefix(count))
-                buffer.removeFirst(count)
-            }
-            guard try fill() else { return false }
-        }
-    }
-
-    private mutating func fill() throws -> Bool {
-        guard let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty else { return false }
-        buffer.append(chunk)
-        return true
-    }
-}
-
-private extension Data {
-    func removingTrailingFramingCRLF() -> Data {
-        guard count >= 2, suffix(2) == Data("\r\n".utf8) else { return self }
-        return Data(dropLast(2))
-    }
-}
-
-private extension Data {
-    func multipartParts(separatedBy delimiter: Data) -> [Data] {
-        var parts: [Data] = []
-        var start = startIndex
-        while let range = range(of: delimiter, options: [], in: start..<endIndex) {
-            if start != range.lowerBound { parts.append(Data(self[start..<range.lowerBound])) }
-            start = range.upperBound
-        }
-        if start < endIndex { parts.append(Data(self[start..<endIndex])) }
-        return parts
-    }
-}
 #endif

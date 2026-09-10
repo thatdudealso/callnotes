@@ -146,47 +146,116 @@ import Testing
         #expect(store.segmentIDs(callID: callID) == ["\(callID.uuidString)-0"])
     }
 
-    #if os(macOS)
-    @Test func multipartUploadPreservesTrailingAudioCRLF() throws {
-        let boundary = "CallNotes-test"
-        let metadata = CallUploadMetadata(source: .iphoneRecording, counterpartyName: "Priya")
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        let audio = Data([0x01, 0x0D, 0x0A, 0x0D, 0x0A])
-        var body = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n".utf8)
-        body.append(try encoder.encode(metadata))
-        body.append(Data("\r\n--\(boundary)\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"recording.m4a\"\r\n\r\n".utf8))
-        body.append(audio)
-        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+    /// A refresh that changes nothing must leave the transcript alone: deleting
+    /// and re-inserting the same unique identifiers in one unsaved SwiftData
+    /// transaction has no defined ordering and can empty the transcript.
+    @Test func mirrorRefreshUpdatesRetainedSegmentsInPlace() throws {
+        let callID = UUID()
+        let store = FakeMirrorStore()
+        func snapshot(_ segments: [SyncDTO.MirroredSegment]) -> SyncDTO.Mirror {
+            SyncDTO.Mirror(calls: [
+                SyncDTO.MirroredCall(
+                    id: callID,
+                    title: "Call with Priya",
+                    summary: "Discussed the rollout",
+                    startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                    source: "iphone_recording",
+                    status: "notes_ready",
+                    segments: segments,
+                    note: .init(summary: "Rollout", decisions: [], actionItems: [])
+                )
+            ])
+        }
+        let first = SyncDTO.MirroredSegment(id: "\(callID.uuidString)-0", speaker: "Priya", text: "Hello.", startSec: 0)
+        let second = SyncDTO.MirroredSegment(id: "\(callID.uuidString)-1", speaker: "You", text: "Hi.", startSec: 2)
 
-        let parsedResult = try MultipartCallUpload.parse(body, boundary: boundary)
-        let parsed = try #require(parsedResult)
-        #expect(parsed.audio == audio)
-        #expect(parsed.metadata == metadata)
+        try MirrorReconciler.apply(snapshot([first, second]), to: store)
+        #expect(store.removedSegmentIDs.isEmpty)
+
+        let reworded = SyncDTO.MirroredSegment(id: first.id, speaker: "Priya", text: "Hello again.", startSec: 0)
+        try MirrorReconciler.apply(snapshot([reworded]), to: store)
+
+        #expect(store.removedSegmentIDs == [second.id])
+        #expect(store.segmentIDs(callID: callID) == [first.id])
+        #expect(store.segments[first.id]?.text == "Hello again.")
+        #expect(store.notes[callID] != nil)
     }
 
-    @Test func streamedMultipartUploadPreservesAudioWithoutBufferingIt() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("callnotes-streamed-upload-\(UUID().uuidString)", isDirectory: true)
+    #if os(macOS)
+    /// `POST /calls/:uploadID` streams its body through `MultipartStreamParser`,
+    /// so every framing guarantee is proven against that parser, fed in chunks
+    /// small enough to split the closing delimiter across appends.
+    @Test func streamedMultipartUploadWritesAudioAcrossSplitChunks() throws {
+        let root = try MultipartFixture.makeDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let boundary = "CallNotes-stream"
         let metadata = CallUploadMetadata(source: .iphoneRecording, counterpartyName: "Priya")
         let audio = Data(repeating: 0x7F, count: 128 * 1024) + Data([0x0D, 0x0A])
-        let request = root.appendingPathComponent("request.multipart")
-        var body = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n".utf8)
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        body.append(try encoder.encode(metadata))
-        body.append(Data("\r\n--\(boundary)\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"recording.m4a\"\r\n\r\n".utf8))
-        body.append(audio)
-        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
-        try body.write(to: request)
+        let body = try MultipartFixture.body(metadata: metadata, filename: "recording.m4a", audio: audio)
+        let uploadID = UUID()
 
-        let uploadResult = try MultipartCallUpload.parseFile(request, boundary: boundary, directory: root, uploadID: UUID())
-        let upload = try #require(uploadResult)
-        #expect(try Data(contentsOf: upload.audioURL) == audio)
+        let upload = try #require(try MultipartFixture.stream(body, directory: root, uploadID: uploadID, chunkSize: 4093))
         #expect(upload.metadata == metadata)
+        #expect(upload.audioURL.lastPathComponent == "\(uploadID.uuidString).m4a")
+        #expect(try Data(contentsOf: upload.audioURL) == audio)
+    }
+
+    @Test func streamedUploadWithAJSONFilenameCannotOverwriteTheSidecar() throws {
+        let root = try MultipartFixture.makeDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let uploadID = UUID()
+        let sidecar = root.appendingPathComponent("\(uploadID.uuidString).json")
+        try Data("{\"kept\":true}".utf8).write(to: sidecar)
+        let body = try MultipartFixture.body(
+            metadata: CallUploadMetadata(source: .iphoneRecording),
+            filename: "\(uploadID.uuidString).json",
+            audio: Data("audio bytes".utf8)
+        )
+
+        let upload = try #require(try MultipartFixture.stream(body, directory: root, uploadID: uploadID, chunkSize: 17))
+        #expect(upload.audioURL.pathExtension == "m4a")
+        #expect(try Data(contentsOf: sidecar) == Data("{\"kept\":true}".utf8))
+    }
+
+    @Test func streamedUploadWithEmptyAudioIsRejectedAndLeavesNoStagingFile() throws {
+        let root = try MultipartFixture.makeDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let uploadID = UUID()
+        let body = try MultipartFixture.body(
+            metadata: CallUploadMetadata(source: .iphoneRecording),
+            filename: "recording.m4a",
+            audio: Data()
+        )
+
+        let rejected = try MultipartFixture.stream(body, directory: root, uploadID: uploadID, chunkSize: 11)
+        #expect(rejected?.audioURL == nil)
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("\(uploadID.uuidString).m4a").path))
+    }
+
+    @Test func interruptedStreamedUploadDeletesItsPartialStagingFile() throws {
+        let root = try MultipartFixture.makeDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let uploadID = UUID()
+        let body = try MultipartFixture.body(
+            metadata: CallUploadMetadata(source: .iphoneRecording),
+            filename: "recording.m4a",
+            audio: Data(repeating: 0x11, count: 4096)
+        )
+
+        var parser = try MultipartStreamParser(boundary: MultipartFixture.boundary, directory: root, uploadID: uploadID)
+        try parser.append(body.prefix(body.count - 64))
+        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("\(uploadID.uuidString).m4a").path))
+        parser.abort()
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("\(uploadID.uuidString).m4a").path))
+    }
+
+    @Test func streamedUploadRejectsAFirstPartThatIsNotMetadata() throws {
+        let root = try MultipartFixture.makeDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var parser = try MultipartStreamParser(boundary: MultipartFixture.boundary, directory: root, uploadID: UUID())
+        defer { parser.abort() }
+        #expect(throws: Error.self) {
+            try parser.append(Data("Content-Disposition: form-data; name=\"audio\"\r\n\r\n".utf8))
+        }
     }
 
     @Test func concurrentUploadAcceptanceRunsOneImport() async throws {
@@ -304,7 +373,7 @@ import Testing
         defer { try? FileManager.default.removeItem(at: root) }
         let store = MemoryStore()
         let attempts = ProcessingAttempts()
-        let server = MacSyncServer(store: store, receivedUploadsDirectory: root, onAccepted: { callID, _, _ in
+        let server = MacSyncServer(store: store, receivedUploadsDirectory: root, processingAttemptLimit: 1, onAccepted: { callID, _, _ in
             if await attempts.record() == 1 { throw ProcessingFailure() }
             guard var call = try await store.fetchCall(id: callID) else { throw ProcessingFailure() }
             call.status = .notesReady
@@ -335,6 +404,45 @@ import Testing
         #expect(processed?.counterpartyName == "Priya")
         #expect(await attempts.count == 2)
         #expect(try await store.fetchCalls().count == 1)
+    }
+
+    /// The phone drops its queued job as soon as it sees 201, so recovery from a
+    /// processing failure has to happen on the Mac with no further client POST.
+    @Test func macRetriesFailedProcessingLocallyAfterAcknowledgingTheUpload() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-phone-local-retry-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MemoryStore()
+        let attempts = ProcessingAttempts()
+        let server = MacSyncServer(
+            store: store,
+            receivedUploadsDirectory: root,
+            processingRetryDelay: .milliseconds(10),
+            processingAttemptLimit: 4,
+            onAccepted: { callID, _, _ in
+                if await attempts.record() < 3 { throw ProcessingFailure() }
+                guard var call = try await store.fetchCall(id: callID) else { throw ProcessingFailure() }
+                call.status = .notesReady
+                try await store.upsertCall(call)
+            }
+        )
+        let uploadID = UUID()
+        let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let metadata = CallUploadMetadata(source: .iphoneRecording, startedAt: startedAt, counterpartyName: "Priya")
+
+        let created = try await server.accept(uploadID: uploadID, metadata: metadata, audio: Data("recording".utf8), fileExtension: "m4a")
+        #expect(created == .created)
+
+        var processed = try await store.fetchCall(id: uploadID)
+        for _ in 0..<400 where processed?.status != .notesReady {
+            try await Task.sleep(for: .milliseconds(10))
+            processed = try await store.fetchCall(id: uploadID)
+        }
+        #expect(processed?.status == .notesReady)
+        #expect(processed?.startedAt == startedAt)
+        #expect(await attempts.count == 3)
+        #expect(try await store.fetchCalls().count == 1)
+        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("\(uploadID.uuidString).m4a").path))
     }
 
     @Test func importedPhoneUploadKeepsTheUploadedCallAndItsMetadata() async throws {
@@ -393,6 +501,44 @@ import Testing
     }
     #endif
 }
+
+#if os(macOS)
+/// Builds the exact wire bytes the phone's background session sends, so the
+/// production stream parser is exercised over a real request body.
+private enum MultipartFixture {
+    static let boundary = "CallNotes-stream"
+
+    static func makeDirectory() throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-multipart-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    static func body(metadata: CallUploadMetadata, filename: String, audio: Data) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        var body = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n".utf8)
+        body.append(try encoder.encode(metadata))
+        body.append(Data("\r\n--\(boundary)\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"\(filename)\"\r\nContent-Type: audio/mp4\r\n\r\n".utf8))
+        body.append(audio)
+        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+        return body
+    }
+
+    static func stream(_ body: Data, directory: URL, uploadID: UUID, chunkSize: Int) throws -> MultipartCallUpload.StagedUpload? {
+        var parser = try MultipartStreamParser(boundary: boundary, directory: directory, uploadID: uploadID)
+        defer { parser.abort() }
+        var offset = body.startIndex
+        while offset < body.endIndex {
+            let end = body.index(offset, offsetBy: chunkSize, limitedBy: body.endIndex) ?? body.endIndex
+            try parser.append(Data(body[offset..<end]))
+            offset = end
+        }
+        return try parser.finish()
+    }
+}
+#endif
 
 private actor UploadCounter {
     private(set) var count = 0
@@ -473,28 +619,37 @@ private struct RelaunchHarness {
 
 private final class FakeMirrorStore: MirrorWriting {
     private(set) var calls: [UUID: SyncDTO.MirroredCall] = [:]
-    private(set) var segments: [String: UUID] = [:]
+    private(set) var segments: [String: SyncDTO.MirroredSegment] = [:]
+    private(set) var owners: [String: UUID] = [:]
     private(set) var notes: [UUID: SyncDTO.MirroredNote] = [:]
-
-    struct DuplicateSegmentID: Error { var id: String }
+    private(set) var removedSegmentIDs: [String] = []
 
     func segmentIDs(callID: UUID) -> [String] {
-        segments.filter { $0.value == callID }.keys.sorted()
+        owners.filter { $0.value == callID }.keys.sorted()
     }
 
     func localCallIDs() throws -> [UUID] { Array(calls.keys) }
-    func removeSegments(callID: UUID) throws { segments = segments.filter { $0.value != callID } }
+    func localSegmentIDs(callID: UUID) throws -> [String] { segmentIDs(callID: callID) }
+
+    func removeSegment(id: String) throws {
+        removedSegmentIDs.append(id)
+        segments[id] = nil
+        owners[id] = nil
+    }
+
+    func removeSegments(callID: UUID) throws {
+        for id in segmentIDs(callID: callID) { try removeSegment(id: id) }
+    }
+
     func removeNote(callID: UUID) throws { notes[callID] = nil }
     func removeCall(id: UUID) throws { calls[id] = nil }
     func upsertCall(_ call: SyncDTO.MirroredCall) throws { calls[call.id] = call }
 
-    func insertSegments(_ inserted: [SyncDTO.MirroredSegment], callID: UUID) throws {
-        for segment in inserted {
-            guard segments[segment.id] == nil else { throw DuplicateSegmentID(id: segment.id) }
-            segments[segment.id] = callID
-        }
+    func upsertSegment(_ segment: SyncDTO.MirroredSegment, callID: UUID) throws {
+        segments[segment.id] = segment
+        owners[segment.id] = callID
     }
 
-    func insertNote(_ note: SyncDTO.MirroredNote, callID: UUID) throws { notes[callID] = note }
+    func upsertNote(_ note: SyncDTO.MirroredNote, callID: UUID) throws { notes[callID] = note }
     func commit() throws {}
 }

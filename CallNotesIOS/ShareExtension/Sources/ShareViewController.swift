@@ -11,6 +11,8 @@ final class ShareViewController: UIViewController {
     private let dateField = UITextField()
     private var sharedAudioURL: URL?
     private var sharedMetadata: CallUploadMetadata?
+    private var transfer: ExtensionUploadTransfer?
+    private var queuedJob: PendingUpload?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -81,28 +83,40 @@ final class ShareViewController: UIViewController {
         }
     }
 
+    /// A failed Send must be retryable without queueing the recording twice, so
+    /// pairing is resolved before anything is copied and a second tap restarts
+    /// the job the first tap already enqueued.
     @objc private func sendToMac() {
         guard let sharedAudioURL else { showError("This share item is not an audio file."); return }
         let counterpartyName = nameField.text
         let startedAt = Self.dateFormatter.date(from: dateField.text ?? "") ?? sharedMetadata?.startedAt
         Task {
             do {
-                let container = try self.sharedContainer()
-                let scheduler = ExtensionUploadScheduler(container: container)
-                let coordinator = try SessionUploadCoordinator(
-                    directory: container.appendingPathComponent("PhoneUploads", isDirectory: true),
-                    starter: scheduler
-                )
-                try await coordinator.enqueue(
-                    audioAt: sharedAudioURL,
-                    metadata: .init(source: .iphoneRecording, startedAt: startedAt, counterpartyName: counterpartyName)
-                )
-                if let failure = scheduler.lastFailure { throw failure }
-                await MainActor.run { self.extensionContext?.completeRequest(returningItems: nil) }
+                let transfer = try self.uploadTransfer()
+                try transfer.scheduler.requirePairing()
+                if let queued = self.queuedJob {
+                    await transfer.scheduler.start(queued)
+                } else {
+                    self.queuedJob = try await transfer.coordinator.enqueue(
+                        audioAt: sharedAudioURL,
+                        metadata: .init(source: .iphoneRecording, startedAt: startedAt, counterpartyName: counterpartyName)
+                    )
+                }
+                if let failure = transfer.scheduler.lastFailure { throw failure }
+                self.extensionContext?.completeRequest(returningItems: nil)
             } catch {
-                await MainActor.run { self.showError(error.localizedDescription) }
+                self.showError(error.localizedDescription)
             }
         }
+    }
+
+    /// `URLSession` forbids two live sessions with the same background
+    /// identifier, so the extension builds its transfer exactly once.
+    private func uploadTransfer() throws -> ExtensionUploadTransfer {
+        if let transfer { return transfer }
+        let built = try ExtensionUploadTransfer(container: sharedContainer())
+        transfer = built
+        return built
     }
 
     private func sharedContainer() throws -> URL {
@@ -121,7 +135,7 @@ final class ShareViewController: UIViewController {
         return formatter
     }()
 
-    private static func stageSharedAudio(_ source: URL, inPlace: Bool) throws -> URL {
+    private nonisolated static func stageSharedAudio(_ source: URL, inPlace: Bool) throws -> URL {
         guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.thatdudealso.callnotes") else {
             throw CocoaError(.fileNoSuchFile)
         }
@@ -148,6 +162,22 @@ final class ShareViewController: UIViewController {
     }
 }
 
+/// The extension's one background session, wired to the same Core state machine
+/// the containing app reattaches to after this process exits.
+private final class ExtensionUploadTransfer {
+    let scheduler: ExtensionUploadScheduler
+    let coordinator: SessionUploadCoordinator
+
+    init(container: URL) throws {
+        scheduler = ExtensionUploadScheduler(container: container)
+        coordinator = try SessionUploadCoordinator(
+            directory: container.appendingPathComponent("PhoneUploads", isDirectory: true),
+            starter: scheduler
+        )
+        scheduler.attach(coordinator: coordinator)
+    }
+}
+
 /// Starts the extension's half of a transfer. The durable queue state stays in
 /// the Core `SessionUploadCoordinator`, which the containing app reattaches to
 /// after this process exits.
@@ -158,29 +188,54 @@ private final class ExtensionUploadScheduler: SessionUploadTaskStarting, @unchec
     private let container: URL
     private let lock = NSLock()
     private var failure: Error?
+    private var session: URLSession?
 
     init(container: URL) { self.container = container }
 
     var lastFailure: Error? { lock.withLock { failure } }
 
+    /// The Mac serves a self-signed leaf with no SubjectAltName, so default
+    /// trust evaluation rejects it. The extension pins the paired fingerprint
+    /// through the same delegate the app's phone-upload session uses.
+    func attach(coordinator: SessionUploadCoordinator) {
+        let delegate = SessionUploadDelegate(coordinator: coordinator, pinnedFingerprint: {
+            Self.configuration()?.certificateFingerprint
+        })
+        let session = SharedUploadSession.make(identifier: SharedUploadSession.identifier, delegate: delegate)
+        lock.withLock { self.session = session }
+    }
+
+    /// Resolves the paired Mac before the recording is copied, so a share that
+    /// cannot be scheduled never leaves a queued duplicate behind.
+    @discardableResult
+    func requirePairing() throws -> (ExtensionPairingConfiguration, String) {
+        guard let configuration = Self.configuration(), let token = Self.token(for: configuration.deviceID) else {
+            throw URLError(.userAuthenticationRequired)
+        }
+        return (configuration, token)
+    }
+
     func start(_ job: PendingUpload) async {
+        lock.withLock { failure = nil }
         do { try schedule(job: job) } catch { lock.withLock { failure = error } }
     }
 
     private func schedule(job: PendingUpload) throws {
-        guard let data = UserDefaults(suiteName: "group.com.thatdudealso.callnotes")?.data(forKey: Self.configurationKey),
-              let configuration = try? JSONDecoder().decode(ExtensionPairingConfiguration.self, from: data)
-        else { throw URLError(.userAuthenticationRequired) }
-        guard let token = Self.token(for: configuration.deviceID) else { throw URLError(.userAuthenticationRequired) }
+        let (configuration, token) = try requirePairing()
+        guard let session = lock.withLock({ self.session }) else { throw CocoaError(.fileNoSuchFile) }
         let body = try ExtensionMultipartBody.make(job: job, directory: container.appendingPathComponent("UploadRequests", isDirectory: true))
         var request = URLRequest(url: configuration.serverURL.appendingPathComponent("calls").appendingPathComponent(job.id.uuidString))
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue(body.contentType, forHTTPHeaderField: "Content-Type")
-        let session = SharedUploadSession.make(identifier: SharedUploadSession.identifier, delegate: nil)
         let task = session.uploadTask(with: request, fromFile: body.url)
         task.taskDescription = job.id.uuidString
         task.resume()
+    }
+
+    private static func configuration() -> ExtensionPairingConfiguration? {
+        guard let data = UserDefaults(suiteName: "group.com.thatdudealso.callnotes")?.data(forKey: configurationKey) else { return nil }
+        return try? JSONDecoder().decode(ExtensionPairingConfiguration.self, from: data)
     }
 
     /// Both targets declare exactly one `keychain-access-groups` entry, so the
@@ -203,6 +258,7 @@ private enum ExtensionMultipartBody {
         let boundary = "CallNotes-\(UUID().uuidString)"
         let url = directory.appendingPathComponent(job.id.uuidString).appendingPathExtension("multipart")
         let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        try? FileManager.default.removeItem(at: url)
         FileManager.default.createFile(atPath: url.path, contents: nil)
         let output = try FileHandle(forWritingTo: url)
         defer { try? output.close() }

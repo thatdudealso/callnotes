@@ -88,6 +88,16 @@ struct SwiftDataMirrorWriter: MirrorWriting {
         try context.fetch(FetchDescriptor<MirroredCall>()).map(\.id)
     }
 
+    func localSegmentIDs(callID: UUID) throws -> [String] {
+        try context.fetch(FetchDescriptor<MirroredSegment>(predicate: #Predicate { $0.callID == callID })).map(\.id)
+    }
+
+    func removeSegment(id: String) throws {
+        for segment in try context.fetch(FetchDescriptor<MirroredSegment>(predicate: #Predicate { $0.id == id })) {
+            context.delete(segment)
+        }
+    }
+
     func removeSegments(callID: UUID) throws {
         for segment in try context.fetch(FetchDescriptor<MirroredSegment>(predicate: #Predicate { $0.callID == callID })) {
             context.delete(segment)
@@ -118,14 +128,24 @@ struct SwiftDataMirrorWriter: MirrorWriting {
         if call.modelContext == nil { context.insert(call) }
     }
 
-    func insertSegments(_ segments: [SyncDTO.MirroredSegment], callID: UUID) throws {
-        for segment in segments {
-            context.insert(MirroredSegment(id: segment.id, callID: callID, speaker: segment.speaker, text: segment.text, startSec: segment.startSec))
-        }
+    func upsertSegment(_ remote: SyncDTO.MirroredSegment, callID: UUID) throws {
+        let id = remote.id
+        let segment = try context.fetch(FetchDescriptor<MirroredSegment>(predicate: #Predicate { $0.id == id })).first
+            ?? MirroredSegment(id: id, callID: callID, speaker: remote.speaker, text: remote.text, startSec: remote.startSec)
+        segment.callID = callID
+        segment.speaker = remote.speaker
+        segment.text = remote.text
+        segment.startSec = remote.startSec
+        if segment.modelContext == nil { context.insert(segment) }
     }
 
-    func insertNote(_ note: SyncDTO.MirroredNote, callID: UUID) throws {
-        context.insert(MirroredNote(callID: callID, summary: note.summary, decisions: note.decisions, actionItems: note.actionItems))
+    func upsertNote(_ remote: SyncDTO.MirroredNote, callID: UUID) throws {
+        let note = try context.fetch(FetchDescriptor<MirroredNote>(predicate: #Predicate { $0.callID == callID })).first
+            ?? MirroredNote(callID: callID, summary: remote.summary, decisions: remote.decisions, actionItems: remote.actionItems)
+        note.summary = remote.summary
+        note.decisions = remote.decisions
+        note.actionItems = remote.actionItems
+        if note.modelContext == nil { context.insert(note) }
     }
 
     func commit() throws {
