@@ -60,33 +60,25 @@ struct PhonePairingConfiguration: Codable, Sendable {
 
 enum PhonePairingStore {
     private static let defaultsKey = "paired_mac"
-    private static let keychainService = "com.thatdudealso.callnotes.phone-pairing"
     static let pairingInvalidatedNotification = Notification.Name("CallNotesPhonePairingInvalidated")
 
     static func save(_ configuration: PhonePairingConfiguration, token: String) throws {
-        let defaults = UserDefaults(suiteName: PhoneSharedContainer.appGroupIdentifier)
-        defaults?.set(try JSONEncoder().encode(configuration), forKey: defaultsKey)
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: keychainService,
-            kSecAttrAccount: configuration.deviceID.uuidString,
-            kSecValueData: Data(token.utf8),
-            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-        ]
+        guard var query = PairingKeychain.itemQuery(account: configuration.deviceID.uuidString) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
         SecItemDelete(query as CFDictionary)
+        query[kSecValueData] = Data(token.utf8)
+        query[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         guard SecItemAdd(query as CFDictionary, nil) == errSecSuccess else { throw CocoaError(.fileWriteUnknown) }
+        UserDefaults(suiteName: PhoneSharedContainer.appGroupIdentifier)?.set(try JSONEncoder().encode(configuration), forKey: defaultsKey)
     }
 
     static func load() -> (PhonePairingConfiguration, String)? {
         guard let data = UserDefaults(suiteName: PhoneSharedContainer.appGroupIdentifier)?.data(forKey: defaultsKey),
               let configuration = try? JSONDecoder().decode(PhonePairingConfiguration.self, from: data)
         else { return nil }
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: keychainService,
-            kSecAttrAccount: configuration.deviceID.uuidString,
-            kSecReturnData: true,
-        ]
+        guard var query = PairingKeychain.itemQuery(account: configuration.deviceID.uuidString) else { return nil }
+        query[kSecReturnData] = true
         var result: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
               let tokenData = result as? Data,
@@ -109,13 +101,9 @@ enum PhonePairingStore {
     }
 
     static func remove() {
-        guard let (configuration, _) = load() else { return }
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: keychainService,
-            kSecAttrAccount: configuration.deviceID.uuidString,
-        ]
-        SecItemDelete(query as CFDictionary)
+        if let query = PairingKeychain.serviceQuery() {
+            SecItemDelete(query as CFDictionary)
+        }
         UserDefaults(suiteName: PhoneSharedContainer.appGroupIdentifier)?.removeObject(forKey: defaultsKey)
     }
 }

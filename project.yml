@@ -82,6 +82,7 @@ targets:
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: CallNotes talks only to your own Mac on your local network to sync calls and notes.
         INFOPLIST_KEY_NSBonjourServices: [_callnotes._tcp]
         INFOPLIST_KEY_UIBackgroundModes: [audio]
+        INFOPLIST_KEY_CallNotesKeychainAccessGroup: $(AppIdentifierPrefix)com.thatdudealso.callnotes.shared
         CODE_SIGN_ENTITLEMENTS: CallNotesIOS/CallNotesIOS.entitlements
 
   CallNotesCaptureHarness:
@@ -147,6 +148,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.thatdudealso.callnotes.ios.ShareExtension
         MARKETING_VERSION: 0.1.0
+        INFOPLIST_KEY_CallNotesKeychainAccessGroup: $(AppIdentifierPrefix)com.thatdudealso.callnotes.shared
         CODE_SIGN_ENTITLEMENTS: CallNotesIOS/ShareExtension/CallNotesShareExtension.entitlements
 
 schemes:

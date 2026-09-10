@@ -211,7 +211,6 @@ private final class ExtensionUploadTransfer {
 /// after this process exits.
 private final class ExtensionUploadScheduler: SessionUploadTaskStarting, @unchecked Sendable {
     private static let configurationKey = "paired_mac"
-    private static let keychainService = "com.thatdudealso.callnotes.phone-pairing"
 
     private let container: URL
     private let lock = NSLock()
@@ -276,7 +275,9 @@ private final class ExtensionUploadScheduler: SessionUploadTaskStarting, @unchec
     }
 
     private static func removePairing() {
-        SecItemDelete([kSecClass: kSecClassGenericPassword, kSecAttrService: keychainService] as CFDictionary)
+        if let query = PairingKeychain.serviceQuery() {
+            SecItemDelete(query as CFDictionary)
+        }
         UserDefaults(suiteName: "group.com.thatdudealso.callnotes")?.removeObject(forKey: configurationKey)
     }
 
@@ -284,7 +285,8 @@ private final class ExtensionUploadScheduler: SessionUploadTaskStarting, @unchec
     /// keychain resolves an unqualified query to that shared group in the app
     /// and in this extension alike.
     private static func token(for deviceID: UUID) -> String? {
-        let query: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: keychainService, kSecAttrAccount: deviceID.uuidString, kSecReturnData: true]
+        guard var query = PairingKeychain.itemQuery(account: deviceID.uuidString) else { return nil }
+        query[kSecReturnData] = true
         var result: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data else { return nil }
         return String(data: data, encoding: .utf8)

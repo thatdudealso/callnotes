@@ -163,7 +163,7 @@ final class PhoneAppModel {
     var pairedMacName = "Your Mac"
     var uploadStatus: String?
     var recorder = InPersonRecorder()
-    @ObservationIgnored private var pairingInvalidatedObserver: NSObjectProtocol?
+    @ObservationIgnored nonisolated(unsafe) private var pairingInvalidatedObserver: NSObjectProtocol?
 
     init() {
         isPaired = PhonePairingStore.load() != nil
