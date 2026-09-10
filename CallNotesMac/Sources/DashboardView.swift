@@ -65,12 +65,19 @@ struct DashboardView: View {
                                 HStack {
                                     Text(period.startsAt.formatted(date: .abbreviated, time: .omitted))
                                     Spacer()
-                                    Text("\(period.callCount) calls")
-                                    Text(duration(period.totalDurationSec))
-                                        .frame(minWidth: 62, alignment: .trailing)
-                                    Text(currency(period.metaCostDollars))
-                                        .frame(minWidth: 62, alignment: .trailing)
-                                        .foregroundStyle(period.metaBilledSeconds == 0 ? .secondary : CallNotesStyle.cloud)
+                                    VStack(alignment: .trailing, spacing: 3) {
+                                        HStack(spacing: 10) {
+                                            Text("\(period.callCount) calls")
+                                            Text(duration(period.totalDurationSec))
+                                                .frame(minWidth: 62, alignment: .trailing)
+                                            Text(currency(period.metaCostDollars))
+                                                .frame(minWidth: 62, alignment: .trailing)
+                                                .foregroundStyle(period.metaBilledSeconds == 0 ? .secondary : CallNotesStyle.cloud)
+                                        }
+                                        Text("\(period.localCallCount) local · \(period.metaCallCount) Meta · \(period.mixedCallCount) mixed")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
                                 .font(.subheadline)
                                 .padding(.vertical, 8)
