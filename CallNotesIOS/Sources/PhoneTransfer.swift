@@ -87,7 +87,7 @@ enum PhonePairingStore {
 
 enum PhonePairingCoordinator {
     static func pair(ticketPayload: String, deviceName: String) async throws -> PhonePairingConfiguration {
-        let ticket = try JSONDecoder().decode(PairingTicket.self, from: Data(ticketPayload.utf8))
+        let ticket = try PairingTicket.fromQRPayload(ticketPayload)
         guard ticket.expiresAt >= Date() else { throw PairingError.expiredCode }
         let delegate = PinnedURLSessionDelegate(fingerprint: ticket.certificateFingerprint)
         let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)

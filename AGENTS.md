@@ -23,6 +23,12 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Import speakers no diarized cluster claims keep the provider tag when there is one, else `TurnAttributor.unassignedClusterKey`; both get a `CallSpeaker` row so per-call `Speaker N` labels survive a reload.
 - Synthetic import audio: `Scripts/generate-import-fixture.sh` (macOS `say`, never personal recordings).
 
+## iPhone sync (Phase 6)
+
+- Pairing, TLS identity, Hummingbird server, and phone upload types live in `CallNotesCore/Sync`. The Mac keeps the server in `AppModel`; Settings -> Devices shows the QR payload and Revoke. Device tokens persist at Application Support `CallNotes/Sync/paired-devices.json` (SHA-256 digests only).
+- Phone uploads are not dropped into the Inbox watcher. They land in Application Support `CallNotes/PhoneUploads` with a `{callID}.json` sidecar and keep that call ID through `ImportPipeline.import`.
+- The Share Extension copies into the App Group (`group.com.thatdudealso.callnotes`) and schedules a background `URLSession` with `sharedContainerIdentifier` set. Pairing tickets are ISO-8601 JSON (`PairingTicket.qrPayload()`).
+
 ## Mac capture (Phase 1)
 
 - Shared audio math lives in `Packages/CallNotesCore/Sources/CallNotesCore/Audio`. Mac hardware (process tap, mic, detector, coordinator) lives in `CallNotesMac/Sources/Capture`.

@@ -10,8 +10,8 @@ import Testing
         )
 
         #expect(metadata.counterpartyName == "Priya Shah")
-        let components = Calendar(identifier: .gregorian).dateComponents(
-            in: TimeZone(secondsFromGMT: 0)!,
+        let components = Calendar.current.dateComponents(
+            [.year, .month, .day, .hour, .minute],
             from: try #require(metadata.startedAt)
         )
         #expect(components.year == 2026)
@@ -87,6 +87,61 @@ import Testing
         let calls = try await store.fetchCalls()
         #expect(calls.count == 1)
         #expect(calls.first?.status == .notesReady)
+    }
+
+    @Test func importedPhoneUploadKeepsTheUploadedCallAndItsMetadata() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-phone-handoff-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let store = MemoryStore()
+        let server = MacSyncServer(store: store, receivedUploadsDirectory: root)
+        let uploadID = UUID()
+        let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let metadata = CallUploadMetadata(
+            source: .iphoneRecording,
+            startedAt: startedAt,
+            counterpartyName: "Priya"
+        )
+        let fixture = root.appendingPathComponent("fixture.wav")
+        try ImportFixtureWriter.writeWAV(to: fixture, seconds: 0.3)
+        let created = try await server.accept(
+            uploadID: uploadID,
+            metadata: metadata,
+            audio: try Data(contentsOf: fixture),
+            fileExtension: "wav"
+        )
+        #expect(created == .created)
+        let audioURL = root.appendingPathComponent("\(uploadID.uuidString).wav")
+        #expect(CallUploadMetadata.loadSidecar(nextTo: audioURL) == metadata)
+
+        let pipeline = ImportPipeline(
+            store: store,
+            spine: FileTranscriptionSpine(
+                speech: ScriptedPCMTranscriber(
+                    near: [RawSegment(start: 0, end: 0.2, text: "Hello.", channel: .mixed)],
+                    far: []
+                ),
+                diarizer: ScriptedDiarizer(clusters: []),
+                store: store
+            ),
+            duplicates: InboxDuplicateIndex(),
+            audioRoot: root.appendingPathComponent("audio", isDirectory: true)
+        )
+        let processed = try await pipeline.`import`(
+            audioURL,
+            engine: .appleSpeech,
+            source: metadata.source,
+            counterpartyName: metadata.counterpartyName,
+            startedAt: metadata.startedAt,
+            job: ImportJob(fileName: audioURL.lastPathComponent, sourceURL: audioURL, callID: uploadID)
+        )
+        let calls = try await store.fetchCalls()
+        #expect(calls.count == 1)
+        #expect(processed.call.id == uploadID)
+        #expect(processed.call.source == .iphoneRecording)
+        #expect(processed.call.counterpartyName == "Priya")
+        #expect(processed.call.startedAt == startedAt)
     }
     #endif
 }

@@ -11,6 +11,23 @@ public struct CallUploadMetadata: Codable, Sendable, Equatable {
         self.startedAt = startedAt
         self.counterpartyName = counterpartyName
     }
+
+    public static func sidecarURL(nextTo audioURL: URL) -> URL {
+        audioURL.deletingPathExtension().appendingPathExtension("json")
+    }
+
+    public func writeSidecar(nextTo audioURL: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(self).write(to: Self.sidecarURL(nextTo: audioURL), options: .atomic)
+    }
+
+    public static func loadSidecar(nextTo audioURL: URL) -> CallUploadMetadata? {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let data = try? Data(contentsOf: sidecarURL(nextTo: audioURL)) else { return nil }
+        return try? decoder.decode(CallUploadMetadata.self, from: data)
+    }
 }
 
 /// A durable upload entry. `audioURL` always points inside the App Group inbox.
@@ -144,7 +161,7 @@ public enum SharedRecordingTitleParser {
     private static func date(from text: String) -> Date? {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.timeZone = TimeZone.current
         formatter.dateFormat = "MMM d, yyyy 'at' h:mm a"
         return formatter.date(from: text)
     }

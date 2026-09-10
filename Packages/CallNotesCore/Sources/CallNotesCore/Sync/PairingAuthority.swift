@@ -17,6 +17,19 @@ public struct PairingTicket: Codable, Sendable, Equatable {
         self.certificateFingerprint = certificateFingerprint
         self.expiresAt = expiresAt
     }
+
+    public func qrPayload() throws -> String {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        return String(decoding: try encoder.encode(self), as: UTF8.self)
+    }
+
+    public static func fromQRPayload(_ payload: String) throws -> PairingTicket {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(PairingTicket.self, from: Data(payload.utf8))
+    }
 }
 
 /// The request sent by a newly scanned iPhone to `POST /pair`.
@@ -80,21 +93,38 @@ public actor PairingAuthority {
         var tokenDigest: String
     }
 
+    private struct Snapshot: Codable {
+        var devices: [Record]
+        struct Record: Codable {
+            var device: PairedDevice
+            var tokenDigest: String
+        }
+    }
+
     private let now: @Sendable () -> Date
     private let codeLifetime: TimeInterval
     private let maximumAttempts: Int
+    private let attemptWindow: TimeInterval
+    private let persistenceURL: URL?
     private var pendingCodes: [String: PendingCode] = [:]
     private var devices: [UUID: StoredDevice] = [:]
-    private var failedAttempts: Int = 0
+    private var failedAttemptDates: [Date] = []
 
     public init(
         now: @escaping @Sendable () -> Date = Date.init,
         codeLifetime: TimeInterval = 120,
-        maximumAttempts: Int = 5
+        maximumAttempts: Int = 5,
+        attemptWindow: TimeInterval = 15 * 60,
+        persistenceURL: URL? = nil
     ) {
         self.now = now
         self.codeLifetime = codeLifetime
         self.maximumAttempts = maximumAttempts
+        self.attemptWindow = attemptWindow
+        self.persistenceURL = persistenceURL
+        if let persistenceURL {
+            devices = Self.load(from: persistenceURL)
+        }
     }
 
     public func issueTicket(serverURL: URL, certificateFingerprint: String) -> PairingTicket {
@@ -112,17 +142,19 @@ public actor PairingAuthority {
     public func pair(_ request: PairingRequest) throws -> SyncDTO.PairResponse {
         let deviceName = request.deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !deviceName.isEmpty else { throw PairingError.invalidDeviceName }
-        guard failedAttempts < maximumAttempts else { throw PairingError.pairingRateLimited }
+        pruneFailedAttempts()
+        guard failedAttemptDates.count < maximumAttempts else { throw PairingError.pairingRateLimited }
         guard let pending = pendingCodes.removeValue(forKey: request.code) else {
-            failedAttempts += 1
+            failedAttemptDates.append(now())
             throw PairingError.invalidCode
         }
         guard pending.expiresAt >= now() else { throw PairingError.expiredCode }
 
-        failedAttempts = 0
+        failedAttemptDates = []
         let device = PairedDevice(id: UUID(), name: deviceName, pairedAt: now())
         let token = Self.makeToken()
         devices[device.id] = StoredDevice(device: device, tokenDigest: Self.digest(token))
+        persist()
         return SyncDTO.PairResponse(deviceID: device.id, token: token)
     }
 
@@ -135,6 +167,7 @@ public actor PairingAuthority {
         var updated = stored.device
         updated.lastSeenAt = now()
         devices[id] = StoredDevice(device: updated, tokenDigest: stored.tokenDigest)
+        persist()
         return updated
     }
 
@@ -142,10 +175,35 @@ public actor PairingAuthority {
         guard var stored = devices[deviceID] else { throw PairingError.unknownDevice }
         stored.device.revokedAt = now()
         devices[deviceID] = stored
+        persist()
     }
 
     public func pairedDevices() -> [PairedDevice] {
         devices.values.map(\.device).sorted { $0.pairedAt > $1.pairedAt }
+    }
+
+    private func pruneFailedAttempts() {
+        let cutoff = now().addingTimeInterval(-attemptWindow)
+        failedAttemptDates.removeAll { $0 < cutoff }
+    }
+
+    private func persist() {
+        guard let persistenceURL else { return }
+        let snapshot = Snapshot(devices: devices.values.map { Snapshot.Record(device: $0.device, tokenDigest: $0.tokenDigest) })
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(snapshot) else { return }
+        try? FileManager.default.createDirectory(at: persistenceURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: persistenceURL, options: .atomic)
+    }
+
+    private static func load(from url: URL) -> [UUID: StoredDevice] {
+        guard let data = try? Data(contentsOf: url) else { return [:] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let snapshot = try? decoder.decode(Snapshot.self, from: data) else { return [:] }
+        return Dictionary(uniqueKeysWithValues: snapshot.devices.map { ($0.device.id, StoredDevice(device: $0.device, tokenDigest: $0.tokenDigest)) })
     }
 
     private static func makeCode() -> String {

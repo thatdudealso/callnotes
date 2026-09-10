@@ -32,6 +32,7 @@ public struct ImportPipeline: Sendable {
         engine: STTProviderID,
         source: CallSource = .fileImport,
         counterpartyName: String? = nil,
+        startedAt: Date? = nil,
         job: ImportJob? = nil
     ) async throws -> ProcessedCall {
         var progress = job ?? ImportJob(fileName: url.lastPathComponent, sourceURL: url)
@@ -60,7 +61,7 @@ public struct ImportPipeline: Sendable {
         var call = Call(
             id: callID,
             source: source,
-            startedAt: Date(),
+            startedAt: startedAt ?? Date(),
             counterpartyName: counterpartyName,
             audioPath: storedURL.path,
             audioChannels: 1,

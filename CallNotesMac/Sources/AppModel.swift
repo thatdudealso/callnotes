@@ -77,6 +77,11 @@ final class AppModel {
 
     private var syncServerTask: Task<Void, Never>?
     private var syncBonjourService: NetService?
+    private var syncServer: MacSyncServer?
+    private var syncIdentity: MacTLSIdentity?
+    private var syncActivity: NSObjectProtocol?
+    var pairingQRPayload: String?
+    var pairedDevices: [PairedDevice] = []
 
     var selectedCall: Call? {
         calls.first { $0.id == selectedCallID }
@@ -220,18 +225,120 @@ final class AppModel {
         do {
             let support = try FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent(CallAudioPaths.applicationSupportFolder, isDirectory: true)
-            let identity = try MacTLSIdentity(storageDirectory: support.appendingPathComponent("Sync", isDirectory: true))
-            let uploads = try InboxPaths.resolvedInbox()
-            let server = MacSyncServer(store: store, receivedUploadsDirectory: uploads)
+            let syncDirectory = support.appendingPathComponent("Sync", isDirectory: true)
+            let identity = try MacTLSIdentity(storageDirectory: syncDirectory)
+            let pairing = PairingAuthority(persistenceURL: syncDirectory.appendingPathComponent("paired-devices.json"))
+            let uploads = support.appendingPathComponent("PhoneUploads", isDirectory: true)
+            let server = MacSyncServer(
+                pairing: pairing,
+                store: store,
+                receivedUploadsDirectory: uploads,
+                onAccepted: { [weak self] callID, audioURL, metadata in
+                    await self?.processPhoneUpload(callID: callID, audioURL: audioURL, metadata: metadata)
+                }
+            )
             let service = NetService(domain: "local.", type: "\(SyncConstants.bonjourServiceType).", name: Host.current().localizedName ?? "CallNotes", port: Int32(SyncConstants.serverPort))
             service.publish()
             syncBonjourService = service
+            syncServer = server
+            syncIdentity = identity
+            let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "CallNotes phone sync")
+            syncActivity = activity
             syncServerTask = Task {
+                defer { ProcessInfo.processInfo.endActivity(activity) }
                 do { try await server.run(host: "0.0.0.0", identity: identity) }
                 catch { self.statusMessage = "Phone sync stopped: \(error.localizedDescription)" }
             }
+            Task { await refreshPairingTicket() }
         } catch {
             statusMessage = "Phone sync unavailable: \(error.localizedDescription)"
+        }
+    }
+
+    func refreshPairingTicket() async {
+        guard let server = syncServer, let identity = syncIdentity else { return }
+        let host = (Host.current().name ?? "localhost").trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        guard let serverURL = URL(string: "https://\(host):\(SyncConstants.serverPort)") else { return }
+        let ticket = await server.pairingTicket(serverURL: serverURL, identity: identity)
+        pairingQRPayload = try? ticket.qrPayload()
+        pairedDevices = await server.pairedDevices()
+    }
+
+    func revokePairedDevice(_ id: UUID) async {
+        guard let server = syncServer else { return }
+        do {
+            try await server.revoke(deviceID: id)
+            pairedDevices = await server.pairedDevices()
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    func processPhoneUpload(callID: UUID, audioURL: URL, metadata: CallUploadMetadata) async {
+        guard isStoreInitialized else { return }
+        var job = ImportJob(fileName: audioURL.lastPathComponent, sourceURL: audioURL, stage: .settling, callID: callID)
+        upsertImportJob(job)
+        let storedDefault = UserDefaults.standard.string(forKey: "default_engine")
+        let configuredDefault: STTProviderID? = storedDefault == "meta" ? .metaMuse : .appleSpeech
+        let duplicates = importDuplicates ?? InboxDuplicateIndex()
+        var meta: (any MetaFileTranscribing)?
+        if EngineSelection.resolve(override: nil, configuredDefault: configuredDefault) == .metaMuse {
+            do {
+                meta = MetaFileProvider(configuration: try metaConfiguration())
+            } catch {
+                statusMessage = "Meta is not configured. Importing with local transcription."
+            }
+        }
+        let engine = EngineSelection.resolveImport(
+            configuredDefault: configuredDefault,
+            metaIsConfigured: meta != nil,
+            parakeetIsUsable: await FluidParakeetProvider().healthCheck().isUsable
+        )
+        if engine != .metaMuse { meta = nil }
+        let speech: any PCMTranscriber = engine == .fluidParakeet ? FluidParakeetProvider() : self.speech
+        let spine = FileTranscriptionSpine(
+            speech: speech,
+            diarizer: FluidDiarizer(),
+            store: store,
+            meta: meta
+        )
+        let pipeline = ImportPipeline(
+            store: store,
+            spine: spine,
+            notes: notesSpine,
+            duplicates: duplicates,
+            onProgress: { [weak self] update in
+                Task { @MainActor in
+                    self?.upsertImportJob(update)
+                }
+            }
+        )
+        do {
+            let processed = try await pipeline.`import`(
+                audioURL,
+                engine: engine,
+                source: metadata.source,
+                counterpartyName: metadata.counterpartyName,
+                startedAt: metadata.startedAt,
+                job: job
+            )
+            job.callID = processed.call.id
+            job.stage = .completed
+            job.fractionComplete = 1
+            upsertImportJob(job)
+            turnsByCall[processed.call.id] = processed.turns
+            selectedCallID = processed.call.id
+            try await refresh()
+            statusMessage = "Imported iPhone recording."
+        } catch FileImportError.duplicate {
+            job.stage = .duplicate
+            job.fractionComplete = 1
+            upsertImportJob(job)
+        } catch {
+            job.stage = .failed
+            job.error = error.localizedDescription
+            upsertImportJob(job)
+            statusMessage = error.localizedDescription
         }
     }
 

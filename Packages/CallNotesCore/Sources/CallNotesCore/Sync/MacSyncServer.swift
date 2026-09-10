@@ -14,11 +14,18 @@ public actor MacSyncServer {
     private let pairing: PairingAuthority
     private let store: any CallStore
     private let receivedUploadsDirectory: URL
+    private let onAccepted: (@Sendable (UUID, URL, CallUploadMetadata) async -> Void)?
 
-    public init(pairing: PairingAuthority = PairingAuthority(), store: any CallStore = MemoryStore(), receivedUploadsDirectory: URL? = nil) {
+    public init(
+        pairing: PairingAuthority = PairingAuthority(),
+        store: any CallStore = MemoryStore(),
+        receivedUploadsDirectory: URL? = nil,
+        onAccepted: (@Sendable (UUID, URL, CallUploadMetadata) async -> Void)? = nil
+    ) {
         self.pairing = pairing
         self.store = store
         self.receivedUploadsDirectory = receivedUploadsDirectory ?? FileManager.default.temporaryDirectory.appendingPathComponent("CallNotesPhoneUploads", isDirectory: true)
+        self.onAccepted = onAccepted
     }
 
     public func pairingTicket(serverURL: URL, identity: MacTLSIdentity) async -> PairingTicket {
@@ -27,6 +34,10 @@ public actor MacSyncServer {
 
     public func revoke(deviceID: UUID) async throws {
         try await pairing.revoke(deviceID: deviceID)
+    }
+
+    public func pairedDevices() async -> [PairedDevice] {
+        await pairing.pairedDevices()
     }
 
     /// Runs until the containing app cancels the task. The app owns the task
@@ -93,6 +104,7 @@ public actor MacSyncServer {
         try FileManager.default.createDirectory(at: receivedUploadsDirectory, withIntermediateDirectories: true)
         let audioURL = receivedUploadsDirectory.appendingPathComponent("\(uploadID.uuidString).\(fileExtension)")
         try audio.write(to: audioURL, options: .atomic)
+        try metadata.writeSidecar(nextTo: audioURL)
         let call = Call(
             id: uploadID,
             source: metadata.source,
@@ -103,6 +115,9 @@ public actor MacSyncServer {
             status: .uploaded
         )
         try await store.upsertCall(call)
+        if let onAccepted {
+            await onAccepted(uploadID, audioURL, metadata)
+        }
         return .created
     }
 
