@@ -55,4 +55,15 @@ import Testing
         #expect(CertificateFingerprint.matches(certificate, expected: expected.uppercased()))
         #expect(!CertificateFingerprint.matches(Data("other certificate".utf8), expected: expected))
     }
+
+    #if os(macOS)
+    @Test func tlsIdentityPersistsItsPinnedCertificate() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let created = try MacTLSIdentity(storageDirectory: directory)
+        let reopened = try MacTLSIdentity(storageDirectory: directory)
+        #expect(created.certificateFingerprint == reopened.certificateFingerprint)
+        #expect(!created.privateKeyPEM.isEmpty)
+    }
+    #endif
 }
