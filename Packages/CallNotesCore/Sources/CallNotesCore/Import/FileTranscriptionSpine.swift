@@ -276,7 +276,10 @@ public struct FileTranscriptionSpine: Sendable {
         for (index, chunk) in plans.enumerated() {
             job.chunkIndex = completedChunks + index
             job.stage = .transcribing
-            job.fractionComplete = Double(job.chunkIndex) / Double(max(job.chunkCount, 1)) * 0.8
+            job.fractionComplete = max(
+                job.fractionComplete,
+                Double(job.chunkIndex) / Double(max(job.chunkCount, 1)) * 0.8
+            )
             emit(job)
             let slice = try ImportFileChunker.pcmSlice(pcm, chunk: chunk)
             let relative = try await speech.transcribePCM(slice, channel: channel, config: config)

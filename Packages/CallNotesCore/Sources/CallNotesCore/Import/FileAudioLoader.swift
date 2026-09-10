@@ -44,7 +44,8 @@ public enum FileAudioLoader {
 
     public static func channelLayout(for url: URL, channelCount: Int) -> ChannelLayout {
         guard channelCount >= 2 else { return .mono }
-        return url.pathExtension.lowercased() == "caf" ? .captureNearFar : .unknownStereo
+        guard channelCount == 2, CaptureChannelMarker.hasNearFarMarker(url) else { return .unknownStereo }
+        return .captureNearFar
     }
 
     /// Decoded in bounded batches so peak memory does not scale with the

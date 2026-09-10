@@ -56,7 +56,7 @@ public struct AppleSpeechProvider: STTProvider {
     ) async throws -> [RawSegment] {
         let loaded = try FileAudioLoader.load(fileURL, targetSampleRate: config.sampleRate)
         if !loaded.isStereo {
-            return try await transcribePCM(loaded.near, .mixed, config)
+            return try await transcribePCM(loaded.mixed, .mixed, config)
         }
 
         switch dualInstanceMode {

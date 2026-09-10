@@ -479,11 +479,17 @@ final class AppModel {
                 try await store.upsertCall(call)
                 statusMessage = "Re-transcribed with Meta. \(result.billedSeconds)s billed."
             case .fluidParakeet:
-                let segments = try await FluidParakeetProvider().transcribe(
+                let processed = try await FileTranscriptionSpine(
+                    speech: FluidParakeetProvider(),
+                    diarizer: FluidDiarizer(),
+                    store: store
+                ).process(
                     fileURL: URL(fileURLWithPath: call.audioPath),
-                    config: STTSessionConfig()
+                    call: call,
+                    profiles: try await store.fetchSpeakerProfiles()
                 )
-                try await persistRetranscription(segments, provider: .fluidParakeet, call: &call)
+                call = processed.call
+                turnsByCall[call.id] = processed.turns
                 statusMessage = "Re-transcribed with Parakeet."
             case .appleSpeech:
                 let segments = try await speech.transcribe(
