@@ -77,6 +77,7 @@ targets:
         GENERATE_INFOPLIST_FILE: true
         INFOPLIST_KEY_UILaunchScreen_Generation: true
         INFOPLIST_KEY_NSMicrophoneUsageDescription: CallNotes records in-person meetings you start and uploads them to your Mac for transcription.
+        INFOPLIST_KEY_NSCameraUsageDescription: CallNotes scans the pairing QR code shown on your Mac so it can pin that Mac’s certificate.
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: CallNotes talks only to your own Mac on your local network to sync calls and notes.
         INFOPLIST_KEY_UIBackgroundModes: [audio, processing]
         INFOPLIST_KEY_BGTaskSchedulerPermittedIdentifiers: [com.thatdudealso.callnotes.upload]
