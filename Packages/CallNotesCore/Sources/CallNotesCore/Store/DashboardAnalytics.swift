@@ -85,9 +85,15 @@ public struct DashboardAnalytics: Sendable, Equatable {
     public let periods: [DashboardPeriod]
     public let contacts: [DashboardContact]
 
+    /// `counterpartyNames` supplies the identity fallback for calls that carry no
+    /// user-edited name. A call's own name always wins, so a stale or store-side
+    /// entry can never override what the user typed. `contacts` lets a store hand
+    /// over an aggregation it computed itself; when omitted the Swift grouping
+    /// below is the reference implementation.
     public static func make(
         from calls: [Call],
         counterpartyNames: [UUID: String] = [:],
+        contacts: [DashboardContact]? = nil,
         now: Date = .now,
         calendar: Calendar = .current
     ) -> DashboardAnalytics {
@@ -96,7 +102,7 @@ public struct DashboardAnalytics: Sendable, Equatable {
                 DashboardCall(
                     call: $0,
                     durationSec: duration(for: $0, now: now),
-                    counterpartyName: contactName(for: counterpartyNames[$0.id] ?? $0.counterpartyName)
+                    counterpartyName: contactName(for: $0.counterpartyName, fallback: counterpartyNames[$0.id])
                 )
             }
             .sorted { $0.call.startedAt > $1.call.startedAt }
@@ -104,20 +110,25 @@ public struct DashboardAnalytics: Sendable, Equatable {
         let groupedPeriods = DashboardPeriodRange.allCases.flatMap { range in
             periods(for: dashboardCalls, range: range, calendar: calendar)
         }
-        let groupedContacts = contacts(for: dashboardCalls)
         return DashboardAnalytics(
             generatedAt: now,
             calls: dashboardCalls,
             totals: totals,
             periods: groupedPeriods,
-            contacts: groupedContacts
+            contacts: contacts ?? self.contacts(for: dashboardCalls)
         )
     }
 
-    public static func contactName(for name: String?) -> String {
-        guard let name else { return "Unknown" }
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "Unknown" : trimmed
+    public static func contactName(for name: String?, fallback: String? = nil) -> String {
+        if let resolved = normalized(name) { return resolved }
+        return normalized(fallback) ?? "Unknown"
+    }
+
+    private static func normalized(_ name: String?) -> String? {
+        guard let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
     }
 
     private static func duration(for call: Call, now: Date) -> Int {

@@ -148,25 +148,32 @@ final class AppModel {
         }
     }
 
+    /// Processing one call writes its row several times. The store keeps only the
+    /// newest pending change and this window lets a burst settle, so a single write
+    /// never fans out into one refresh per store write.
+    private static let dashboardRefreshSettle = Duration.milliseconds(250)
+
     private func observeDashboardChanges() {
         dashboardObservationTask?.cancel()
         let observedStore = store
         dashboardObservationTask = Task { [weak self] in
             let changes = await observedStore.dashboardChanges()
             guard !Task.isCancelled, let self else { return }
-            do {
-                try await self.refresh()
-            } catch {
-                self.statusMessage = error.localizedDescription
-            }
+            await self.refreshReportingFailure()
             for await _ in changes {
                 guard !Task.isCancelled else { return }
-                do {
-                    try await self.refresh()
-                } catch {
-                    self.statusMessage = error.localizedDescription
-                }
+                try? await Task.sleep(for: Self.dashboardRefreshSettle)
+                guard !Task.isCancelled else { return }
+                await self.refreshReportingFailure()
             }
+        }
+    }
+
+    private func refreshReportingFailure() async {
+        do {
+            try await refresh()
+        } catch {
+            statusMessage = error.localizedDescription
         }
     }
 
@@ -181,9 +188,10 @@ final class AppModel {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
                 guard let self, self.recordingState == .recording else { return }
-                let counterpartyNames = Dictionary(
-                    uniqueKeysWithValues: self.dashboardAnalytics.calls.map { ($0.id, $0.counterpartyName) }
-                )
+                let resolvedIdentities = self.dashboardAnalytics.calls
+                    .filter { $0.call.counterpartyName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true }
+                    .map { ($0.id, $0.counterpartyName) }
+                let counterpartyNames = Dictionary(uniqueKeysWithValues: resolvedIdentities)
                 self.dashboardAnalytics = DashboardAnalytics.make(
                     from: self.calls,
                     counterpartyNames: counterpartyNames
@@ -423,7 +431,6 @@ final class AppModel {
                 }
                 try await store.replaceSegments(callID: call.id, provider: call.sttProvider, segments)
                 try await store.upsertCall(call)
-                try await refresh()
             } catch {
                 statusMessage = error.localizedDescription
                 return
@@ -468,7 +475,6 @@ final class AppModel {
         call.errorStage = "capture"
         do {
             try await store.upsertCall(call)
-            try await refresh()
         } catch {
             statusMessage = error.localizedDescription
             return
@@ -551,7 +557,6 @@ final class AppModel {
                 try await persistRetranscription(segments, provider: .appleSpeech, call: &call)
                 statusMessage = "Re-transcribed locally."
             }
-            try await refresh()
             await select(call)
         } catch {
             guard provider == .metaMuse else {
@@ -572,7 +577,6 @@ final class AppModel {
                     config: STTSessionConfig()
                 )
                 try await persistRetranscription(segments, provider: .appleSpeech, call: &call)
-                try await refresh()
                 await select(call)
                 statusMessage = "Meta was unavailable. Re-transcribed locally instead."
             } catch {

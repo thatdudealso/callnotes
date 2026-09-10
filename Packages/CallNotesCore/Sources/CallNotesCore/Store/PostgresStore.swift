@@ -134,17 +134,24 @@ public actor PostgresStore: CallStore {
     }
 
     public func fetchDashboardAnalytics(asOf: Date) async throws -> DashboardAnalytics {
-        let calls = try await fetchCalls()
+        let contacts = try await dashboardContacts(asOf: asOf)
+        var counterpartyNames: [UUID: String] = [:]
+        for contact in contacts {
+            for callID in contact.callIDs {
+                counterpartyNames[callID] = contact.name
+            }
+        }
         return DashboardAnalytics.make(
-            from: calls,
-            counterpartyNames: try await dashboardCounterpartyNames(for: calls),
+            from: try await fetchCalls(),
+            counterpartyNames: counterpartyNames,
+            contacts: contacts,
             now: asOf
         )
     }
 
     public func dashboardChanges() async -> AsyncStream<Void> {
         let id = UUID()
-        let (stream, continuation) = AsyncStream<Void>.makeStream()
+        let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         continuation.onTermination = { [weak self] _ in
             Task { await self?.removeDashboardObserver(id) }
         }
@@ -485,33 +492,67 @@ public actor PostgresStore: CallStore {
         }
     }
 
-    private func dashboardCounterpartyNames(for calls: [Call]) async throws -> [UUID: String] {
-        let callsWithoutNames = Set(calls.compactMap { call -> UUID? in
-            guard let name = call.counterpartyName,
-                !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            else { return call.id }
-            return nil
-        })
-        guard !callsWithoutNames.isEmpty else { return [:] }
+    /// Counts, talk time, averages and last-contacted are aggregated by Postgres so
+    /// the dashboard never loads the whole call table to group it in memory. Identity
+    /// resolves in the contracted order: the user-edited counterparty name, then the
+    /// highest-confidence matched non-owner speaker profile, then `Unknown`, grouped
+    /// case-insensitively so one person never splits across rows.
+    private func dashboardContacts(asOf: Date) async throws -> [DashboardContact] {
         let rows = try await client.query(
             """
-            SELECT call_speakers.call_id, speaker_profiles.display_name, call_speakers.confidence
-            FROM call_speakers
-            JOIN speaker_profiles ON speaker_profiles.id = call_speakers.profile_id
-            WHERE speaker_profiles.is_owner = false
-            ORDER BY call_speakers.call_id, call_speakers.confidence DESC NULLS LAST, speaker_profiles.display_name
+            WITH resolved AS (
+              SELECT
+                calls.id AS call_id,
+                calls.started_at AS started_at,
+                GREATEST(0, COALESCE(
+                  calls.duration_sec,
+                  FLOOR(EXTRACT(EPOCH FROM (COALESCE(calls.ended_at, \(asOf)) - calls.started_at)))::int
+                )) AS duration_sec,
+                COALESCE(
+                  NULLIF(btrim(calls.counterparty_name), ''),
+                  NULLIF(btrim(matched.display_name), ''),
+                  'Unknown'
+                ) AS resolved_name
+              FROM calls
+              LEFT JOIN LATERAL (
+                SELECT speaker_profiles.display_name
+                FROM call_speakers
+                JOIN speaker_profiles ON speaker_profiles.id = call_speakers.profile_id
+                WHERE call_speakers.call_id = calls.id
+                  AND btrim(COALESCE(calls.counterparty_name, '')) = ''
+                  AND speaker_profiles.is_owner = false
+                  AND btrim(speaker_profiles.display_name) <> ''
+                ORDER BY call_speakers.confidence DESC NULLS LAST, speaker_profiles.display_name
+                LIMIT 1
+              ) AS matched ON true
+            )
+            SELECT
+              (array_agg(resolved_name ORDER BY started_at DESC))[1] AS display_name,
+              count(*)::int AS call_count,
+              sum(duration_sec)::int AS total_duration_sec,
+              (sum(duration_sec) / count(*))::int AS average_duration_sec,
+              max(started_at) AS last_contacted_at,
+              array_agg(call_id ORDER BY started_at DESC) AS call_ids
+            FROM resolved
+            GROUP BY lower(resolved_name)
+            ORDER BY call_count DESC, last_contacted_at DESC
             """,
             logger: logger
         )
-        var names: [UUID: String] = [:]
-        for try await (callID, displayName, _) in rows.decode((UUID, String, Float?).self) {
-            guard callsWithoutNames.contains(callID),
-                !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                names[callID] == nil
-            else { continue }
-            names[callID] = displayName
+        var contacts: [DashboardContact] = []
+        for try await row in rows.decode((String, Int, Int, Int, Date, [UUID]).self) {
+            contacts.append(
+                DashboardContact(
+                    name: row.0,
+                    callCount: row.1,
+                    totalDurationSec: row.2,
+                    averageDurationSec: row.3,
+                    lastContactedAt: row.4,
+                    callIDs: row.5
+                )
+            )
         }
-        return names
+        return contacts
     }
 
     private static func decodeSegment(_ row: PostgresRow) throws -> Segment {
@@ -567,9 +608,8 @@ public actor PostgresStore: CallStore {
           consent_announced bool DEFAULT false, meta_billed_sec int DEFAULT 0, error text, error_stage text,
           created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now());
         CREATE INDEX IF NOT EXISTS calls_started_at_dashboard ON calls (started_at DESC);
-        CREATE INDEX IF NOT EXISTS calls_counterparty_started_at_dashboard ON calls (counterparty_name, started_at DESC);
-        CREATE INDEX IF NOT EXISTS calls_counterparty_identity_started_at_dashboard
-          ON calls (lower(btrim(counterparty_name)), started_at DESC);
+        DROP INDEX IF EXISTS calls_counterparty_started_at_dashboard;
+        DROP INDEX IF EXISTS calls_counterparty_identity_started_at_dashboard;
         CREATE TABLE IF NOT EXISTS call_speakers (
           call_id uuid REFERENCES calls ON DELETE CASCADE, cluster_key text,
           profile_id uuid REFERENCES speaker_profiles, confidence real, label_override text,

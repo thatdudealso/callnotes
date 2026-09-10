@@ -37,7 +37,7 @@ public actor MemoryStore: CallStore {
 
     public func dashboardChanges() async -> AsyncStream<Void> {
         let id = UUID()
-        let (stream, continuation) = AsyncStream<Void>.makeStream()
+        let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         continuation.onTermination = { [weak self] _ in
             Task { await self?.removeDashboardObserver(id) }
         }
@@ -123,13 +123,12 @@ public actor MemoryStore: CallStore {
     }
 
     private func dashboardCounterpartyNames() -> [UUID: String] {
-        let profilesByID = Dictionary(uniqueKeysWithValues: profiles.map { ($0.key, $0.value) })
         var names: [UUID: String] = [:]
         for (callID, speakers) in callSpeakers {
             guard let call = calls[callID], !hasCounterpartyName(call) else { continue }
             let matches = speakers.compactMap { speaker -> (String, Float)? in
                 guard let profileID = speaker.profileID,
-                    let profile = profilesByID[profileID],
+                    let profile = profiles[profileID],
                     !profile.isOwner,
                     !profile.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 else { return nil }

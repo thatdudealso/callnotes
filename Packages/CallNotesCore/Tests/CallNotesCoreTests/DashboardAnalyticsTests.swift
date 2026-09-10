@@ -127,6 +127,20 @@ import Testing
         #expect(analytics.contacts.map(\.name) == ["Morgan"])
     }
 
+    @Test func editedCounterpartyNameWinsOverAStaleResolvedIdentity() {
+        let call = fixtureCall(counterparty: "Priya", startedAt: now, duration: 60)
+
+        let analytics = DashboardAnalytics.make(
+            from: [call],
+            counterpartyNames: [call.id: "Unknown"],
+            now: now,
+            calendar: calendar
+        )
+
+        #expect(analytics.calls[0].counterpartyName == "Priya")
+        #expect(analytics.contacts.map(\.name) == ["Priya"])
+    }
+
     @Test func manyCallsAggregateDayWeekAndMonthAndKeepDrillDownIDs() {
         let calls = [
             fixtureCall(counterparty: "Avery", startedAt: now.addingTimeInterval(-3_600), duration: 120, engine: .appleSpeech),
@@ -201,10 +215,10 @@ import Testing
 
     @Test func seededPostgresFixturePreservesContactAndCostTruth() async throws {
         guard let store = await PostgresStore.makeIfAvailable() else { return }
-        let leftover = try await store.fetchCalls().filter { $0.audioPath == "/tmp/dashboard-fixture.caf" }
-        try await store.removeTestFixtures(callIDs: leftover.map(\.id))
+        try await store.migrate()
+        try await sweepLeftoverPostgresFixtures(store)
         try await withIsolatedPostgresFixtures(store) { callIDs, profileIDs in
-            let fixtureName = "Dashboard fixture \(UUID().uuidString)"
+            let fixtureName = "\(Self.fixturePrefix)\(UUID().uuidString)"
             let calls = [
                 fixtureCall(counterparty: fixtureName, startedAt: now.addingTimeInterval(-120), duration: 120),
                 fixtureCall(
@@ -266,6 +280,21 @@ import Testing
         }
     }
 
+    private static let fixturePrefix = "Dashboard fixture "
+
+    /// Removes every row a killed run can strand: a leaked non-owner profile also
+    /// silently disables counterparty-name suggestion for real calls.
+    private func sweepLeftoverPostgresFixtures(_ store: PostgresStore) async throws {
+        let leftoverCalls = try await store.fetchCalls().filter { $0.audioPath == Self.fixtureAudioPath }
+        let leftoverProfiles = try await store.fetchSpeakerProfiles().filter {
+            !$0.isOwner && $0.displayName.hasPrefix(Self.fixturePrefix)
+        }
+        try await store.removeTestFixtures(
+            callIDs: leftoverCalls.map(\.id),
+            profileIDs: leftoverProfiles.map(\.id)
+        )
+    }
+
     private func withIsolatedPostgresFixtures(
         _ store: PostgresStore,
         _ work: (inout [UUID], inout [UUID]) async throws -> Void
@@ -286,6 +315,8 @@ import Testing
         #expect(remainingProfiles.allSatisfy { !profileIDs.contains($0.id) })
     }
 
+    private static let fixtureAudioPath = "/tmp/dashboard-fixture.caf"
+
     private func fixtureCall(
         counterparty: String?,
         number: String? = nil,
@@ -301,7 +332,7 @@ import Testing
             durationSec: duration,
             counterpartyName: counterparty,
             counterpartyNumber: number,
-            audioPath: "/tmp/dashboard-fixture.caf",
+            audioPath: Self.fixtureAudioPath,
             sttProvider: engine,
             status: .transcribed,
             metaBilledSec: billedSeconds
