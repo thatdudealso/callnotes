@@ -4,23 +4,47 @@ import Foundation
 /// Decodes an imported audio file (m4a, CAF, WAV, AIFF) into 16 kHz Int16 PCM.
 /// Stereo files keep L = near, R = far; mono files put everything on `near`.
 public enum FileAudioLoader {
+    /// Only CallNotes' own capture CAF carries L = near (owner) and R = far.
+    /// Any other two-channel file is room audio on both channels, so it is
+    /// downmixed and diarized instead of being split by channel.
+    public enum ChannelLayout: String, Sendable, Equatable {
+        case mono
+        case captureNearFar
+        case unknownStereo
+    }
+
     public struct LoadedAudio: Sendable {
         public var near: Data
         public var far: Data
         public var sampleRate: Int
         public var duration: TimeInterval
         public var channelCount: Int
+        public var layout: ChannelLayout
 
-        public init(near: Data, far: Data, sampleRate: Int, duration: TimeInterval, channelCount: Int) {
+        public init(
+            near: Data,
+            far: Data,
+            sampleRate: Int,
+            duration: TimeInterval,
+            channelCount: Int,
+            layout: ChannelLayout = .mono
+        ) {
             self.near = near
             self.far = far
             self.sampleRate = sampleRate
             self.duration = duration
             self.channelCount = channelCount
+            self.layout = layout
         }
 
-        public var isStereo: Bool { channelCount >= 2 && !far.isEmpty }
-        public var mixed: Data { isStereo ? mix(near, far) : near }
+        public var hasSecondChannel: Bool { channelCount >= 2 && !far.isEmpty }
+        public var isStereo: Bool { layout == .captureNearFar && hasSecondChannel }
+        public var mixed: Data { hasSecondChannel ? mix(near, far) : near }
+    }
+
+    public static func channelLayout(for url: URL, channelCount: Int) -> ChannelLayout {
+        guard channelCount >= 2 else { return .mono }
+        return url.pathExtension.lowercased() == "caf" ? .captureNearFar : .unknownStereo
     }
 
     /// Decoded in bounded batches so peak memory does not scale with the
@@ -87,7 +111,8 @@ public enum FileAudioLoader {
             far: far,
             sampleRate: targetSampleRate,
             duration: duration,
-            channelCount: channelCount
+            channelCount: channelCount,
+            layout: channelLayout(for: url, channelCount: channelCount)
         )
     }
 

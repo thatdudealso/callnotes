@@ -64,16 +64,18 @@ public struct FileTranscriptionSpine: Sendable {
             emit(progress)
 
             let config = STTSessionConfig(sampleRate: loaded.sampleRate)
-            let nearPlans = ImportFileChunker.plan(
-                totalFrames: loaded.near.count / 2,
-                sampleRate: loaded.sampleRate
-            )
-            let farPlans = loaded.isStereo
-                ? ImportFileChunker.plan(totalFrames: loaded.far.count / 2, sampleRate: loaded.sampleRate)
-                : []
-            progress.chunkCount = nearPlans.count + farPlans.count
+            let monoPCM = loaded.mixed
             let raw: [RawSegment]
             if loaded.isStereo {
+                let nearPlans = ImportFileChunker.plan(
+                    totalFrames: loaded.near.count / 2,
+                    sampleRate: loaded.sampleRate
+                )
+                let farPlans = ImportFileChunker.plan(
+                    totalFrames: loaded.far.count / 2,
+                    sampleRate: loaded.sampleRate
+                )
+                progress.chunkCount = nearPlans.count + farPlans.count
                 let near = try await transcribeChunked(
                     pcm: loaded.near,
                     plans: nearPlans,
@@ -94,9 +96,14 @@ public struct FileTranscriptionSpine: Sendable {
                 )
                 raw = (near + far).sorted { $0.start < $1.start }
             } else {
+                let plans = ImportFileChunker.plan(
+                    totalFrames: monoPCM.count / 2,
+                    sampleRate: loaded.sampleRate
+                )
+                progress.chunkCount = plans.count
                 raw = try await transcribeChunked(
-                    pcm: loaded.near,
-                    plans: nearPlans,
+                    pcm: monoPCM,
+                    plans: plans,
                     channel: .mixed,
                     sampleRate: loaded.sampleRate,
                     config: config,
@@ -111,7 +118,7 @@ public struct FileTranscriptionSpine: Sendable {
             progress.fractionComplete = 0.85
             emit(progress)
 
-            let diarizePCM = loaded.isStereo ? loaded.far : loaded.near
+            let diarizePCM = loaded.isStereo ? loaded.far : monoPCM
             let farURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("\(working.id.uuidString)-import-diarize.caf")
             defer { try? FileManager.default.removeItem(at: farURL) }
@@ -147,7 +154,7 @@ public struct FileTranscriptionSpine: Sendable {
             working.errorStage = nil
             try await store.upsertCall(working)
 
-            progress.stage = .transcribing
+            progress.stage = .stitching
             progress.fractionComplete = 0.9
             emit(progress)
 

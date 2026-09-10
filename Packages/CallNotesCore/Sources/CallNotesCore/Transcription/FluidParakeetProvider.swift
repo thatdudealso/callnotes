@@ -34,7 +34,7 @@ public struct FluidParakeetProvider: STTProvider, PCMTranscriber {
             let far = try await transcribePCM(loaded.far, channel: .far, config: config)
             return (near + far).sorted { $0.start < $1.start }
         }
-        return try await transcribePCM(loaded.near, channel: .mixed, config: config)
+        return try await transcribePCM(loaded.mixed, channel: .mixed, config: config)
     }
 
     public func transcribePCM(

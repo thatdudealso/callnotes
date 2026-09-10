@@ -37,6 +37,7 @@ final class AppModel {
     private var importDuplicates: InboxDuplicateIndex?
     private var pendingInboxFiles: [URL] = []
     private var isImporting = false
+    private var importNoticeTask: Task<Void, Never>?
 
     var selectedCall: Call? {
         calls.first { $0.id == selectedCallID }
@@ -575,20 +576,21 @@ final class AppModel {
         upsertImportJob(job)
         let storedDefault = UserDefaults.standard.string(forKey: "default_engine")
         let configuredDefault: STTProviderID? = storedDefault == "meta" ? .metaMuse : .appleSpeech
-        var engine = EngineSelection.resolve(override: nil, configuredDefault: configuredDefault)
-        if engine == .appleSpeech, await FluidParakeetProvider().healthCheck().isUsable {
-            engine = .fluidParakeet
-        }
         let duplicates = importDuplicates ?? InboxDuplicateIndex()
         var meta: (any MetaFileTranscribing)?
-        if engine == .metaMuse {
+        if EngineSelection.resolve(override: nil, configuredDefault: configuredDefault) == .metaMuse {
             do {
                 meta = MetaFileProvider(configuration: try metaConfiguration())
             } catch {
                 statusMessage = "Meta is not configured. Importing with local transcription."
-                engine = .appleSpeech
             }
         }
+        let engine = EngineSelection.resolveImport(
+            configuredDefault: configuredDefault,
+            metaIsConfigured: meta != nil,
+            parakeetIsUsable: await FluidParakeetProvider().healthCheck().isUsable
+        )
+        if engine != .metaMuse { meta = nil }
         let speech: any PCMTranscriber = engine == .fluidParakeet ? FluidParakeetProvider() : self.speech
         let spine = FileTranscriptionSpine(
             speech: speech,
@@ -630,11 +632,18 @@ final class AppModel {
     }
 
     private func upsertImportJob(_ job: ImportJob) {
-        if let index = importProgress.jobs.firstIndex(where: { $0.id == job.id || $0.sourceURL == job.sourceURL }) {
-            importProgress.jobs[index] = job
-        } else {
-            importProgress.jobs.append(job)
+        importProgress.upsert(job)
+        guard job.stage.isTerminal else { return }
+        importNoticeTask?.cancel()
+        importNoticeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(ImportProgress.completedNoticeSeconds))
+            guard !Task.isCancelled else { return }
+            self?.importProgress.prune()
         }
+    }
+
+    func dismissImportJob(_ jobID: UUID) {
+        importProgress.dismiss(jobID)
     }
 
     private func retranscribeLabel(_ provider: STTProviderID) -> String {

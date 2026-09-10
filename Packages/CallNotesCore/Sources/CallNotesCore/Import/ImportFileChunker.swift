@@ -56,12 +56,12 @@ public enum ImportTranscriptOverlapDeduper {
             let translated = offset(segment, by: incomingOffset)
             let incomingWords = textWords(translated.text).map(\.normalized)
             guard !incomingWords.isEmpty else { continue }
+            guard overlapsKnownWindow(translated, startingAt: incomingOffset) else {
+                merged.append(translated)
+                continue
+            }
             let candidates = merged.indices
-                .filter { index in
-                    overlapsKnownWindow(translated, startingAt: incomingOffset)
-                        && overlaps(merged[index], translated)
-                        && compatible(merged[index], translated)
-                }
+                .filter { overlaps(merged[$0], translated) && compatible(merged[$0], translated) }
                 .sorted { lhs, rhs in
                     merged[lhs].start == merged[rhs].start
                         ? merged[lhs].end < merged[rhs].end
@@ -151,6 +151,13 @@ public enum ImportTranscriptOverlapDeduper {
             trimmed.end = min(trimmed.end, seam)
         }
         trimmed.end = max(trimmed.end, trimmed.start)
+        if let segmentWords = trimmed.words {
+            let kept = segmentWords.compactMap { word -> Word? in
+                guard word.start < trimmed.end else { return nil }
+                return Word(text: word.text, start: word.start, end: min(word.end, trimmed.end))
+            }
+            trimmed.words = kept.isEmpty ? nil : kept
+        }
         return trimmed
     }
 
@@ -160,14 +167,12 @@ public enum ImportTranscriptOverlapDeduper {
     ) -> (wordCount: Int, lastIndex: Int) {
         var best = (wordCount: 0, lastIndex: 0)
         guard !incoming.isEmpty else { return best }
-        for start in segments.indices {
-            var words: [String] = []
-            for end in start..<segments.count {
-                words += textWords(segments[end].text).map(\.normalized)
-                let count = sharedWordCount(previous: words, incoming: incoming)
-                if count > best.wordCount {
-                    best = (count, end)
-                }
+        var words: [String] = []
+        for index in segments.indices {
+            words += textWords(segments[index].text).map(\.normalized)
+            let count = sharedWordCount(previous: words, incoming: incoming)
+            if count > best.wordCount {
+                best = (count, index)
             }
         }
         return best

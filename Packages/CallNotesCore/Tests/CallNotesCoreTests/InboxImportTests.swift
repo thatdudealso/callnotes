@@ -219,6 +219,34 @@ import Testing
         #expect(Set(merged.compactMap(\.speakerTag)).count == 2)
     }
 
+    @Test func overlapDeduperTrimsSeamWordTimingsWithTheText() {
+        let merged = ImportTranscriptOverlapDeduper.merge(
+            previous: [
+                RawSegment(
+                    start: 564,
+                    end: 570,
+                    text: "I agree with",
+                    words: [
+                        Word(text: "I agree", start: 564, end: 567),
+                        Word(text: "with", start: 567, end: 570),
+                    ],
+                    channel: .mixed
+                ),
+            ],
+            incoming: [
+                RawSegment(start: 0, end: 3, text: "with that plan", channel: .mixed),
+            ],
+            incomingOffset: 565
+        )
+
+        #expect(merged.map(\.text) == ["I agree", "with that plan"])
+        #expect(merged.first?.words?.map(\.text) == ["I agree"])
+
+        let turns = TurnAttributor.attributeMono(segments: merged, clusters: [], profiles: [])
+        #expect(turns.map(\.text).joined(separator: " ") == "I agree with that plan")
+        #expect(zip(turns, turns.dropFirst()).allSatisfy { $0.end <= $1.start })
+    }
+
     @Test func overlapDeduperKeepsResegmentedSeamSpeechInChronologicalOrder() {
         let merged = ImportTranscriptOverlapDeduper.merge(
             previous: [
@@ -627,6 +655,112 @@ import Testing
         #expect(transcribing.contains { $0.statusLine.contains("chunk 4 of 4") })
     }
 
+    @Test func captureStereoCAFKeepsNearAndFarChannels() async throws {
+        let store = MemoryStore()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-capture-stereo-\(UUID().uuidString).caf")
+        try ChannelAudio.writeStereoCAF(
+            near: Data(count: 16_000 * 2 * 2),
+            far: Data(count: 16_000 * 2 * 2),
+            sampleRate: 16_000,
+            to: url
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+        let speech = ChannelRecordingTranscriber()
+        let owner = SpeakerProfile(
+            displayName: "Me",
+            isOwner: true,
+            centroid: [1, 0, 0],
+            embeddingModel: EmbeddingModel.weSpeakerV2
+        )
+
+        let processed = try await FileTranscriptionSpine(
+            speech: speech,
+            diarizer: ScriptedDiarizer(clusters: []),
+            store: store
+        ).process(
+            fileURL: url,
+            call: Call(source: .fileImport, startedAt: Date(), audioPath: url.path, sttProvider: .appleSpeech),
+            profiles: [owner]
+        )
+
+        #expect(speech.channels.value == [.near, .far])
+        #expect(Set(processed.turns.map(\.channel)) == [.near, .far])
+        #expect(processed.turns.filter { $0.channel == .near }.allSatisfy { $0.speakerID == owner.id })
+    }
+
+    @Test func unknownStereoFileIsDownmixedAndDiarizedInsteadOfSplit() async throws {
+        let store = MemoryStore()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-unknown-stereo-\(UUID().uuidString).wav")
+        try ImportFixtureWriter.writeConstantStereoWAV(
+            to: url,
+            seconds: 2,
+            sampleRate: 16_000,
+            near: 0.5,
+            far: 0.5
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+        let speech = ChannelRecordingTranscriber()
+        let owner = SpeakerProfile(
+            displayName: "Me",
+            isOwner: true,
+            centroid: [1, 0, 0],
+            embeddingModel: EmbeddingModel.weSpeakerV2
+        )
+
+        let processed = try await FileTranscriptionSpine(
+            speech: speech,
+            diarizer: ScriptedDiarizer(clusters: [
+                DiarizedCluster(
+                    key: "A",
+                    ranges: [0...2],
+                    embedding: [0, 0, 1],
+                    embeddingModel: EmbeddingModel.weSpeakerV2
+                )
+            ]),
+            store: store
+        ).process(
+            fileURL: url,
+            call: Call(source: .fileImport, startedAt: Date(), audioPath: url.path, sttProvider: .appleSpeech),
+            profiles: [owner]
+        )
+
+        #expect(speech.channels.value == [.mixed])
+        #expect(processed.turns.map(\.channel) == [.mixed])
+        #expect(processed.turns.allSatisfy { $0.speakerID != owner.id })
+        #expect(processed.turns.map(\.clusterKey) == ["A"])
+    }
+
+    @Test func importProgressStageNeverRegressesToTranscribing() async throws {
+        let store = MemoryStore()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-stage-order-\(UUID().uuidString).caf")
+        try ChannelAudio.writeMonoCAF(pcm16: Data(count: 16_000 * 2 * 2), sampleRate: 16_000, to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let ticks = LockBox<[ImportJob]>([])
+        var spine = FileTranscriptionSpine(
+            speech: ScriptedPCMTranscriber(
+                near: [RawSegment(start: 0, end: 1, text: "One turn.", channel: .mixed)],
+                far: []
+            ),
+            diarizer: ScriptedDiarizer(clusters: []),
+            store: store
+        )
+        spine.onProgress = { job in ticks.value.append(job) }
+
+        _ = try await spine.process(
+            fileURL: url,
+            call: Call(source: .fileImport, startedAt: Date(), audioPath: url.path, sttProvider: .appleSpeech),
+            profiles: []
+        )
+
+        let stages = ticks.value.map(\.stage)
+        #expect(stages.contains(.stitching))
+        #expect(!stages.drop(while: { $0 != .stitching }).contains(.transcribing))
+        #expect(ticks.value.last?.fractionComplete == 0.9)
+    }
+
     @Test func parakeetBatchModeIsWiredThroughTheSameSpine() async throws {
         let store = MemoryStore()
         let url = FileManager.default.temporaryDirectory
@@ -734,7 +868,9 @@ import Testing
         let expectedFrames = Int(seconds * 16_000)
 
         #expect(loaded.channelCount == 2)
-        #expect(loaded.isStereo)
+        #expect(loaded.layout == .unknownStereo)
+        #expect(loaded.hasSecondChannel)
+        #expect(!loaded.isStereo)
         #expect(abs(nearSamples.count - expectedFrames) <= 2)
         #expect(abs(farSamples.count - expectedFrames) <= 2)
         #expect(nearSamples.allSatisfy { abs(Int($0) - 16_384) <= 2 })
@@ -767,6 +903,21 @@ import Testing
 private final class LockBox<Value>: @unchecked Sendable {
     var value: Value
     init(_ value: Value) { self.value = value }
+}
+
+private final class ChannelRecordingTranscriber: PCMTranscriber, @unchecked Sendable {
+    let id: STTProviderID = .appleSpeech
+    let dualInstanceMode: DualInstanceMode = .nearLiveFarBatch
+    let channels = LockBox<[SegmentChannel]>([])
+
+    func transcribePCM(
+        _ pcm16: Data,
+        channel: SegmentChannel,
+        config: STTSessionConfig
+    ) async throws -> [RawSegment] {
+        channels.value.append(channel)
+        return [RawSegment(start: 0, end: 1, text: "Speech on \(channel.rawValue).", channel: channel)]
+    }
 }
 
 private struct SeamAwareTranscriber: PCMTranscriber {

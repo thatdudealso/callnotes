@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ImportProgressView: View {
     var progress: ImportProgress
+    var onDismiss: ((UUID) -> Void)?
 
     var body: some View {
         if !progress.jobs.isEmpty {
@@ -16,6 +17,18 @@ struct ImportProgressView: View {
                                 .font(.caption)
                                 .foregroundStyle(.primary)
                             Spacer()
+                            if job.stage.isTerminal, let onDismiss {
+                                Button {
+                                    onDismiss(job.id)
+                                } label: {
+                                    Image(systemName: "xmark")
+                                        .font(.caption2)
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.secondary)
+                                .help("Dismiss")
+                                .accessibilityLabel("Dismiss \(job.fileName)")
+                            }
                         }
                         if job.stage == .transcribing || job.stage == .stitching || job.stage == .notes
                             || job.stage == .copying

@@ -21,7 +21,9 @@ struct HistorySplitView: View {
             .navigationTitle("Calls")
             .safeAreaInset(edge: .bottom) {
                 VStack(alignment: .leading, spacing: 4) {
-                    ImportProgressView(progress: model.importProgress)
+                    ImportProgressView(progress: model.importProgress) { jobID in
+                        model.dismissImportJob(jobID)
+                    }
                     if let status = model.statusMessage {
                         Text(status)
                             .font(.caption)
