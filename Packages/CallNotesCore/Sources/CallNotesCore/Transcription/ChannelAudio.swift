@@ -93,9 +93,14 @@ public enum ChannelAudio {
         if FileManager.default.fileExists(atPath: url.path) {
             try FileManager.default.removeItem(at: url)
         }
-        let file = try AVAudioFile(forWriting: url, settings: format.settings)
-        if frameCount > 0 {
-            try file.write(from: buffer)
+        do {
+            let file = try AVAudioFile(forWriting: url, settings: format.settings)
+            if frameCount > 0 {
+                try file.write(from: buffer)
+            }
+        }
+        if channelCount == 2 {
+            try CaptureChannelMarker.stampNearFar(url)
         }
     }
 

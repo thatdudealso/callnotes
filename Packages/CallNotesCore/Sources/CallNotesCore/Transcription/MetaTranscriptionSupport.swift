@@ -212,23 +212,15 @@ public enum MetaFileLimits {
 
 /// Plans uploads below Meta's 10-minute hard cap and carries a five-second
 /// overlap so endpointing does not drop speech spanning a chunk boundary.
+/// Shared with Apple and Parakeet file imports via `ImportFileChunker`.
 public enum MetaFileChunker {
-    public static let chunkDurationSeconds = 9.5 * 60
-    public static let overlapDurationSeconds = 5.0
+    public static let chunkDurationSeconds = ImportFileChunker.chunkDurationSeconds
+    public static let overlapDurationSeconds = ImportFileChunker.overlapDurationSeconds
 
     public static func plan(totalFrames: Int, sampleRate: Int) -> [MetaFileChunk] {
-        guard totalFrames > 0, sampleRate > 0 else { return [] }
-        let chunkFrames = Int(chunkDurationSeconds * Double(sampleRate))
-        let overlapFrames = Int(overlapDurationSeconds * Double(sampleRate))
-        var result: [MetaFileChunk] = []
-        var start = 0
-        while start < totalFrames {
-            let count = min(chunkFrames, totalFrames - start)
-            result.append(MetaFileChunk(startFrame: start, frameCount: count))
-            guard start + count < totalFrames else { break }
-            start += max(1, count - overlapFrames)
+        ImportFileChunker.plan(totalFrames: totalFrames, sampleRate: sampleRate).map {
+            MetaFileChunk(startFrame: $0.startFrame, frameCount: $0.frameCount)
         }
-        return result
     }
 }
 
@@ -241,30 +233,11 @@ public enum MetaTranscriptOverlapDeduper {
         incoming: [RawSegment],
         incomingOffset: TimeInterval
     ) -> [RawSegment] {
-        var merged = previous
-        for var segment in incoming {
-            segment.start += incomingOffset
-            segment.end += incomingOffset
-            let duplicate = merged.contains { existing in
-                overlaps(existing, segment) && normalized(existing.text) == normalized(segment.text)
-            }
-            if !duplicate { merged.append(segment) }
-        }
-        return merged.sorted { $0.start == $1.start ? $0.end < $1.end : $0.start < $1.start }
-    }
-
-    private static func overlaps(_ lhs: RawSegment, _ rhs: RawSegment) -> Bool {
-        lhs.start < rhs.end && rhs.start < lhs.end
-    }
-
-    private static func normalized(_ text: String) -> String {
-        text.lowercased()
-            .unicodeScalars
-            .filter { CharacterSet.alphanumerics.contains($0) || CharacterSet.whitespaces.contains($0) }
-            .map(String.init)
-            .joined()
-            .split(whereSeparator: \.isWhitespace)
-            .joined(separator: " ")
+        ImportTranscriptOverlapDeduper.merge(
+            previous: previous,
+            incoming: incoming,
+            incomingOffset: incomingOffset
+        )
     }
 }
 

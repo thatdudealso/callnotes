@@ -78,11 +78,11 @@ public struct MetaFileProvider: STTProvider {
                 let response = try await upload(wavData: chunkWAV, config: config)
                 billedSeconds += MetaCostMeter.billedSeconds(audioProcessedMilliseconds: response.audioDurationMs)
                 let offset = Double(chunk.startFrame) / Double(wav.sampleRate)
-                let translated = response.rawSegments(offset: offset)
+                let translated = response.rawSegments(offset: 0)
                 segments = MetaTranscriptOverlapDeduper.merge(
                     previous: segments,
                     incoming: translated,
-                    incomingOffset: 0
+                    incomingOffset: offset
                 )
             } catch where billedSeconds > 0 {
                 throw MetaFileTranscriptionFailure(billedSeconds: billedSeconds, underlying: error)

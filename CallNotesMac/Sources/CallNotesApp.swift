@@ -77,6 +77,9 @@ struct MenuBarContentView: View {
                 Task { await model.processSampleCall() }
             }
             .disabled(!model.canProcessSampleCall)
+            Button("Open Inbox folder") {
+                model.revealInbox()
+            }
             Menu("Engine for next call") {
                 Button("Default") { engineForNextCall = "default" }
                 Button("Local") { engineForNextCall = "local" }

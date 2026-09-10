@@ -4,6 +4,9 @@ import Foundation
 /// identity into attributed turns (plan 5.5 + 5.2).
 public enum TurnAttributor {
     public static let ownerClusterKey = "me"
+    /// Cluster key persisted for import speech no diarized cluster claims, so
+    /// its per-call label survives a reload.
+    public static let unassignedClusterKey = "unassigned"
 
     /// Near-channel speech is always the enrolled owner. Far-channel speech is
     /// assigned to the diarized cluster with maximum temporal overlap, then
@@ -79,6 +82,64 @@ public enum TurnAttributor {
                 speakerID: speakerID,
                 speakerName: speakerName,
                 isProvisional: provisional,
+                text: segment.text,
+                words: segment.words
+            )
+        }
+    }
+
+    /// Mixed/mono imports have no near/far split. Clusters that match the
+    /// enrolled owner are labeled as Me; everyone else is a far speaker.
+    public static func attributeMono(
+        segments: [RawSegment],
+        clusters: [DiarizedCluster],
+        profiles: [SpeakerProfile]
+    ) -> [AttributedTurn] {
+        let owner = profiles.first(where: \.isOwner)
+        let clusterMatches = matchClusters(clusters, profiles: profiles)
+        let tagged = segments.map { segment -> RawSegment in
+            var copy = snapToWords(segment)
+            if copy.channel == nil { copy.channel = .mixed }
+            if copy.speakerTag == nil {
+                copy.speakerTag = ClusterAssigner.assign(segment: copy, clusters: clusters)
+            }
+            return copy
+        }
+        let merged = SegmentMerger.mergeAndCollapse(tagged)
+        let numbering = speakerNumbers(
+            for: clusters,
+            providerTags: merged.compactMap(\.speakerTag),
+            profiles: profiles
+        )
+        return merged.map { segment in
+            let assigned = segment.speakerTag
+                ?? ClusterAssigner.assign(segment: segment, clusters: clusters)
+            let match = assigned.flatMap { clusterMatches[$0] }
+            let isOwner = match?.profileID != nil && match?.profileID == owner?.id
+            let profile: SpeakerProfile?
+            if let profileID = match?.profileID {
+                profile = profiles.first { $0.id == profileID }
+            } else {
+                profile = nil
+            }
+            let speakerName: String
+            if isOwner {
+                speakerName = owner?.displayName ?? "Me"
+            } else if let profile {
+                speakerName = profile.displayName
+            } else if let assigned {
+                speakerName = numbering.names[assigned] ?? numbering.unassignedName
+            } else {
+                speakerName = numbering.unassignedName
+            }
+            return AttributedTurn(
+                start: segment.start,
+                end: segment.end,
+                channel: isOwner ? .near : (segment.channel ?? .mixed),
+                clusterKey: isOwner ? ownerClusterKey : (assigned ?? unassignedClusterKey),
+                speakerID: isOwner ? owner?.id : profile?.id,
+                speakerName: speakerName,
+                isProvisional: false,
                 text: segment.text,
                 words: segment.words
             )
@@ -190,6 +251,49 @@ public enum TurnAttributor {
             }
         }
         return result
+    }
+
+    /// Numbers every speaker a mono import can distinguish: unmatched diarized
+    /// clusters first, then provider tags no local cluster claimed, then one
+    /// shared label for speech nothing claimed. Numbers never collide inside a
+    /// call and never claim to be a known person.
+    private static func speakerNumbers(
+        for clusters: [DiarizedCluster],
+        providerTags: [String],
+        profiles: [SpeakerProfile]
+    ) -> (names: [String: String], unassignedName: String) {
+        var names = speakerNumbers(for: clusters, profiles: profiles)
+        let clusterKeys = Set(clusters.map(\.key))
+        var next = (profiles.contains(where: \.isOwner) ? 2 : 1) + names.count
+        for tag in providerTags where !clusterKeys.contains(tag) && names[tag] == nil {
+            names[tag] = "Speaker \(next)"
+            next += 1
+        }
+        return (names, "Speaker \(next)")
+    }
+
+    /// One `CallSpeaker` row per speaker the call can name, including provider
+    /// tags and the unassigned bucket, so labels survive a reload.
+    public static func callSpeakers(
+        for turns: [AttributedTurn],
+        clusters: [DiarizedCluster],
+        callID: UUID
+    ) -> [CallSpeaker] {
+        var keys = clusters.map(\.key)
+        for turn in turns {
+            guard let key = turn.clusterKey, key != ownerClusterKey, !keys.contains(key) else { continue }
+            keys.append(key)
+        }
+        return keys.map { key in
+            let match = turns.first { $0.clusterKey == key }
+            return CallSpeaker(
+                callID: callID,
+                clusterKey: key,
+                profileID: match?.speakerID,
+                confidence: match?.speakerID == nil ? 0 : 1,
+                labelOverride: match?.speakerName
+            )
+        }
     }
 
     /// Unknown far clusters become "Speaker 2", "Speaker 3", ... when an owner

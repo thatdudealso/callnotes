@@ -20,12 +20,17 @@ struct HistorySplitView: View {
             }
             .navigationTitle("Calls")
             .safeAreaInset(edge: .bottom) {
-                if let status = model.statusMessage {
-                    Text(status)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 4) {
+                    ImportProgressView(progress: model.importProgress) { jobID in
+                        model.dismissImportJob(jobID)
+                    }
+                    if let status = model.statusMessage {
+                        Text(status)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
             }
         } detail: {
@@ -49,9 +54,13 @@ struct HistorySplitView: View {
                 .foregroundStyle(CallNotesStyle.primary)
             Text("No calls yet.")
                 .font(.headline)
-            Text("Take a call on your Mac or share a recording from your iPhone.")
+            Text("Take a call on your Mac, drop an m4a into the Inbox folder, or share a recording from your iPhone.")
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+            Button("Open Inbox folder") {
+                model.revealInbox()
+            }
+            .buttonStyle(.bordered)
             Button("Load sample call") {
                 Task { await model.processSampleCall() }
             }
@@ -81,7 +90,7 @@ struct HistoryRow: View {
                     Image(systemName: "cloud")
                         .accessibilityLabel("Cloud transcription")
                 }
-                Text(call.sttProvider == .metaMuse ? "Meta" : "Local")
+                Text(providerLabel(call.sttProvider))
                     .foregroundStyle(CallNotesStyle.primary)
                 Text(call.status.rawValue.replacingOccurrences(of: "_", with: " "))
                     .foregroundStyle(.secondary)
@@ -89,6 +98,14 @@ struct HistoryRow: View {
             .font(.caption)
         }
         .padding(.vertical, 4)
+    }
+
+    private func providerLabel(_ provider: STTProviderID) -> String {
+        switch provider {
+        case .appleSpeech: "Local"
+        case .fluidParakeet: "Parakeet"
+        case .metaMuse: "Meta"
+        }
     }
 }
 
@@ -145,7 +162,7 @@ struct CallDetailView: View {
         ) {
             Button("Re-transcribe with Meta") {
                 privacyAcknowledged = true
-                Task { await model.retranscribeSelectedCall(withMeta: true) }
+                Task { await model.retranscribeSelectedCall(with: .metaMuse) }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -171,7 +188,7 @@ struct CallDetailView: View {
                     Text(call.startedAt.formatted(date: .abbreviated, time: .shortened))
                     Text(call.source.rawValue.replacingOccurrences(of: "_", with: " "))
                     Label(
-                        call.sttProvider == .appleSpeech ? "Local" : "Meta (cloud)",
+                        detailProviderLabel(call.sttProvider),
                         systemImage: call.sttProvider == .metaMuse ? "cloud" : "desktopcomputer"
                     )
                     if model.lastDERCallID == call.id, let der = model.lastDER {
@@ -182,11 +199,14 @@ struct CallDetailView: View {
                 .foregroundStyle(.secondary)
                 Menu("Re-transcribe with") {
                     Button("Local") {
-                        Task { await model.retranscribeSelectedCall(withMeta: false) }
+                        Task { await model.retranscribeSelectedCall(with: .appleSpeech) }
+                    }
+                    Button("Parakeet") {
+                        Task { await model.retranscribeSelectedCall(with: .fluidParakeet) }
                     }
                     Button("Meta") {
                         if privacyAcknowledged {
-                            Task { await model.retranscribeSelectedCall(withMeta: true) }
+                            Task { await model.retranscribeSelectedCall(with: .metaMuse) }
                         } else {
                             showMetaDisclosure = true
                         }
@@ -287,6 +307,14 @@ struct CallDetailView: View {
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
         try? markdown.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private func detailProviderLabel(_ provider: STTProviderID) -> String {
+        switch provider {
+        case .appleSpeech: "Local"
+        case .fluidParakeet: "Parakeet"
+        case .metaMuse: "Meta (cloud)"
+        }
     }
 
     private func timestamp(_ time: TimeInterval) -> String {

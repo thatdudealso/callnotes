@@ -4,6 +4,7 @@ import Foundation
 public enum StereoCAFWriterError: Error, Equatable, Sendable {
     case invalidFormat
     case channelLengthMismatch
+    case closed
 }
 
 /// Incrementally writes a 2-channel CAF: L = near, R = far, 16 kHz Int16.
@@ -12,7 +13,7 @@ public final class StereoCAFWriter: @unchecked Sendable {
     public let sampleRate: Double
     public private(set) var framesWritten: Int = 0
 
-    private let file: AVAudioFile
+    private var file: AVAudioFile?
     private let processingFormat: AVAudioFormat
 
     public init(
@@ -69,6 +70,7 @@ public final class StereoCAFWriter: @unchecked Sendable {
         guard let dest = buffer.int16ChannelData else {
             throw StereoCAFWriterError.invalidFormat
         }
+        guard let file else { throw StereoCAFWriterError.closed }
         interleaved.withUnsafeBufferPointer { src in
             dest[0].update(from: src.baseAddress!, count: frames * channels)
         }
@@ -76,12 +78,12 @@ public final class StereoCAFWriter: @unchecked Sendable {
         framesWritten += frames
     }
 
-    /// AVAudioFile finalizes CAF headers as it writes; this is the close seam
-    /// for callers. The file is closed when the writer is released.
+    /// Releases the AVAudioFile (which flushes the CAF header) and stamps the
+    /// near/far marker, so a later import can prove this file's channel layout.
     public func close() {
-        // AVAudioFile has no explicit close; releasing it flushes the header.
-        // Keep the method so capture sessions have a single stop path.
-        _ = framesWritten
+        guard file != nil else { return }
+        file = nil
+        try? CaptureChannelMarker.stampNearFar(url)
     }
 }
 

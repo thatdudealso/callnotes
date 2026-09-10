@@ -90,4 +90,18 @@ public enum EngineSelection {
     ) -> STTProviderID {
         perCallOverride ?? configuredDefault ?? builtInDefault
     }
+
+    /// File imports run on Meta only when it is configured; every local import
+    /// prefers Parakeet when its models are usable, including after Meta falls
+    /// back.
+    public static func resolveImport(
+        override perCallOverride: STTProviderID? = nil,
+        configuredDefault: STTProviderID?,
+        metaIsConfigured: Bool,
+        parakeetIsUsable: Bool
+    ) -> STTProviderID {
+        let resolved = resolve(override: perCallOverride, configuredDefault: configuredDefault)
+        if resolved == .metaMuse, metaIsConfigured { return .metaMuse }
+        return parakeetIsUsable ? .fluidParakeet : .appleSpeech
+    }
 }

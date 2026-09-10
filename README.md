@@ -17,7 +17,15 @@ optional Meta Muse cloud transcription engine: local transcription stays the
 default, the default engine is chosen in Settings (Engines) or onboarding,
 each call can override it or be re-transcribed with Meta, billed Meta seconds
 are tracked per call, and any Meta failure falls back to local transcription
-without losing the call. Phone sync remains later-phase work.
+without losing the call. Phase 5 adds Mac import paths: an iCloud Drive
+`CallNotes/Inbox` watcher (FSEvents, with an Application Support fallback)
+imports dropped audio after the file settles, skips duplicates, transcribes
+through Apple SpeechAnalyzer, FluidAudio Parakeet, or Meta using the same
+9.5-minute / 5-second-overlap chunk-and-stitch path, writes into the dedicated
+Postgres store with the same notes spine as live calls, and shows import
+progress in the history window. Live Meta file imports stay deferred until
+tenant billing is enabled; the simulated harness covers that path in tests.
+Phone sync remains later-phase work.
 
 Some docs and code comments cite "plan section" numbers. These refer to the
 private implementation plan that maintainers keep locally at
@@ -33,9 +41,11 @@ store, Apple Foundation Models for instant notes, and Ollama for deep notes.
 The optional Meta Muse cloud transcription engine sits behind the same
 provider seams, with the API key kept in the Keychain and local providers as
 the automatic fallback.
-Hummingbird remains planned for the phone-sync phase. The iPhone app and Share
-Extension are intentionally minimal Phase 0 shells that will later upload
-recordings to the paired Mac.
+Drop a supported audio file (`.m4a`, `.caf`, `.wav`, `.aiff`, `.aif`, or
+`.aac`) into the Inbox folder (menu bar → Open Inbox folder) to import a
+recording. Hummingbird remains planned for the phone-sync phase. The iPhone app
+and Share Extension are intentionally minimal Phase 0 shells that will later
+upload recordings to the paired Mac.
 
 ## Capture harness
 
