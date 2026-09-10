@@ -113,7 +113,8 @@ final class AppModel {
     }
 
     var canStartLiveSession: Bool {
-        recordingState == .idle
+        isStoreInitialized
+            && recordingState == .idle
             && liveSession == nil
             && !isStartingLiveSession
             && !isProcessingSample
@@ -129,6 +130,7 @@ final class AppModel {
     func bootstrap() async {
         guard let postgres = await PostgresStore.makeIfAvailable() else {
             storeBackendName = "unavailable"
+            isStoreInitialized = true
             statusMessage = "Dedicated CallNotes Postgres is unavailable. Load sample call is disabled."
             return
         }
@@ -137,7 +139,7 @@ final class AppModel {
         } catch {
             store = memoryStore
             storeBackendName = "unavailable"
-            isStoreInitialized = false
+            isStoreInitialized = true
             statusMessage = "Dedicated CallNotes Postgres is unavailable: \(error.localizedDescription). Load sample call is disabled."
             return
         }

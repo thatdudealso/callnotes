@@ -166,7 +166,7 @@ struct DashboardView: View {
     private var talkTimeDetail: String {
         let incomplete = analytics.totals.incompleteCallCount
         guard incomplete > 0 else { return "Across all calls" }
-        return "Across all calls · \(incomplete) still processing, not counted"
+        return "Across all calls · \(incomplete) incomplete, not counted"
     }
 
     private static let periodRowLimit = 6
