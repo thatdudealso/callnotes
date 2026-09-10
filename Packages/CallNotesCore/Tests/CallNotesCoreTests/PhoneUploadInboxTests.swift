@@ -251,6 +251,16 @@ import Testing
         #expect(message.contains("\(errSecMissingEntitlement)"))
     }
 
+    /// The unpaired case is the first thing a new user hits, so it has to read
+    /// as a pairing instruction rather than fall back to a Foundation status.
+    @Test func notPairedErrorExplainsThePairingStepItself() {
+        let message = PairingCredentialError.notPaired.localizedDescription
+
+        #expect(message != URLError(.userAuthenticationRequired).localizedDescription)
+        #expect(message.contains("Pair this iPhone with your Mac"))
+        #expect(message.contains("Settings"))
+    }
+
     /// A process relaunched before first unlock cannot read its own probe item.
     /// Pinning that miss would leave the unentitled bare group in place until the
     /// app is killed, so only a resolution that reached the keychain is kept.

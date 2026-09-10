@@ -16,6 +16,20 @@ public enum PairingKeychainError: Error, LocalizedError, Equatable {
     }
 }
 
+/// This iPhone has no Mac credentials yet. Both the app and the Share Extension
+/// hit it before anything is copied, and it is the first thing a new user sees,
+/// so it names the step they are missing instead of a networking status.
+public enum PairingCredentialError: Error, LocalizedError, Equatable {
+    case notPaired
+
+    public var errorDescription: String? {
+        switch self {
+        case .notPaired:
+            "Pair this iPhone with your Mac first. Open CallNotes on your iPhone, go to Settings, and scan the QR code your Mac shows."
+        }
+    }
+}
+
 /// The app and the Share Extension read one another's pairing token, so the
 /// access group has to be a value both processes compute identically. Both
 /// entitle `$(AppIdentifierPrefix)group.com.thatdudealso.callnotes`, which only

@@ -226,6 +226,7 @@ final class PhoneAppModel {
         do { try await recorder.start() } catch { uploadStatus = error.localizedDescription }
     }
     func stopRecording() async {
+        defer { recorder.releaseRecordingFile() }
         do {
             let audioURL = try recorder.stop()
             try await BackgroundUploadCoordinator.shared.enqueue(
@@ -368,9 +369,13 @@ struct PhoneSettingsView: View {
     }
 }
 
-@MainActor final class InPersonRecorder: NSObject, ObservableObject {
-    @Published private(set) var isRecording = false
-    private var recorder: AVAudioRecorder?
+/// `@Observable`, not `ObservableObject`: `PhoneAppModel` is `@Observable`, so a
+/// `@Published` flag on a nested legacy object would never invalidate the view
+/// that reads it and the Record button would not flip while audio is capturing.
+@Observable @MainActor final class InPersonRecorder {
+    private(set) var isRecording = false
+    @ObservationIgnored private var recorder: AVAudioRecorder?
+    @ObservationIgnored private var lease: SharedAudioStaging.Lease?
     func start() async throws {
         guard await AVAudioApplication.requestRecordPermission() else {
             throw NSError(domain: "CallNotes.Recorder", code: 1, userInfo: [NSLocalizedDescriptionKey: "CallNotes needs microphone access to record."])
@@ -379,14 +384,26 @@ struct PhoneSettingsView: View {
         try session.setCategory(.record, mode: .measurement)
         try session.setActive(true)
         let url = try PhoneSharedContainer.recordingsDirectory().appendingPathComponent(UUID().uuidString).appendingPathExtension("m4a")
+        let lease = try SharedAudioStaging.Lease(audioURL: url)
         recorder = try AVAudioRecorder(url: url, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 44_100, AVNumberOfChannelsKey: 1])
         guard recorder?.record() == true else {
+            lease.release()
+            recorder = nil
             throw NSError(domain: "CallNotes.Recorder", code: 2, userInfo: [NSLocalizedDescriptionKey: "Could not start recording."])
         }
+        self.lease = lease
         isRecording = true
     }
     func stop() throws -> URL {
         guard let recorder else { throw CocoaError(.fileNoSuchFile) }
         recorder.stop(); isRecording = false; self.recorder = nil; return recorder.url
+    }
+
+    /// Held from `start` until the upload queue owns the bytes, so the launch
+    /// sweep never collects a recording that is still being captured or handed
+    /// over, and a force-quit mid-recording leaves one the sweep can collect.
+    func releaseRecordingFile() {
+        lease?.release()
+        lease = nil
     }
 }

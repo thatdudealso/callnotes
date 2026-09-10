@@ -40,6 +40,14 @@ enum PhoneSharedContainer {
         guard let directory = try? sharedAudioDirectory() else { return }
         SharedAudioStaging.sweepOrphans(in: directory)
     }
+
+    /// A recording the upload queue never took ownership of - the app was
+    /// force-quit mid-capture, or `enqueue` threw before consuming the source.
+    /// A live capture holds a lease, so the sweep leaves it alone.
+    static func sweepOrphanedRecordings() {
+        guard let directory = try? recordingsDirectory() else { return }
+        SharedAudioStaging.sweepOrphans(in: directory)
+    }
 }
 
 enum PhoneSyncError: Error, LocalizedError {
@@ -158,7 +166,7 @@ enum PhonePairingCoordinator {
 
 enum PhoneMirrorCoordinator {
     static func fetch() async throws -> SyncDTO.Mirror {
-        guard let (connection, token) = PhonePairingStore.load() else { throw URLError(.userAuthenticationRequired) }
+        guard let (connection, token) = PhonePairingStore.load() else { throw PairingCredentialError.notPaired }
         do {
             return try await fetch(connection: connection, token: token)
         } catch PhoneSyncError.unpaired {
@@ -427,6 +435,7 @@ final class BackgroundUploadCoordinator: @unchecked Sendable {
 
     private init() {
         PhoneSharedContainer.sweepOrphanedSharedAudio()
+        PhoneSharedContainer.sweepOrphanedRecordings()
         let coordinator = try? SessionUploadCoordinator(
             directory: PhoneSharedContainer.uploadsDirectory(),
             starter: scheduler

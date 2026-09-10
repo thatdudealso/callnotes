@@ -256,7 +256,7 @@ private final class ExtensionUploadScheduler: SessionUploadTaskStarting, @unchec
     @discardableResult
     func requirePairing() throws -> (ExtensionPairingConfiguration, String) {
         guard let configuration = Self.configuration(), let token = Self.token(for: configuration.deviceID) else {
-            throw URLError(.userAuthenticationRequired)
+            throw PairingCredentialError.notPaired
         }
         return (configuration, token)
     }
