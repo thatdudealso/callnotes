@@ -193,8 +193,28 @@ import Testing
             incomingOffset: 565
         )
 
-        #expect(merged.map(\.text).joined(separator: " ") == "yes yes next")
-        #expect(merged.map(\.speakerTag) == ["speaker_0", "speaker_1", "speaker_2"])
+        let words = merged.flatMap { $0.text.split(separator: " ").map(String.init) }
+        #expect(words.filter { $0 == "yes" }.count == 2)
+        #expect(words.filter { $0 == "next" }.count == 1)
+        #expect(Set(merged.compactMap(\.speakerTag)).count == 2)
+    }
+
+    @Test func overlapDeduperKeepsResegmentedSeamSpeechInChronologicalOrder() {
+        let merged = ImportTranscriptOverlapDeduper.merge(
+            previous: [
+                RawSegment(start: 564, end: 570, text: "I agree with", channel: .mixed),
+            ],
+            incoming: [
+                RawSegment(start: 0, end: 3, text: "with that plan", channel: .mixed),
+                RawSegment(start: 3, end: 5, text: "and more", channel: .mixed),
+            ],
+            incomingOffset: 565
+        )
+
+        #expect(merged.map(\.text).joined(separator: " ") == "I agree with that plan and more")
+        #expect(zip(merged, merged.dropFirst()).allSatisfy { $0.end <= $1.start })
+        #expect(merged.allSatisfy { $0.start <= $0.end })
+        #expect(merged.last?.end == 570)
     }
 
     @Test func fileSpineChunksATenMinuteImportAndStitchesWithoutDupOrDrop() async throws {

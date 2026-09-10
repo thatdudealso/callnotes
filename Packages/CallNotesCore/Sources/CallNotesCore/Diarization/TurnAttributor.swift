@@ -95,6 +95,7 @@ public enum TurnAttributor {
         let owner = profiles.first(where: \.isOwner)
         let clusterMatches = matchClusters(clusters, profiles: profiles)
         let unknownNames = speakerNumbers(for: clusters, profiles: profiles)
+        let unassignedName = unassignedSpeakerName(after: unknownNames, profiles: profiles)
         let tagged = segments.map { segment -> RawSegment in
             var copy = snapToWords(segment)
             if copy.channel == nil { copy.channel = .mixed }
@@ -104,7 +105,7 @@ public enum TurnAttributor {
             return copy
         }
         let merged = SegmentMerger.mergeAndCollapse(tagged)
-        return merged.enumerated().map { index, segment in
+        return merged.map { segment in
             let assigned = segment.speakerTag
                 ?? ClusterAssigner.assign(segment: segment, clusters: clusters)
             let match = assigned.flatMap { clusterMatches[$0] }
@@ -121,9 +122,9 @@ public enum TurnAttributor {
             } else if let profile {
                 speakerName = profile.displayName
             } else if let assigned {
-                speakerName = unknownNames[assigned] ?? "Speaker \(index + 2)"
+                speakerName = unknownNames[assigned] ?? unassignedName
             } else {
-                speakerName = "Speaker \(index + 2)"
+                speakerName = unassignedName
             }
             return AttributedTurn(
                 start: segment.start,
@@ -244,6 +245,17 @@ public enum TurnAttributor {
             }
         }
         return result
+    }
+
+    /// Segments no cluster claims share one per-call label that follows the
+    /// numbered clusters, so they never collide with a diarized speaker and
+    /// never claim to be a known person.
+    private static func unassignedSpeakerName(
+        after clusterNames: [String: String],
+        profiles: [SpeakerProfile]
+    ) -> String {
+        let first = profiles.contains(where: \.isOwner) ? 2 : 1
+        return "Speaker \(first + clusterNames.count)"
     }
 
     /// Unknown far clusters become "Speaker 2", "Speaker 3", ... when an owner

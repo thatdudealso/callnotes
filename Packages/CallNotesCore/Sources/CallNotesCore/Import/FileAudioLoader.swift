@@ -41,7 +41,9 @@ public enum FileAudioLoader {
             throw FileImportError.invalidAudio("CallNotes could not allocate an import audio buffer")
         }
         try file.read(into: buffer)
-        buffer.frameLength = frames
+        guard buffer.frameLength > 0 else {
+            throw FileImportError.invalidAudio("CallNotes could not decode any audio from this file")
+        }
 
         let channelCount = Int(file.processingFormat.channelCount)
         var near = try int16Channel(buffer, channel: 0)
@@ -69,33 +71,17 @@ public enum FileAudioLoader {
         guard frames > 0 else { return Data() }
         let channelCount = Int(buffer.format.channelCount)
         guard channel >= 0, channel < channelCount else { return Data() }
-        var samples = [Int16](repeating: 0, count: frames)
-        if buffer.format.commonFormat == .pcmFormatInt16, let channels = buffer.int16ChannelData {
-            if buffer.format.isInterleaved {
-                let source = UnsafeBufferPointer(start: channels[0], count: frames * channelCount)
-                for index in 0..<frames {
-                    samples[index] = source[index * channelCount + channel]
-                }
-            } else {
-                let source = UnsafeBufferPointer(start: channels[channel], count: frames)
-                for index in 0..<frames {
-                    samples[index] = source[index]
-                }
-            }
-        } else if buffer.format.commonFormat == .pcmFormatFloat32, let channels = buffer.floatChannelData {
-            if buffer.format.isInterleaved {
-                let source = UnsafeBufferPointer(start: channels[0], count: frames * channelCount)
-                for index in 0..<frames {
-                    samples[index] = clipToInt16(source[index * channelCount + channel])
-                }
-            } else {
-                let source = UnsafeBufferPointer(start: channels[channel], count: frames)
-                for index in 0..<frames {
-                    samples[index] = clipToInt16(source[index])
-                }
-            }
-        } else {
+        guard
+            buffer.format.commonFormat == .pcmFormatFloat32,
+            !buffer.format.isInterleaved,
+            let channels = buffer.floatChannelData
+        else {
             throw FileImportError.invalidAudio("CallNotes could not read this audio file's sample format")
+        }
+        let source = UnsafeBufferPointer(start: channels[channel], count: frames)
+        var samples = [Int16](repeating: 0, count: frames)
+        for index in 0..<frames {
+            samples[index] = clipToInt16(source[index])
         }
         return samples.withUnsafeBytes { Data($0) }
     }

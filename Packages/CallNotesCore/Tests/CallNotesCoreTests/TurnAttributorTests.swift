@@ -210,6 +210,36 @@ import Testing
         #expect(turns[0].isProvisional)
     }
 
+    @Test func monoImportWithoutDiarizationSharesOneStableUnknownLabel() {
+        let segments = [
+            RawSegment(start: 0, end: 5, text: "one", channel: .mixed),
+            RawSegment(start: 60, end: 65, text: "two", channel: .mixed),
+            RawSegment(start: 120, end: 125, text: "three", channel: .mixed),
+        ]
+
+        let turns = TurnAttributor.attributeMono(segments: segments, clusters: [], profiles: [owner])
+
+        #expect(turns.map(\.speakerName) == ["Speaker 2", "Speaker 2", "Speaker 2"])
+        #expect(turns.allSatisfy { $0.speakerID == nil })
+        #expect(turns.allSatisfy { $0.clusterKey == nil })
+    }
+
+    @Test func monoUnassignedLabelDoesNotCollideWithADiarizedSpeaker() {
+        let clusters = [
+            DiarizedCluster(key: "A", ranges: [0...5], embedding: [0, 0, 1], embeddingModel: EmbeddingModel.weSpeakerV2)
+        ]
+        let segments = [
+            RawSegment(start: 0, end: 5, text: "clustered", channel: .mixed),
+            RawSegment(start: 60, end: 65, text: "outside", channel: .mixed),
+        ]
+
+        let turns = TurnAttributor.attributeMono(segments: segments, clusters: clusters, profiles: [owner])
+
+        #expect(turns.map(\.speakerName) == ["Speaker 2", "Speaker 3"])
+        #expect(turns.map(\.clusterKey) == ["A", nil])
+        #expect(turns.allSatisfy { $0.speakerID == nil })
+    }
+
     @Test func clusterFromAnotherEmbeddingModelRemainsUnassigned() {
         let far = [RawSegment(start: 0, end: 1, text: "hello", channel: .far)]
         let clusters = [

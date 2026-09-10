@@ -9,6 +9,10 @@ public struct FluidParakeetProvider: STTProvider, PCMTranscriber {
     public let sendsAudioOffDevice = false
     public let dualInstanceMode: DualInstanceMode = .nearLiveFarBatch
 
+    private static let models = LoadOnceCache {
+        try await AsrModels.downloadAndLoad(version: .v3)
+    }
+
     public init() {}
 
     public func healthCheck() async -> ProviderHealth {
@@ -39,7 +43,7 @@ public struct FluidParakeetProvider: STTProvider, PCMTranscriber {
         config: STTSessionConfig
     ) async throws -> [RawSegment] {
         guard !pcm16.isEmpty else { return [] }
-        let models = try await AsrModels.downloadAndLoad(version: .v3)
+        let models = try await Self.models.value()
         let manager = AsrManager(config: .default, models: models)
         var state = TdtDecoderState.make(decoderLayers: await manager.decoderLayerCount)
         let samples = PCMResampler.int16ToFloat(

@@ -51,6 +51,10 @@ public final class InboxWatcher: @unchecked Sendable {
         self.pollInterval = pollInterval
     }
 
+    deinit {
+        stop()
+    }
+
     public func start() {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         startPolling()
@@ -124,10 +128,7 @@ public final class InboxWatcher: @unchecked Sendable {
         let callback: FSEventStreamCallback = { _, info, count, eventPaths, _, _ in
             guard let info else { return }
             let watcher = Unmanaged<InboxWatcher>.fromOpaque(info).takeUnretainedValue()
-            let paths = unsafeBitCast(eventPaths, to: NSArray.self) as? [String] ?? []
-            _ = count
             Task { await watcher.scanNow() }
-            _ = paths
         }
         guard let stream = FSEventStreamCreate(
             kCFAllocatorDefault,

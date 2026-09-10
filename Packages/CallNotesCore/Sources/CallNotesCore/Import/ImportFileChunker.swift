@@ -53,28 +53,31 @@ public enum ImportTranscriptOverlapDeduper {
     ) -> [RawSegment] {
         var merged = previous
         for segment in incoming {
-            var translated = offset(segment, by: incomingOffset)
-            let overlappingSegments = merged
-                .filter {
+            let translated = offset(segment, by: incomingOffset)
+            let incomingWords = textWords(translated.text).map(\.normalized)
+            guard !incomingWords.isEmpty else { continue }
+            let candidates = merged.indices
+                .filter { index in
                     overlapsKnownWindow(translated, startingAt: incomingOffset)
-                        && overlaps($0, translated) && compatible($0, translated)
+                        && overlaps(merged[index], translated)
+                        && compatible(merged[index], translated)
                 }
-                .sorted { $0.start == $1.start ? $0.end < $1.end : $0.start < $1.start }
-            let match = matchingTail(
-                in: overlappingSegments,
-                incoming: textWords(translated.text).map(\.normalized)
-            )
-            let duplicateCount = match.wordCount
-            if duplicateCount < textWords(translated.text).count {
-                if duplicateCount > 0 {
-                    translated = trimLeadingWords(
-                        translated,
-                        count: duplicateCount,
-                        notBefore: match.end
-                    )
+                .sorted { lhs, rhs in
+                    merged[lhs].start == merged[rhs].start
+                        ? merged[lhs].end < merged[rhs].end
+                        : merged[lhs].start < merged[rhs].start
                 }
-                merged.append(translated)
+            let match = matchingTail(in: candidates.map { merged[$0] }, incoming: incomingWords)
+            guard match.wordCount < incomingWords.count else { continue }
+            if match.wordCount > 0 {
+                dropDuplicatedTail(
+                    from: &merged,
+                    at: Array(candidates.prefix(match.lastIndex + 1)),
+                    wordCount: match.wordCount,
+                    seam: translated.start
+                )
             }
+            merged.append(translated)
         }
         return merged.sorted { $0.start == $1.start ? $0.end < $1.end : $0.start < $1.start }
     }
@@ -101,37 +104,61 @@ public enum ImportTranscriptOverlapDeduper {
         return translated
     }
 
-    private static func trimLeadingWords(
+    /// The incoming chunk re-transcribes the overlap on its own frame-accurate
+    /// timeline, so the seam repair truncates the previous chunk's tail instead
+    /// of restamping the new speech.
+    private static func dropDuplicatedTail(
+        from merged: inout [RawSegment],
+        at indices: [Int],
+        wordCount: Int,
+        seam: TimeInterval
+    ) {
+        var remaining = wordCount
+        var removals: [Int] = []
+        for index in indices.reversed() {
+            guard remaining > 0 else { break }
+            let words = textWords(merged[index].text)
+            if words.count <= remaining {
+                remaining -= words.count
+                removals.append(index)
+            } else {
+                merged[index] = dropTrailingWords(merged[index], count: remaining, seam: seam)
+                remaining = 0
+            }
+        }
+        for index in removals.sorted(by: >) {
+            merged.remove(at: index)
+        }
+    }
+
+    private static func dropTrailingWords(
         _ segment: RawSegment,
         count: Int,
-        notBefore: TimeInterval?
+        seam: TimeInterval
     ) -> RawSegment {
         let words = textWords(segment.text)
         guard count > 0, count < words.count else { return segment }
         var trimmed = segment
-        trimmed.text = words.dropFirst(count).map(\.original).joined(separator: " ")
-        if let segmentWords = trimmed.words, segmentWords.count > count {
-            trimmed.words = Array(segmentWords.dropFirst(count))
-            trimmed.start = trimmed.words?.first?.start ?? trimmed.start
+        trimmed.text = words.dropLast(count).map(\.original).joined(separator: " ")
+        if let segmentWords = trimmed.words, segmentWords.count == words.count {
+            trimmed.words = Array(segmentWords.dropLast(count))
+            trimmed.end = trimmed.words?.last?.end ?? trimmed.end
         } else {
-            trimmed.start += (trimmed.end - trimmed.start) * Double(count) / Double(words.count)
+            let kept = Double(words.count - count) / Double(words.count)
+            trimmed.end = trimmed.start + (trimmed.end - trimmed.start) * kept
         }
-        if let notBefore, trimmed.start < notBefore {
-            let shift = notBefore - trimmed.start
-            trimmed.start += shift
-            trimmed.end += shift
-            trimmed.words = trimmed.words?.map { word in
-                Word(text: word.text, start: word.start + shift, end: word.end + shift)
-            }
+        if trimmed.start < seam {
+            trimmed.end = min(trimmed.end, seam)
         }
+        trimmed.end = max(trimmed.end, trimmed.start)
         return trimmed
     }
 
     private static func matchingTail(
         in segments: [RawSegment],
         incoming: [String]
-    ) -> (wordCount: Int, end: TimeInterval?) {
-        var best = (wordCount: 0, end: Optional<TimeInterval>.none)
+    ) -> (wordCount: Int, lastIndex: Int) {
+        var best = (wordCount: 0, lastIndex: 0)
         guard !incoming.isEmpty else { return best }
         for start in segments.indices {
             var words: [String] = []
@@ -139,7 +166,7 @@ public enum ImportTranscriptOverlapDeduper {
                 words += textWords(segments[end].text).map(\.normalized)
                 let count = sharedWordCount(previous: words, incoming: incoming)
                 if count > best.wordCount {
-                    best = (count, segments[end].end)
+                    best = (count, end)
                 }
             }
         }
