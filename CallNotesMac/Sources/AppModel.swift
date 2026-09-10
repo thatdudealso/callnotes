@@ -222,14 +222,8 @@ final class AppModel {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
                 guard let self, self.recordingState == .recording else { return }
-                let resolvedIdentities = self.dashboardAnalytics.calls
-                    .filter { $0.call.counterpartyName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true }
-                    .map { ($0.id, $0.counterpartyName) }
-                let counterpartyNames = Dictionary(uniqueKeysWithValues: resolvedIdentities)
-                self.dashboardAnalytics = DashboardAnalytics.make(
-                    from: self.calls,
-                    counterpartyNames: counterpartyNames
-                )
+                guard let liveCallID = self.instantCallAtHangUp?.id else { continue }
+                self.dashboardAnalytics = self.dashboardAnalytics.updatingLiveDuration(for: liveCallID)
             }
         }
     }

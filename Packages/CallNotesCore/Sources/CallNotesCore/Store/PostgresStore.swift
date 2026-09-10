@@ -628,6 +628,7 @@ public actor PostgresStore: CallStore {
             )
             SELECT
               count(*)::int AS call_count,
+              count(*) FILTER (WHERE NOT is_incomplete)::int AS timed_call_count,
               sum(duration_sec)::int AS total_duration_sec,
               (sum(duration_sec) / GREATEST(1, count(*) FILTER (WHERE NOT is_incomplete)))::int
                 AS average_duration_sec,
@@ -642,9 +643,9 @@ public actor PostgresStore: CallStore {
         )
         var contacts: [DashboardContact] = []
         var resolvedNames: [UUID: String] = [:]
-        for try await row in rows.decode((Int, Int, Int, Date, [UUID], [String]).self) {
-            let callIDs = row.4
-            let names = row.5
+        for try await row in rows.decode((Int, Int, Int, Int, Date, [UUID], [String]).self) {
+            let callIDs = row.5
+            let names = row.6
             for (callID, name) in zip(callIDs, names) {
                 resolvedNames[callID] = name
             }
@@ -652,9 +653,10 @@ public actor PostgresStore: CallStore {
                 DashboardContact(
                     name: names.first ?? "Unknown",
                     callCount: row.0,
-                    totalDurationSec: row.1,
-                    averageDurationSec: row.2,
-                    lastContactedAt: row.3,
+                    timedCallCount: row.1,
+                    totalDurationSec: row.2,
+                    averageDurationSec: row.3,
+                    lastContactedAt: row.4,
                     callIDs: callIDs
                 )
             )

@@ -81,6 +81,7 @@ public struct DashboardPeriod: Identifiable, Sendable, Equatable {
 public struct DashboardContact: Identifiable, Sendable, Equatable {
     public let name: String
     public let callCount: Int
+    let timedCallCount: Int
     public let totalDurationSec: Int
     public let averageDurationSec: Int
     public let lastContactedAt: Date
@@ -128,6 +129,80 @@ public struct DashboardAnalytics: Sendable, Equatable {
             totals: totals,
             periods: groupedPeriods,
             contacts: contacts ?? self.contacts(for: dashboardCalls)
+        )
+    }
+
+    public func updatingLiveDuration(
+        for callID: UUID,
+        asOf now: Date = .now,
+        calendar: Calendar = .current
+    ) -> DashboardAnalytics {
+        guard let callIndex = calls.firstIndex(where: { $0.id == callID }) else { return self }
+        let current = calls[callIndex]
+        guard current.call.status == .recording else { return self }
+        let durationSec = Self.duration(for: current.call, now: now)
+        let durationDelta = durationSec - current.durationSec
+        guard durationDelta != 0 else { return self }
+
+        var updatedCalls = calls
+        updatedCalls[callIndex] = DashboardCall(
+            call: current.call,
+            durationSec: durationSec,
+            counterpartyName: current.counterpartyName
+        )
+        let updatedTotals = DashboardTotals(
+            callCount: totals.callCount,
+            localCallCount: totals.localCallCount,
+            metaCallCount: totals.metaCallCount,
+            mixedCallCount: totals.mixedCallCount,
+            totalDurationSec: totals.totalDurationSec + durationDelta,
+            metaBilledSeconds: totals.metaBilledSeconds,
+            metaCostDollars: totals.metaCostDollars,
+            incompleteCallCount: totals.incompleteCallCount
+        )
+        var updatedPeriods = periods
+        for range in DashboardPeriodRange.allCases {
+            let startsAt = Self.periodStart(for: current.call.startedAt, range: range, calendar: calendar)
+            guard let periodIndex = updatedPeriods.firstIndex(where: {
+                $0.range == range && $0.startsAt == startsAt
+            }) else {
+                continue
+            }
+            let period = updatedPeriods[periodIndex]
+            updatedPeriods[periodIndex] = DashboardPeriod(
+                range: period.range,
+                startsAt: period.startsAt,
+                callCount: period.callCount,
+                localCallCount: period.localCallCount,
+                metaCallCount: period.metaCallCount,
+                mixedCallCount: period.mixedCallCount,
+                totalDurationSec: period.totalDurationSec + durationDelta,
+                metaBilledSeconds: period.metaBilledSeconds,
+                metaCostDollars: period.metaCostDollars,
+                callIDs: period.callIDs
+            )
+        }
+        var updatedContacts = contacts
+        let identity = Self.contactIdentity(for: current)
+        if let contactIndex = updatedContacts.firstIndex(where: { $0.id.lowercased() == identity }) {
+            let contact = updatedContacts[contactIndex]
+            let totalDurationSec = contact.totalDurationSec + durationDelta
+            updatedContacts[contactIndex] = DashboardContact(
+                name: contact.name,
+                callCount: contact.callCount,
+                timedCallCount: contact.timedCallCount,
+                totalDurationSec: totalDurationSec,
+                averageDurationSec: totalDurationSec / max(1, contact.timedCallCount),
+                lastContactedAt: contact.lastContactedAt,
+                callIDs: contact.callIDs
+            )
+        }
+        return DashboardAnalytics(
+            generatedAt: now,
+            calls: updatedCalls,
+            totals: updatedTotals,
+            periods: updatedPeriods,
+            contacts: updatedContacts
         )
     }
 
@@ -213,6 +288,7 @@ public struct DashboardAnalytics: Sendable, Equatable {
                 return DashboardContact(
                     name: sortedCalls[0].counterpartyName,
                     callCount: calls.count,
+                    timedCallCount: timedCalls,
                     totalDurationSec: totalDuration,
                     averageDurationSec: totalDuration / max(1, timedCalls),
                     lastContactedAt: calls.map(\.call.startedAt).max()!,

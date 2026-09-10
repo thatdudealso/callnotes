@@ -317,6 +317,28 @@ import Testing
         #expect(analytics.totals.totalDurationSec == 120)
     }
 
+    @Test func liveDurationUpdateAdjustsOnlyTheExistingSnapshot() throws {
+        let live = processingCall(counterparty: "Avery", startedAt: now.addingTimeInterval(-120), status: .recording)
+        let completed = fixtureCall(counterparty: "Mina", startedAt: now.addingTimeInterval(-60), duration: 60)
+        let snapshot = DashboardAnalytics.make(from: [live, completed], now: now, calendar: calendar)
+
+        let updated = snapshot.updatingLiveDuration(
+            for: live.id,
+            asOf: now.addingTimeInterval(30),
+            calendar: calendar
+        )
+        let updatedLive = try #require(updated.calls.first { $0.id == live.id })
+        let updatedAvery = try #require(updated.contacts.first { $0.name == "Avery" })
+        let updatedDay = try #require(updated.periods.first { $0.range == .day })
+
+        #expect(updatedLive.durationSec == 150)
+        #expect(updated.totals.totalDurationSec == 210)
+        #expect(updatedAvery.totalDurationSec == 150)
+        #expect(updatedAvery.averageDurationSec == 150)
+        #expect(updatedDay.totalDurationSec == 210)
+        #expect(updated.calls.first { $0.id == completed.id } == snapshot.calls.first { $0.id == completed.id })
+    }
+
     @Test func strandedRecordingIsClosedAtItsLastSegmentInsteadOfExtrapolating() async throws {
         let store = MemoryStore()
         let stranded = recordingCall(startedAt: now.addingTimeInterval(-7 * 86_400))
