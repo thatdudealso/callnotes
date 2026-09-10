@@ -695,7 +695,7 @@ import Testing
         #expect(remainingProfiles.allSatisfy { !profileIDs.contains($0.id) })
     }
 
-    private static let fixtureNamespace = "callnotes-dashboard-test-fixture"
+    private static let fixtureNamespace = "callnotes-dashboard-test-fixture-\(UUID().uuidString)"
     private static let fixtureAudioRoot = "/tmp/\(Self.fixtureNamespace)/"
     private static let fixtureAudioPath = "\(Self.fixtureAudioRoot)\(UUID().uuidString).caf"
 

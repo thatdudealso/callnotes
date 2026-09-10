@@ -170,6 +170,7 @@ final class AppModel {
         if selectedCallID == nil {
             selectedCallID = calls.first?.id
         }
+        guard !showsDashboard else { return }
         notesByCall = try await store.fetchPreferredNotesByCall()
         if let selectedCallID {
             turnsByCall[selectedCallID] = try await loadTurns(callID: selectedCallID)
