@@ -75,6 +75,9 @@ final class AppModel {
         }
     }
 
+    private var syncServerTask: Task<Void, Never>?
+    private var syncBonjourService: NetService?
+
     var selectedCall: Call? {
         calls.first { $0.id == selectedCallID }
     }
@@ -165,6 +168,7 @@ final class AppModel {
         isStoreInitialized = true
         observeDashboardChanges()
         notesSpine = NotesGenerationSpine(client: OllamaClient(), store: postgres)
+        startSyncServer(store: postgres)
         statusMessage = repairFailure
         startInboxWatcher()
     }
@@ -208,6 +212,26 @@ final class AppModel {
             try await refresh()
         } catch {
             statusMessage = error.localizedDescription
+        }
+    }
+
+    private func startSyncServer(store: any CallStore) {
+        guard syncServerTask == nil else { return }
+        do {
+            let support = try FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent(CallAudioPaths.applicationSupportFolder, isDirectory: true)
+            let identity = try MacTLSIdentity(storageDirectory: support.appendingPathComponent("Sync", isDirectory: true))
+            let uploads = try InboxPaths.resolvedInbox()
+            let server = MacSyncServer(store: store, receivedUploadsDirectory: uploads)
+            let service = NetService(domain: "local.", type: "\(SyncConstants.bonjourServiceType).", name: Host.current().localizedName ?? "CallNotes", port: Int32(SyncConstants.serverPort))
+            service.publish()
+            syncBonjourService = service
+            syncServerTask = Task {
+                do { try await server.run(host: "0.0.0.0", identity: identity) }
+                catch { self.statusMessage = "Phone sync stopped: \(error.localizedDescription)" }
+            }
+        } catch {
+            statusMessage = "Phone sync unavailable: \(error.localizedDescription)"
         }
     }
 

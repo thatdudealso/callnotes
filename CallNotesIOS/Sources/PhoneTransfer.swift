@@ -72,6 +72,55 @@ enum PhonePairingStore {
         else { return nil }
         return (configuration, token)
     }
+
+    static func remove() {
+        guard let (configuration, _) = load() else { return }
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: keychainService,
+            kSecAttrAccount: configuration.deviceID.uuidString,
+        ]
+        SecItemDelete(query as CFDictionary)
+        UserDefaults(suiteName: PhoneSharedContainer.appGroupIdentifier)?.removeObject(forKey: defaultsKey)
+    }
+}
+
+enum PhonePairingCoordinator {
+    static func pair(ticketPayload: String, deviceName: String) async throws -> PhonePairingConfiguration {
+        let ticket = try JSONDecoder().decode(PairingTicket.self, from: Data(ticketPayload.utf8))
+        guard ticket.expiresAt >= Date() else { throw PairingError.expiredCode }
+        let delegate = PinnedURLSessionDelegate(fingerprint: ticket.certificateFingerprint)
+        let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+        var request = URLRequest(url: ticket.serverURL.appendingPathComponent("pair"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(PairingRequest(code: ticket.code, deviceName: deviceName))
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw URLError(.cannotConnectToHost)
+        }
+        let paired = try JSONDecoder().decode(SyncDTO.PairResponse.self, from: data)
+        let configuration = PhonePairingConfiguration(
+            serverURL: ticket.serverURL,
+            deviceID: paired.deviceID,
+            certificateFingerprint: ticket.certificateFingerprint
+        )
+        try PhonePairingStore.save(configuration, token: paired.token)
+        return configuration
+    }
+}
+
+enum PhoneMirrorCoordinator {
+    static func fetch() async throws -> SyncDTO.Mirror {
+        guard let (connection, token) = PhonePairingStore.load() else { throw URLError(.userAuthenticationRequired) }
+        let delegate = PinnedURLSessionDelegate(fingerprint: connection.certificateFingerprint)
+        let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+        var request = URLRequest(url: connection.serverURL.appendingPathComponent("mirror"))
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { throw URLError(.cannotLoadFromNetwork) }
+        return try JSONDecoder().decode(SyncDTO.Mirror.self, from: data)
+    }
 }
 
 /// Pins the leaf certificate supplied by the Mac pairing QR code. No CA exception is made.

@@ -127,6 +127,8 @@ targets:
     platform: iOS
     sources:
       - CallNotesIOS/ShareExtension/Sources
+    dependencies:
+      - package: CallNotesCore
     info:
       path: CallNotesIOS/ShareExtension/Info.plist
       properties:

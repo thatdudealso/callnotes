@@ -6,14 +6,19 @@ import NIOSSL
 
 extension SyncDTO.HealthReport: ResponseCodable {}
 extension SyncDTO.PairResponse: ResponseCodable {}
+extension SyncDTO.Mirror: ResponseCodable {}
 
 /// Hummingbird API hosted by the Mac app. TLS is mandatory and the QR payload
 /// contains the leaf certificate fingerprint for the phone to pin.
 public actor MacSyncServer {
     private let pairing: PairingAuthority
+    private let store: any CallStore
+    private let receivedUploadsDirectory: URL
 
-    public init(pairing: PairingAuthority = PairingAuthority()) {
+    public init(pairing: PairingAuthority = PairingAuthority(), store: any CallStore = MemoryStore(), receivedUploadsDirectory: URL? = nil) {
         self.pairing = pairing
+        self.store = store
+        self.receivedUploadsDirectory = receivedUploadsDirectory ?? FileManager.default.temporaryDirectory.appendingPathComponent("CallNotesPhoneUploads", isDirectory: true)
     }
 
     public func pairingTicket(serverURL: URL, identity: MacTLSIdentity) async -> PairingTicket {
@@ -36,6 +41,28 @@ public actor MacSyncServer {
             let payload = try await request.decode(as: PairingRequest.self, context: context)
             return try await pairing.pair(payload)
         }
+        router.get("mirror") { request, _ async throws -> SyncDTO.Mirror in
+            _ = try await Self.authorizedDevice(for: request, pairing: pairing)
+            return try await Self.mirror(store: self.store)
+        }
+        router.post("calls") { request, _ async throws -> Response in
+            _ = try await Self.authorizedDevice(for: request, pairing: pairing)
+            let contentType = request.headers[.contentType] ?? ""
+            guard let boundary = contentType.split(separator: "boundary=").last.map(String.init), contentType.contains("multipart/form-data") else {
+                throw HTTPError(.badRequest, message: "Expected multipart audio upload.")
+            }
+            let buffer = try await request.body.collect(upTo: .max)
+            guard let body = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes),
+                  let upload = try MultipartCallUpload.parse(body, boundary: boundary)
+            else { throw HTTPError(.badRequest, message: "Malformed audio upload.") }
+            try FileManager.default.createDirectory(at: self.receivedUploadsDirectory, withIntermediateDirectories: true)
+            let filename = "\(UUID().uuidString).\(upload.fileExtension)"
+            let audioURL = self.receivedUploadsDirectory.appendingPathComponent(filename)
+            try upload.audio.write(to: audioURL, options: .atomic)
+            let call = Call(source: upload.metadata.source, startedAt: upload.metadata.startedAt ?? Date(), counterpartyName: upload.metadata.counterpartyName, audioPath: audioURL.path, sttProvider: .appleSpeech, status: .uploaded)
+            try await self.store.upsertCall(call)
+            return Response(status: .created)
+        }
         let certificate = try NIOSSLCertificate(bytes: Array(identity.certificateDER), format: .der)
         let key = try NIOSSLPrivateKey(bytes: Array(identity.privateKeyPEM.utf8), format: .pem)
         let tls = TLSConfiguration.makeServerConfiguration(
@@ -48,6 +75,81 @@ public actor MacSyncServer {
             configuration: .init(address: .hostname(host, port: SyncConstants.serverPort))
         )
         try await app.runService()
+    }
+
+    private static func authorizedDevice(for request: Request, pairing: PairingAuthority) async throws -> PairedDevice {
+        guard let value = request.headers[.authorization], value.hasPrefix("Bearer "),
+              let device = await pairing.authorize(token: String(value.dropFirst("Bearer ".count)))
+        else { throw HTTPError(.unauthorized, message: "Pair this iPhone before syncing.") }
+        return device
+    }
+
+    private static func mirror(store: any CallStore) async throws -> SyncDTO.Mirror {
+        let calls = try await store.fetchCalls()
+        var mirrored: [SyncDTO.MirroredCall] = []
+        for call in calls {
+            let note = try await store.fetchPreferredNotes(callID: call.id)
+            let segments = try await store.fetchSegments(callID: call.id, provider: call.sttProvider)
+            mirrored.append(SyncDTO.MirroredCall(
+                id: call.id,
+                title: note?.body.title ?? call.counterpartyName ?? "Call",
+                summary: note?.body.summary ?? "Processing recording",
+                startedAt: call.startedAt,
+                source: call.source.rawValue,
+                status: call.status.rawValue,
+                segments: segments.map { .init(id: "\(call.id.uuidString)-\($0.seq)", speaker: $0.channel.rawValue.capitalized, text: $0.text, startSec: $0.startSec) },
+                note: note.map { .init(summary: $0.body.summary, decisions: $0.body.decisions, actionItems: $0.body.actionItems.map(\.text)) }
+            ))
+        }
+        return SyncDTO.Mirror(calls: mirrored)
+    }
+}
+
+private enum MultipartCallUpload {
+    struct Upload { var metadata: CallUploadMetadata; var audio: Data; var fileExtension: String }
+    static func parse(_ body: Data, boundary: String) throws -> Upload? {
+        let delimiter = Data("--\(boundary)".utf8)
+        let headerEnd = Data("\r\n\r\n".utf8)
+        let metadataDecoder = JSONDecoder(); metadataDecoder.dateDecodingStrategy = .iso8601
+        var metadata: CallUploadMetadata?
+        var audio: Data?
+        var fileExtension = "m4a"
+        for part in body.multipartParts(separatedBy: delimiter) {
+            guard let headerRange = part.range(of: headerEnd) else { continue }
+            let headers = String(decoding: part[..<headerRange.lowerBound], as: UTF8.self)
+            let content = Data(part[headerRange.upperBound...]).trimmingCRLF()
+            if headers.contains("name=\"metadata\"") { metadata = try metadataDecoder.decode(CallUploadMetadata.self, from: content) }
+            if headers.contains("name=\"audio\"") {
+                audio = content
+                if let filename = headers.components(separatedBy: "filename=\"").dropFirst().first?.split(separator: "\"").first {
+                    fileExtension = URL(fileURLWithPath: String(filename)).pathExtension.lowercased()
+                }
+            }
+        }
+        guard let metadata, let audio, !audio.isEmpty else { return nil }
+        return Upload(metadata: metadata, audio: audio, fileExtension: fileExtension.isEmpty ? "m4a" : fileExtension)
+    }
+}
+
+private extension Data {
+    func trimmingCRLF() -> Data {
+        var start = startIndex; var end = endIndex
+        while start < end, self[start] == 13 || self[start] == 10 { formIndex(after: &start) }
+        while start < end, self[index(before: end)] == 13 || self[index(before: end)] == 10 { formIndex(before: &end) }
+        return Data(self[start..<end])
+    }
+}
+
+private extension Data {
+    func multipartParts(separatedBy delimiter: Data) -> [Data] {
+        var parts: [Data] = []
+        var start = startIndex
+        while let range = range(of: delimiter, options: [], in: start..<endIndex) {
+            if start != range.lowerBound { parts.append(Data(self[start..<range.lowerBound]).trimmingCRLF()) }
+            start = range.upperBound
+        }
+        if start < endIndex { parts.append(Data(self[start..<endIndex]).trimmingCRLF()) }
+        return parts
     }
 }
 #endif

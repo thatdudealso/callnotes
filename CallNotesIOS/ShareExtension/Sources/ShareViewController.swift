@@ -1,6 +1,8 @@
 import Social
 import UIKit
 import UniformTypeIdentifiers
+import CallNotesCore
+import Security
 
 /// Accepts audio from Notes, Voice Memos, Files, and Mail, then atomically
 /// moves it into the shared App Group queue before the extension exits.
@@ -8,7 +10,7 @@ final class ShareViewController: UIViewController {
     private let nameField = UITextField()
     private let dateField = UITextField()
     private var sharedAudioURL: URL?
-    private var sharedMetadata: ExtensionUploadMetadata?
+    private var sharedMetadata: CallUploadMetadata?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -76,11 +78,12 @@ final class ShareViewController: UIViewController {
         Task {
             do {
                 let container = try self.sharedContainer()
-                try ExtensionUploadQueue.enqueue(
+                let job = try await ExtensionUploadQueue.enqueue(
                     audioAt: sharedAudioURL,
-                    metadata: .init(source: "iphone_recording", startedAt: startedAt, counterpartyName: counterpartyName),
+                    metadata: .init(source: .iphoneRecording, startedAt: startedAt, counterpartyName: counterpartyName),
                     in: container.appendingPathComponent("PhoneUploads", isDirectory: true)
                 )
+                try ExtensionBackgroundUpload.schedule(job: job, in: container)
                 await MainActor.run { self.extensionContext?.completeRequest(returningItems: nil) }
             } catch {
                 await MainActor.run { self.showError(error.localizedDescription) }
@@ -102,45 +105,77 @@ final class ShareViewController: UIViewController {
     }
 }
 
-private struct ExtensionUploadMetadata: Codable {
-    var source: String
-    var startedAt: Date?
-    var counterpartyName: String?
-}
-
-private struct ExtensionPendingUpload: Codable {
-    var id: UUID
-    var audioURL: URL
-    var metadata: ExtensionUploadMetadata
-    var createdAt: Date
-    var retryCount: Int
-    var nextAttemptAt: Date?
-}
-
 private enum ExtensionUploadQueue {
-    static func enqueue(audioAt source: URL, metadata: ExtensionUploadMetadata, in directory: URL) throws {
-        let files = directory.appendingPathComponent("uploads", isDirectory: true)
-        try FileManager.default.createDirectory(at: files, withIntermediateDirectories: true)
-        let extensionName = source.pathExtension.isEmpty ? "m4a" : source.pathExtension
-        let destination = files.appendingPathComponent(UUID().uuidString).appendingPathExtension(extensionName)
-        try FileManager.default.copyItem(at: source, to: destination)
-        let manifest = directory.appendingPathComponent("pending-uploads.json")
-        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
-        var pending = (try? decoder.decode([ExtensionPendingUpload].self, from: Data(contentsOf: manifest))) ?? []
-        pending.append(.init(id: UUID(), audioURL: destination, metadata: metadata, createdAt: Date(), retryCount: 0, nextAttemptAt: nil))
-        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode(pending).write(to: manifest, options: .atomic)
+    static func enqueue(audioAt source: URL, metadata: CallUploadMetadata, in directory: URL) async throws -> PendingUpload {
+        let inbox = try PendingUploadInbox(directory: directory)
+        return try await inbox.enqueue(audioAt: source, metadata: metadata)
     }
 }
 
-private enum ExtensionRecordingTitleParser {
-    static func parse(_ title: String) -> ExtensionUploadMetadata? {
-        let expression = #/^Call with (.+?),\s*(.+)$/#
-        guard let match = title.wholeMatch(of: expression) else { return nil }
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "MMM d, yyyy 'at' h:mm a"
-        return .init(source: "iphone_recording", startedAt: formatter.date(from: String(match.output.2)), counterpartyName: String(match.output.1))
+private enum ExtensionBackgroundUpload {
+    private static let configurationKey = "paired_mac"
+    private static let keychainService = "com.thatdudealso.callnotes.phone-pairing"
+
+    static func schedule(job: PendingUpload, in container: URL) throws {
+        guard let data = UserDefaults(suiteName: "group.com.thatdudealso.callnotes")?.data(forKey: configurationKey),
+              let configuration = try? JSONDecoder().decode(ExtensionPairingConfiguration.self, from: data),
+              let token = token(for: configuration.deviceID)
+        else { return }
+        let body = try ExtensionMultipartBody.make(job: job, directory: container.appendingPathComponent("UploadRequests", isDirectory: true))
+        var request = URLRequest(url: configuration.serverURL.appendingPathComponent("calls"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(body.contentType, forHTTPHeaderField: "Content-Type")
+        let sessionConfiguration = URLSessionConfiguration.background(withIdentifier: "com.thatdudealso.callnotes.share-upload")
+        sessionConfiguration.isDiscretionary = false
+        sessionConfiguration.sessionSendsLaunchEvents = true
+        sessionConfiguration.waitsForConnectivity = true
+        let session = URLSession(configuration: sessionConfiguration, delegate: PinnedExtensionSessionDelegate(fingerprint: configuration.certificateFingerprint), delegateQueue: nil)
+        let task = session.uploadTask(with: request, fromFile: body.url)
+        task.taskDescription = job.id.uuidString
+        task.resume()
+    }
+
+    private static func token(for deviceID: UUID) -> String? {
+        let query: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: keychainService, kSecAttrAccount: deviceID.uuidString, kSecReturnData: true]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 }
+
+private struct ExtensionPairingConfiguration: Codable { var serverURL: URL; var deviceID: UUID; var certificateFingerprint: String }
+
+private final class PinnedExtensionSessionDelegate: NSObject, URLSessionDelegate {
+    private let fingerprint: String
+    init(fingerprint: String) { self.fingerprint = fingerprint }
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let trust = challenge.protectionSpace.serverTrust,
+              let certificate = (SecTrustCopyCertificateChain(trust) as? [SecCertificate])?.first
+        else { completionHandler(.performDefaultHandling, nil); return }
+        let actual = CertificateFingerprint.sha256(of: SecCertificateCopyData(certificate) as Data)
+        guard actual.caseInsensitiveCompare(fingerprint) == .orderedSame else { completionHandler(.cancelAuthenticationChallenge, nil); return }
+        completionHandler(.useCredential, URLCredential(trust: trust))
+    }
+}
+
+private enum ExtensionMultipartBody {
+    struct Body { var url: URL; var contentType: String }
+    static func make(job: PendingUpload, directory: URL) throws -> Body {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let boundary = "CallNotes-\(UUID().uuidString)"
+        let url = directory.appendingPathComponent(job.id.uuidString).appendingPathExtension("multipart")
+        var data = Data()
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        data.append("--\(boundary)\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n".data(using: .utf8)!)
+        data.append(try encoder.encode(job.metadata))
+        data.append("\r\n--\(boundary)\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"\(job.audioURL.lastPathComponent)\"\r\nContent-Type: audio/mp4\r\n\r\n".data(using: .utf8)!)
+        data.append(try Data(contentsOf: job.audioURL))
+        data.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+        try data.write(to: url, options: .atomic)
+        return Body(url: url, contentType: "multipart/form-data; boundary=\(boundary)")
+    }
+}
+
+private enum ExtensionRecordingTitleParser { static func parse(_ title: String) -> CallUploadMetadata? { SharedRecordingTitleParser.parse(title) } }

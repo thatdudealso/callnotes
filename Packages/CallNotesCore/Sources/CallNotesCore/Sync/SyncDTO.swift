@@ -3,6 +3,34 @@ import Foundation
 /// Wire types shared by the Mac's Hummingbird server and the iOS client.
 /// Endpoint handlers arrive in Phase 6.
 public enum SyncDTO {
+    public struct Mirror: Codable, Sendable {
+        public var calls: [MirroredCall]
+        public init(calls: [MirroredCall]) { self.calls = calls }
+    }
+
+    public struct MirroredCall: Codable, Sendable {
+        public var id: UUID
+        public var title: String
+        public var summary: String
+        public var startedAt: Date
+        public var source: String
+        public var status: String
+        public var segments: [MirroredSegment]
+        public var note: MirroredNote?
+        public init(id: UUID, title: String, summary: String, startedAt: Date, source: String, status: String, segments: [MirroredSegment], note: MirroredNote?) {
+            self.id = id; self.title = title; self.summary = summary; self.startedAt = startedAt; self.source = source; self.status = status; self.segments = segments; self.note = note
+        }
+    }
+
+    public struct MirroredSegment: Codable, Sendable {
+        public var id: String; public var speaker: String; public var text: String; public var startSec: Double
+        public init(id: String, speaker: String, text: String, startSec: Double) { self.id = id; self.speaker = speaker; self.text = text; self.startSec = startSec }
+    }
+
+    public struct MirroredNote: Codable, Sendable {
+        public var summary: String; public var decisions: [String]; public var actionItems: [String]
+        public init(summary: String, decisions: [String], actionItems: [String]) { self.summary = summary; self.decisions = decisions; self.actionItems = actionItems }
+    }
     /// `POST /pair` response: a long-lived, revocable device token.
     public struct PairResponse: Codable, Sendable {
         public var deviceID: UUID
