@@ -39,7 +39,7 @@ struct DashboardView: View {
     }
 
     private var totals: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4), spacing: 12) {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 12)], spacing: 12) {
             DashboardMetric(title: "Calls", value: "\(analytics.totals.callCount)", detail: "\(analytics.totals.localCallCount) local · \(analytics.totals.metaCallCount) Meta · \(analytics.totals.mixedCallCount) mixed")
             DashboardMetric(title: "Talk time", value: duration(analytics.totals.totalDurationSec), detail: "Across all calls")
             DashboardMetric(title: "Meta cost", value: currency(analytics.totals.metaCostDollars), detail: "\(duration(analytics.totals.metaBilledSeconds)) billed")
@@ -54,11 +54,12 @@ struct DashboardView: View {
             ForEach(DashboardPeriodRange.allCases, id: \.self) { range in
                 let periods = analytics.periods.filter { $0.range == range }
                 if !periods.isEmpty {
+                    let visible = Array(periods.prefix(Self.periodRowLimit))
                     VStack(alignment: .leading, spacing: 8) {
                         Text(range.rawValue.capitalized)
                             .font(.subheadline.weight(.medium))
                             .foregroundStyle(.secondary)
-                        ForEach(Array(periods.prefix(6).enumerated()), id: \.element.id) { index, period in
+                        ForEach(Array(visible.enumerated()), id: \.element.id) { index, period in
                             if index > 0 { Divider() }
                             Button {
                                 show(period.callIDs, title: "\(range.rawValue.capitalized) of \(period.startsAt.formatted(date: .abbreviated, time: .omitted))")
@@ -81,6 +82,26 @@ struct DashboardView: View {
                                     }
                                 }
                                 .font(.subheadline)
+                                .padding(.vertical, 8)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        if periods.count > visible.count {
+                            Divider()
+                            Button {
+                                show(
+                                    periods.flatMap(\.callIDs),
+                                    title: "Every \(range.rawValue) with activity"
+                                )
+                            } label: {
+                                HStack {
+                                    Text("Showing \(visible.count) of \(periods.count) \(range.rawValue)s")
+                                    Spacer()
+                                    Text("Show all calls")
+                                }
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                                 .padding(.vertical, 8)
                                 .contentShape(Rectangle())
                             }
@@ -141,6 +162,8 @@ struct DashboardView: View {
             }
         }
     }
+
+    private static let periodRowLimit = 6
 
     private func show(_ ids: [UUID], title: String) {
         selectedCallIDs = Set(ids)

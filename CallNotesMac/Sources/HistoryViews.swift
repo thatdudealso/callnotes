@@ -124,34 +124,56 @@ private struct CounterpartyNameField: View {
     var model: AppModel
     let call: Call
 
-    @State private var draft = ""
-    @State private var editingCallID: UUID?
+    @State private var draft: Draft?
     @FocusState private var isEditing: Bool
 
+    /// The draft carries the call it belongs to and the name it started from, so a
+    /// rebind to another call commits the edit to its own call instead of dropping
+    /// it or writing it onto whatever is selected by then.
+    private struct Draft {
+        let callID: UUID
+        var committedName: String
+        var text: String
+
+        var normalized: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        var isDirty: Bool { normalized != committedName }
+    }
+
     var body: some View {
-        TextField("Counterparty", text: $draft)
-            .textFieldStyle(.roundedBorder)
-            .focused($isEditing)
-            .onSubmit { commit() }
-            .onChange(of: isEditing) { _, editing in
-                if !editing { commit() }
-            }
-            .onChange(of: call.counterpartyName) { _, name in
-                guard !isEditing else { return }
-                draft = name ?? ""
-            }
-            .task(id: call.id) {
-                editingCallID = call.id
-                draft = call.counterpartyName ?? ""
-            }
+        TextField(
+            "Counterparty",
+            text: Binding(get: { draft?.text ?? "" }, set: { draft?.text = $0 })
+        )
+        .textFieldStyle(.roundedBorder)
+        .focused($isEditing)
+        .onSubmit { commit() }
+        .onChange(of: isEditing) { _, editing in
+            if !editing { commit() }
+        }
+        .onChange(of: call.id) { _, _ in rebind() }
+        .onChange(of: call.counterpartyName) { _, name in
+            guard !isEditing, let draft, draft.callID == call.id, !draft.isDirty else { return }
+            self.draft = Draft(callID: call.id, committedName: name ?? "", text: name ?? "")
+        }
+        .task { rebind() }
+    }
+
+    @MainActor
+    private func rebind() {
+        guard draft?.callID != call.id else { return }
+        commit()
+        draft = Draft(
+            callID: call.id,
+            committedName: call.counterpartyName ?? "",
+            text: call.counterpartyName ?? ""
+        )
     }
 
     @MainActor
     private func commit() {
-        guard let editingCallID, editingCallID == call.id else { return }
-        let normalized = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard normalized != (call.counterpartyName ?? "") else { return }
-        Task { await model.updateCounterpartyName(for: editingCallID, name: normalized) }
+        guard let pending = draft, pending.isDirty else { return }
+        draft?.committedName = pending.normalized
+        Task { await model.updateCounterpartyName(for: pending.callID, name: pending.normalized) }
     }
 }
 
