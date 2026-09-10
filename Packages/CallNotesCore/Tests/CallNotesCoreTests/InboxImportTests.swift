@@ -1018,19 +1018,44 @@ import Testing
         defer { try? FileManager.default.removeItem(at: url) }
 
         let loaded = try FileAudioLoader.load(url)
-        let nearSamples = samples(of: loaded.near)
-        let farSamples = samples(of: loaded.far)
+        let mixedSamples = samples(of: loaded.mixed)
         let expectedFrames = Int(seconds * 16_000)
 
         #expect(loaded.channelCount == 2)
         #expect(loaded.layout == .unknownStereo)
-        #expect(loaded.hasSecondChannel)
         #expect(!loaded.isStereo)
-        #expect(abs(nearSamples.count - expectedFrames) <= 2)
-        #expect(abs(farSamples.count - expectedFrames) <= 2)
-        #expect(nearSamples.allSatisfy { abs(Int($0) - 16_384) <= 2 })
-        #expect(farSamples.allSatisfy { abs(Int($0) + 8_192) <= 2 })
+        #expect(loaded.far.isEmpty)
+        #expect(abs(mixedSamples.count - expectedFrames) <= 2)
+        #expect(mixedSamples.allSatisfy { abs(Int($0) - 4_096) <= 2 })
         #expect(abs(loaded.duration - seconds) < 0.01)
+    }
+
+    @Test func multichannelImportKeepsCentreChannelSpeech() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-surround-\(UUID().uuidString).caf")
+        try ImportFixtureWriter.writeCentreChannelSurroundCAF(to: url, seconds: 1, sampleRate: 16_000)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let loaded = try FileAudioLoader.load(url)
+        let mixedSamples = samples(of: loaded.mixed)
+
+        #expect(loaded.channelCount == 6)
+        #expect(loaded.layout == .unknownStereo)
+        #expect(mixedSamples.count == 16_000)
+        #expect(mixedSamples.allSatisfy { abs(Int($0) - 3_277) <= 2 })
+
+        let speech = ChannelRecordingTranscriber()
+        _ = try await FileTranscriptionSpine(
+            speech: speech,
+            diarizer: ScriptedDiarizer(clusters: []),
+            store: MemoryStore()
+        ).process(
+            fileURL: url,
+            call: Call(source: .fileImport, startedAt: Date(), audioPath: url.path, sttProvider: .appleSpeech),
+            profiles: []
+        )
+        #expect(speech.channels.value == [.mixed])
+        #expect(speech.peaks.value.allSatisfy { $0 > 3_000 })
     }
 
     @Test func undecodableFileFailsInsteadOfImportingSilence() throws {
@@ -1064,6 +1089,7 @@ private final class ChannelRecordingTranscriber: PCMTranscriber, @unchecked Send
     let id: STTProviderID = .appleSpeech
     let dualInstanceMode: DualInstanceMode = .nearLiveFarBatch
     let channels = LockBox<[SegmentChannel]>([])
+    let peaks = LockBox<[Int]>([])
 
     func transcribePCM(
         _ pcm16: Data,
@@ -1071,6 +1097,8 @@ private final class ChannelRecordingTranscriber: PCMTranscriber, @unchecked Send
         config: STTSessionConfig
     ) async throws -> [RawSegment] {
         channels.value.append(channel)
+        let samples = pcm16.withUnsafeBytes { Array($0.bindMemory(to: Int16.self)) }
+        peaks.value.append(samples.reduce(0) { max($0, abs(Int($1))) })
         return [RawSegment(start: 0, end: 1, text: "Speech on \(channel.rawValue).", channel: channel)]
     }
 }
@@ -1210,6 +1238,26 @@ enum ImportFixtureWriter {
             channels[0][index] = near
             channels[1][index] = far
         }
+        try file.write(from: buffer)
+    }
+
+    static func writeCentreChannelSurroundCAF(to url: URL, seconds: Double, sampleRate: Int) throws {
+        let frames = max(1, Int(seconds * Double(sampleRate)))
+        guard let channelLayout = AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_MPEG_5_1_A) else {
+            throw FileImportError.invalidAudio("Could not build a 5.1 fixture layout")
+        }
+        let format = AVAudioFormat(standardFormatWithSampleRate: Double(sampleRate), channelLayout: channelLayout)
+        guard
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)),
+            let channels = buffer.floatChannelData
+        else {
+            throw FileImportError.invalidAudio("Could not build a 5.1 fixture buffer")
+        }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        for index in 0..<frames {
+            channels[2][index] = 0.6
+        }
+        let file = try AVAudioFile(forWriting: url, settings: format.settings)
         try file.write(from: buffer)
     }
 

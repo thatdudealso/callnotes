@@ -37,9 +37,8 @@ public enum FileAudioLoader {
             self.layout = layout
         }
 
-        public var hasSecondChannel: Bool { channelCount >= 2 && !far.isEmpty }
-        public var isStereo: Bool { layout == .captureNearFar && hasSecondChannel }
-        public var mixed: Data { hasSecondChannel ? mix(near, far) : near }
+        public var isStereo: Bool { layout == .captureNearFar && !far.isEmpty }
+        public var mixed: Data { far.isEmpty ? near : mix(near, far) }
     }
 
     public static func channelLayout(for url: URL, channelCount: Int) -> ChannelLayout {
@@ -70,6 +69,7 @@ public enum FileAudioLoader {
             throw FileImportError.invalidAudio("CallNotes could not read this audio file's sample format")
         }
         let channelCount = Int(format.channelCount)
+        let layout = channelLayout(for: url, channelCount: channelCount)
         let sourceRate = format.sampleRate
         let batchFrames = AVAudioFrameCount(max(1, Int(decodeBatchSeconds * sourceRate)))
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: batchFrames) else {
@@ -85,7 +85,7 @@ public enum FileAudioLoader {
         var far = Data()
         let expectedBytes = Int(Double(file.length) * Double(targetSampleRate) / sourceRate) * 2
         near.reserveCapacity(expectedBytes)
-        if channelCount >= 2 { far.reserveCapacity(expectedBytes) }
+        if layout == .captureNearFar { far.reserveCapacity(expectedBytes) }
 
         var decodedFrames = 0
         while file.framePosition < file.length {
@@ -96,9 +96,16 @@ public enum FileAudioLoader {
             guard let channels = buffer.floatChannelData else {
                 throw FileImportError.invalidAudio("CallNotes could not read this audio file's sample format")
             }
-            near.append(int16Data(resampler: &nearResampler, source: channels[0], frames: frames))
-            if channelCount >= 2 {
-                far.append(int16Data(resampler: &farResampler, source: channels[1], frames: frames))
+            if layout == .captureNearFar {
+                near.append(int16Data(resampler: &nearResampler, batch: samples(channels[0], frames: frames)))
+                far.append(int16Data(resampler: &farResampler, batch: samples(channels[1], frames: frames)))
+            } else {
+                near.append(
+                    int16Data(
+                        resampler: &nearResampler,
+                        batch: downmix(channels, channelCount: channelCount, frames: frames)
+                    )
+                )
             }
         }
         guard decodedFrames > 0 else {
@@ -113,16 +120,37 @@ public enum FileAudioLoader {
             sampleRate: targetSampleRate,
             duration: duration,
             channelCount: channelCount,
-            layout: channelLayout(for: url, channelCount: channelCount)
+            layout: layout
         )
+    }
+
+    private static func samples(_ source: UnsafeMutablePointer<Float>, frames: Int) -> [Float] {
+        Array(UnsafeBufferPointer(start: source, count: frames))
+    }
+
+    /// Everything that is not CallNotes' own near/far capture is room audio, so
+    /// every channel is averaged into one stream: a 5.1 interview keeps its
+    /// centre-channel speech instead of importing a silent L/R pair.
+    private static func downmix(
+        _ channels: UnsafePointer<UnsafeMutablePointer<Float>>,
+        channelCount: Int,
+        frames: Int
+    ) -> [Float] {
+        var batch = [Float](repeating: 0, count: frames)
+        let scale = 1 / Float(max(channelCount, 1))
+        for channel in 0..<channelCount {
+            let source = channels[channel]
+            for index in 0..<frames {
+                batch[index] += source[index] * scale
+            }
+        }
+        return batch
     }
 
     private static func int16Data(
         resampler: inout StreamingPCMResampler,
-        source: UnsafeMutablePointer<Float>,
-        frames: Int
+        batch: [Float]
     ) -> Data {
-        let batch = Array(UnsafeBufferPointer(start: source, count: frames))
         let resampled = resampler.resampleMono(batch)
         var samples = [Int16](repeating: 0, count: resampled.count)
         for index in 0..<resampled.count {
