@@ -153,9 +153,21 @@ public actor PostgresStore: CallStore {
                     now: asOf
                 )
             } catch {
-                try? await connection.query("ROLLBACK", logger: logger)
+                await Self.abandonTransaction(on: connection, logger: logger)
                 throw error
             }
+        }
+    }
+
+    /// The rollback runs detached so a cancelled read still closes its transaction.
+    /// If even that fails the connection is closed rather than returned to the pool,
+    /// where a lingering read-only transaction would break the next writer.
+    private static func abandonTransaction(on connection: PostgresConnection, logger: Logger) async {
+        let rollback = Task.detached {
+            _ = try await connection.query("ROLLBACK", logger: logger)
+        }
+        if (try? await rollback.value) == nil {
+            try? await connection.close()
         }
     }
 

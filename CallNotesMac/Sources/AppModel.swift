@@ -147,13 +147,12 @@ final class AppModel {
         store = postgres
         storeBackendName = "postgres"
         isStoreInitialized = true
+        observeDashboardChanges()
         notesSpine = NotesGenerationSpine(client: OllamaClient(), store: postgres)
         statusMessage = nil
         startInboxWatcher()
         do {
             _ = try await postgres.closeStrandedRecordings(excluding: instantCallAtHangUp?.id)
-            try await refresh()
-            observeDashboardChanges()
         } catch {
             statusMessage = error.localizedDescription
         }

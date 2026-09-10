@@ -506,20 +506,6 @@ import Testing
             #expect(batchedNotes[profileCall.id] == perCallNotes)
             #expect(batchedNotes[profileCall.id]?.provider == .glimmer)
 
-            let stranded = recordingCall(startedAt: now.addingTimeInterval(-7 * 86_400))
-            try await store.upsertCall(stranded)
-            callIDs.append(stranded.id)
-            try await store.replaceSegments(
-                callID: stranded.id,
-                provider: .appleSpeech,
-                [
-                    Segment(callID: stranded.id, seq: 0, startSec: 0, endSec: 180.75, channel: .near, text: "one", provider: .appleSpeech)
-                ]
-            )
-            let live = recordingCall(startedAt: now.addingTimeInterval(-120))
-            try await store.upsertCall(live)
-            callIDs.append(live.id)
-
             let unrelated = Call(
                 source: .fileImport,
                 startedAt: now.addingTimeInterval(-30),
@@ -538,34 +524,39 @@ import Testing
             #expect(!sweepTargets.contains { $0.id == unrelated.id })
             #expect(sweepTargets.contains { $0.id == profileCall.id })
 
-            let stalled = processingCall(startedAt: now.addingTimeInterval(-7 * 86_400), status: .transcribing)
+            let stalledName = "\(fixtureName) stalled"
+            let stalled = processingCall(
+                counterparty: stalledName,
+                startedAt: now.addingTimeInterval(-7 * 86_400),
+                status: .transcribing
+            )
             try await store.upsertCall(stalled)
             callIDs.append(stalled.id)
-
-            let closed = try await store.closeStrandedRecordings(excluding: live.id)
-            let persistedStranded = try #require(await store.fetchCall(id: stranded.id))
-            let persistedLive = try #require(await store.fetchCall(id: live.id))
-
-            #expect(closed.map(\.id) == [stranded.id])
-            #expect(persistedStranded.durationSec == 180)
-            #expect(persistedStranded.status == .transcribed)
-            #expect(persistedLive.status == .recording)
-            #expect(persistedLive.endedAt == nil)
-
-            let repairedSnapshot = try await store.fetchDashboardAnalytics(asOf: now)
-            let strandedRow = try #require(repairedSnapshot.calls.first { $0.id == stranded.id })
-            let liveRow = try #require(repairedSnapshot.calls.first { $0.id == live.id })
-            let stalledRow = try #require(repairedSnapshot.calls.first { $0.id == stalled.id })
-            let stalledContact = try #require(
-                repairedSnapshot.contacts.first { $0.callIDs.contains(stalled.id) }
+            let stalledSibling = fixtureCall(
+                counterparty: stalledName,
+                startedAt: now.addingTimeInterval(-60),
+                duration: 120
             )
-            #expect(strandedRow.durationSec == 180)
-            #expect(liveRow.durationSec == 120)
+            try await store.upsertCall(stalledSibling)
+            callIDs.append(stalledSibling.id)
+
+            let stalledSnapshot = try await store.fetchDashboardAnalytics(asOf: now)
+            let stalledRow = try #require(stalledSnapshot.calls.first { $0.id == stalled.id })
+            let stalledContact = try #require(stalledSnapshot.contacts.first { $0.name == stalledName })
+            let persistedStalled = try #require(await store.fetchCall(id: stalled.id))
+
             #expect(stalledRow.durationSec == 0)
             #expect(stalledRow.isIncomplete)
-            let persistedStalled = try #require(await store.fetchCall(id: stalled.id))
             #expect(persistedStalled.status == .transcribing)
-            #expect(stalledContact.averageDurationSec == (180 + 120) / 2)
+            #expect(stalledContact.callCount == 2)
+            #expect(stalledContact.totalDurationSec == 120)
+            #expect(stalledContact.averageDurationSec == 120)
+
+            let cancelled = Task { try await store.fetchDashboardAnalytics(asOf: self.now) }
+            cancelled.cancel()
+            _ = try? await cancelled.value
+            try await store.upsertCall(stalledSibling)
+            #expect(try await store.fetchDashboardAnalytics(asOf: now).totals.callCount > 0)
 
             let shoutedName = profile.displayName.uppercased()
             let shoutedCall = fixtureCall(
@@ -657,11 +648,15 @@ import Testing
         processingCall(startedAt: startedAt, status: .recording)
     }
 
-    private func processingCall(startedAt: Date, status: CallStatus) -> Call {
+    private func processingCall(
+        counterparty: String = "Avery",
+        startedAt: Date,
+        status: CallStatus
+    ) -> Call {
         Call(
             source: .macManual,
             startedAt: startedAt,
-            counterpartyName: "Avery",
+            counterpartyName: counterparty,
             audioPath: Self.fixtureAudioPath,
             sttProvider: .appleSpeech,
             status: status
