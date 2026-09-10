@@ -143,13 +143,8 @@ struct OnboardingGate: View {
     var body: some View {
         Group {
             if onboardingComplete {
-                TabView {
-                    HistorySplitView(model: model)
-                        .tabItem { Label("Calls", systemImage: "phone") }
-                    DashboardView(model: model)
-                        .tabItem { Label("Dashboard", systemImage: "chart.bar.xaxis") }
-                }
-                .frame(minWidth: 800, minHeight: 520)
+                HistorySplitView(model: model)
+                    .frame(minWidth: 800, minHeight: 520)
             } else {
                 SetupWizardView {
                     onboardingComplete = true

@@ -23,21 +23,26 @@ public struct DashboardCall: Identifiable, Sendable, Equatable {
     public let durationSec: Int
     public let costDollars: Double
     public let counterpartyName: String
+    public let engine: DashboardEngine
 
     public var id: UUID { call.id }
-    public var engine: DashboardEngine {
-        let providers = call.transcriptionProviders + [call.sttProvider]
-        let usesMeta = call.metaBilledSec > 0 || providers.contains(.metaMuse)
-        let usesLocal = providers.contains { $0 != .metaMuse }
-        if usesMeta && usesLocal { return .mixed }
-        return usesMeta ? .meta : .local
-    }
 
     init(call: Call, durationSec: Int, counterpartyName: String) {
         self.call = call
         self.durationSec = durationSec
         self.costDollars = MetaCostMeter.costDollars(billedSeconds: max(0, call.metaBilledSec))
         self.counterpartyName = counterpartyName
+        self.engine = Self.engine(for: call)
+    }
+
+    private static func engine(for call: Call) -> DashboardEngine {
+        let usesMeta = call.metaBilledSec > 0
+            || call.sttProvider == .metaMuse
+            || call.transcriptionProviders.contains(.metaMuse)
+        let usesLocal = call.sttProvider != .metaMuse
+            || call.transcriptionProviders.contains { $0 != .metaMuse }
+        if usesMeta && usesLocal { return .mixed }
+        return usesMeta ? .meta : .local
     }
 }
 

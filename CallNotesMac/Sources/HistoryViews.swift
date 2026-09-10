@@ -3,22 +3,34 @@ import CallNotesCore
 import SwiftUI
 import UniformTypeIdentifiers
 
+enum SidebarItem: Hashable {
+    case dashboard
+    case call(UUID)
+}
+
 struct HistorySplitView: View {
     @Bindable var model: AppModel
+    @State private var selection: SidebarItem?
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $model.selectedCallID) {
-                if model.calls.isEmpty {
-                    empty
-                } else {
-                    ForEach(model.calls) { call in
-                        HistoryRow(call: call, notesTitle: model.notesByCall[call.id]?.body.title)
-                            .tag(call.id)
+            List(selection: $selection) {
+                Label("Dashboard", systemImage: "chart.bar.xaxis")
+                    .tag(SidebarItem.dashboard)
+                Section("Calls") {
+                    if model.calls.isEmpty {
+                        Text("No calls yet.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(model.calls) { call in
+                            HistoryRow(call: call, notesTitle: model.notesByCall[call.id]?.body.title)
+                                .tag(SidebarItem.call(call.id))
+                        }
                     }
                 }
             }
-            .navigationTitle("Calls")
+            .navigationTitle("CallNotes")
             .safeAreaInset(edge: .bottom) {
                 VStack(alignment: .leading, spacing: 4) {
                     ImportProgressView(progress: model.importProgress) { jobID in
@@ -34,13 +46,24 @@ struct HistorySplitView: View {
                 }
             }
         } detail: {
-            if model.selectedCall != nil {
+            switch selection {
+            case .dashboard:
+                DashboardView(model: model)
+            case .call where model.selectedCall != nil:
                 CallDetailView(model: model)
-            } else {
+            default:
                 empty
             }
         }
+        .onChange(of: selection) { _, newValue in
+            guard case .call(let id) = newValue else { return }
+            model.selectedCallID = id
+        }
         .onChange(of: model.selectedCallID) { _, newValue in
+            guard let newValue else { return }
+            if selection == nil {
+                selection = .call(newValue)
+            }
             if let call = model.calls.first(where: { $0.id == newValue }) {
                 Task { await model.select(call) }
             }

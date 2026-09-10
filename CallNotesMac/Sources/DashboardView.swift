@@ -3,7 +3,7 @@ import SwiftUI
 
 struct DashboardView: View {
     @Bindable var model: AppModel
-    @State private var selectedCallIDs: [UUID] = []
+    @State private var selectedCallIDs: Set<UUID> = []
     @State private var drillDownTitle = "Calls"
 
     private var analytics: DashboardAnalytics { model.dashboardAnalytics }
@@ -142,7 +142,7 @@ struct DashboardView: View {
     }
 
     private func show(_ ids: [UUID], title: String) {
-        selectedCallIDs = ids
+        selectedCallIDs = Set(ids)
         drillDownTitle = title
     }
 

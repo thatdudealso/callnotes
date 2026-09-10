@@ -491,12 +491,20 @@ public actor PostgresStore: CallStore {
     /// resolves in the contracted order: the user-edited counterparty name, then the
     /// highest-confidence matched non-owner speaker profile, then `Unknown`, grouped
     /// case-insensitively so one person never splits across rows.
+    /// Mirrors `CharacterSet.whitespacesAndNewlines` so Postgres and MemoryStore
+    /// resolve and group the same identity for the same stored name.
+    private static let identityWhitespace =
+        " \t\n\u{0B}\u{0C}\r\u{85}\u{A0}\u{1680}"
+        + "\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}"
+        + "\u{2006}\u{2007}\u{2008}\u{2009}\u{200A}"
+        + "\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}"
+
     private func dashboardContacts(
         asOf: Date
     ) async throws -> (contacts: [DashboardContact], resolvedNames: [UUID: String]) {
         let rows = try await client.query(
             """
-            WITH resolved AS (
+            WITH edited AS (
               SELECT
                 calls.id AS call_id,
                 calls.started_at AS started_at,
@@ -504,20 +512,28 @@ public actor PostgresStore: CallStore {
                   calls.duration_sec,
                   FLOOR(EXTRACT(EPOCH FROM (COALESCE(calls.ended_at, \(asOf)) - calls.started_at)))::int
                 )) AS duration_sec,
+                NULLIF(btrim(calls.counterparty_name, \(Self.identityWhitespace)), '') AS edited_name
+              FROM calls
+            ),
+            resolved AS (
+              SELECT
+                edited.call_id,
+                edited.started_at,
+                edited.duration_sec,
                 COALESCE(
-                  NULLIF(btrim(calls.counterparty_name), ''),
-                  NULLIF(btrim(matched.display_name), ''),
+                  edited.edited_name,
+                  NULLIF(btrim(matched.display_name, \(Self.identityWhitespace)), ''),
                   'Unknown'
                 ) AS resolved_name
-              FROM calls
+              FROM edited
               LEFT JOIN LATERAL (
                 SELECT speaker_profiles.display_name
                 FROM call_speakers
                 JOIN speaker_profiles ON speaker_profiles.id = call_speakers.profile_id
-                WHERE call_speakers.call_id = calls.id
-                  AND btrim(COALESCE(calls.counterparty_name, '')) = ''
+                WHERE call_speakers.call_id = edited.call_id
+                  AND edited.edited_name IS NULL
                   AND speaker_profiles.is_owner = false
-                  AND btrim(speaker_profiles.display_name) <> ''
+                  AND btrim(speaker_profiles.display_name, \(Self.identityWhitespace)) <> ''
                 ORDER BY call_speakers.confidence DESC NULLS LAST, speaker_profiles.display_name
                 LIMIT 1
               ) AS matched ON true
