@@ -21,6 +21,18 @@ public struct CallUploadMetadata: Codable, Sendable, Equatable {
         self.counterpartyName = (name?.isEmpty ?? true) ? nil : name
     }
 
+    /// Decoding is the other way this value is built - from the App Group
+    /// manifest an older build wrote, and from the wire on the Mac - so it runs
+    /// the same rule rather than assigning the stored name verbatim.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            source: try container.decode(CallSource.self, forKey: .source),
+            startedAt: try container.decodeIfPresent(Date.self, forKey: .startedAt),
+            counterpartyName: try container.decodeIfPresent(String.self, forKey: .counterpartyName)
+        )
+    }
+
     public static func sidecarURL(nextTo audioURL: URL) -> URL {
         audioURL.deletingPathExtension().appendingPathExtension("json")
     }
@@ -127,6 +139,13 @@ public enum PendingUploadInboxError: Error, LocalizedError, Equatable {
 /// The extension completes only after `enqueue` has copied the audio and
 /// atomically recorded its manifest. A newly launched app can therefore resume
 /// a background transfer after the sharing process has been terminated.
+///
+/// Opening an inbox never takes the cross-process lock: `persist()` renames an
+/// atomically written file, so an unlocked read sees one whole manifest or the
+/// other, and every operation `reload()`s under the lock before it acts. The
+/// first exclusive wait therefore happens on this actor rather than on whatever
+/// thread - often the main one - happened to construct it while the Share
+/// Extension holds the lock across a multi-hundred-megabyte copy.
 public actor PendingUploadInbox {
     private static let rejectionLogLimit = 20
 
@@ -146,7 +165,7 @@ public actor PendingUploadInbox {
         let manifestURL = directory.appendingPathComponent("pending-uploads.json")
         let manifestLock = ManifestLock(url: directory.appendingPathComponent("pending-uploads.lock"))
         try FileManager.default.createDirectory(at: uploadsDirectory, withIntermediateDirectories: true)
-        let entries = try manifestLock.withExclusiveLock { try Self.loadManifest(at: manifestURL) }
+        let entries = try Self.loadManifest(at: manifestURL)
         self.directory = directory
         self.uploadsDirectory = uploadsDirectory
         self.manifestURL = manifestURL

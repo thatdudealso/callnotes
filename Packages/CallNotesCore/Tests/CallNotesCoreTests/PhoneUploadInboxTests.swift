@@ -374,6 +374,88 @@ import Testing
         #expect(staged.metadata.counterpartyName == nil)
     }
 
+    /// The blank-name rule has to survive decoding, not just construction: a job
+    /// an older build queued with an empty Contact field is still sitting in the
+    /// App Group manifest after an app update, and the Mac decodes whatever the
+    /// phone encodes.
+    @Test func decodingABlankCounterpartyNameYieldsNoNameAtAll() async throws {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let blank = try decoder.decode(
+            CallUploadMetadata.self,
+            from: Data(#"{"source":"iphone_recording","counterpartyName":""}"#.utf8)
+        )
+        let whitespace = try decoder.decode(
+            CallUploadMetadata.self,
+            from: Data(#"{"source":"iphone_recording","counterpartyName":"   "}"#.utf8)
+        )
+        let named = try decoder.decode(
+            CallUploadMetadata.self,
+            from: Data(#"{"source":"iphone_recording","counterpartyName":"  Priya Shah  "}"#.utf8)
+        )
+
+        #expect(blank.counterpartyName == nil)
+        #expect(whitespace.counterpartyName == nil)
+        #expect(named.counterpartyName == "Priya Shah")
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("shared", isDirectory: true)
+        let uploads = directory.appendingPathComponent("uploads", isDirectory: true)
+        try FileManager.default.createDirectory(at: uploads, withIntermediateDirectories: true)
+        let audioURL = uploads.appendingPathComponent("queued.m4a")
+        try Data("recording".utf8).write(to: audioURL)
+        let staleManifest = """
+        [{"id":"\(UUID().uuidString)","audioURL":"\(audioURL.absoluteString)",        "metadata":{"source":"iphone_recording","counterpartyName":""},        "createdAt":"2026-09-10T13:30:00Z","retryCount":0}]
+        """
+        try Data(staleManifest.utf8).write(to: directory.appendingPathComponent("pending-uploads.json"))
+
+        let inbox = try PendingUploadInbox(directory: directory)
+
+        let queued = try #require(await inbox.pending(now: .distantFuture).first)
+        #expect(queued.metadata.counterpartyName == nil)
+
+        let sidecarAudio = root.appendingPathComponent("sidecar.m4a")
+        try Data(#"{"source":"iphone_recording","counterpartyName":"   "}"#.utf8)
+            .write(to: CallUploadMetadata.sidecarURL(nextTo: sidecarAudio))
+        #expect(CallUploadMetadata.loadSidecar(nextTo: sidecarAudio)?.counterpartyName == nil)
+    }
+
+    /// Opening the inbox is what the app does on launch and on a background
+    /// relaunch, from the main thread. The Share Extension can be holding the
+    /// manifest lock across a copy of an hour-long recording, so construction
+    /// must not be what waits for it.
+    @Test func openingTheInboxDoesNotWaitOnTheLockAnotherProcessHolds() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("recording.m4a")
+        try Data("recording".utf8).write(to: source)
+        let directory = root.appendingPathComponent("shared", isDirectory: true)
+        let queued = try await PendingUploadInbox(directory: directory)
+            .enqueue(audioAt: source, metadata: .init(source: .iphoneRecording))
+        let lockURL = directory.appendingPathComponent("pending-uploads.lock")
+
+        let held = open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        #expect(held >= 0)
+        #expect(flock(held, LOCK_EX) == 0)
+
+        let opened = FlagBox()
+        let reopen = Task.detached {
+            let inbox = try PendingUploadInbox(directory: directory)
+            opened.set()
+            return inbox
+        }
+        try await Task.sleep(for: .milliseconds(300))
+
+        #expect(opened.isSet)
+
+        #expect(flock(held, LOCK_UN) == 0)
+        close(held)
+        let reopened = try await reopen.value
+        #expect(await reopened.pending(now: .distantFuture).map(\.id) == [queued.id])
+    }
+
     /// One `SessionUploadDelegate` backs both background sessions. A drain that
     /// the share session triggers must not retire the phone session's durable
     /// transition, or the phone session reports "done" to iOS while its own
