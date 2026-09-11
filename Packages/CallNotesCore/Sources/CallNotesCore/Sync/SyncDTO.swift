@@ -106,4 +106,8 @@ public enum SyncConstants {
     public static let serverPort = 47_800
     public static let bonjourServiceType = "_callnotes._tcp"
     public static let appGroupIdentifier = "group.com.thatdudealso.callnotes"
+    public static let phoneUploadsDirectoryName = "PhoneUploads"
+    public static let sharedAudioDirectoryName = "SharedAudio"
+    public static let uploadRequestsDirectoryName = "UploadRequests"
+    public static let recordingsDirectoryName = "Recordings"
 }

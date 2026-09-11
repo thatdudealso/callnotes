@@ -228,8 +228,8 @@ final class ShareViewController: UIViewController {
 
     private func sweepOrphanedSharedAudio() {
         guard let container = try? sharedContainer() else { return }
-        SharedAudioStaging.sweepOrphans(in: container.appendingPathComponent("SharedAudio", isDirectory: true))
-        let uploads = container.appendingPathComponent("PhoneUploads", isDirectory: true)
+        SharedAudioStaging.sweepOrphans(in: container.appendingPathComponent(SyncConstants.sharedAudioDirectoryName, isDirectory: true))
+        let uploads = container.appendingPathComponent(SyncConstants.phoneUploadsDirectoryName, isDirectory: true)
         Task { try? await PendingUploadInbox(directory: uploads).sweepOrphans() }
     }
 
@@ -237,7 +237,7 @@ final class ShareViewController: UIViewController {
         guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: SyncConstants.appGroupIdentifier) else {
             throw CocoaError(.fileNoSuchFile)
         }
-        let directory = container.appendingPathComponent("SharedAudio", isDirectory: true)
+        let directory = container.appendingPathComponent(SyncConstants.sharedAudioDirectoryName, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let destination = directory.appendingPathComponent(UUID().uuidString).appendingPathExtension(source.pathExtension.isEmpty ? "m4a" : source.pathExtension)
         let lease = try SharedAudioStaging.Lease(audioURL: destination)
@@ -277,7 +277,7 @@ private final class ExtensionUploadTransfer {
     init(container: URL) throws {
         scheduler = ExtensionUploadScheduler(container: container)
         coordinator = try SessionUploadCoordinator(
-            directory: container.appendingPathComponent("PhoneUploads", isDirectory: true),
+            directory: container.appendingPathComponent(SyncConstants.phoneUploadsDirectoryName, isDirectory: true),
             starter: scheduler
         )
         scheduler.attach(coordinator: coordinator)
@@ -326,7 +326,7 @@ private final class ExtensionUploadScheduler: SessionUploadTaskStarting, @unchec
     }
 
     func discardRequestBody(for uploadID: UUID) async {
-        let directory = container.appendingPathComponent("UploadRequests", isDirectory: true)
+        let directory = container.appendingPathComponent(SyncConstants.uploadRequestsDirectoryName, isDirectory: true)
         try? FileManager.default.removeItem(at: directory.appendingPathComponent(uploadID.uuidString).appendingPathExtension("multipart"))
     }
 
@@ -337,7 +337,7 @@ private final class ExtensionUploadScheduler: SessionUploadTaskStarting, @unchec
     private func schedule(job: PendingUpload) throws {
         let (configuration, token) = try requirePairing()
         guard let session = lock.withLock({ self.session }) else { throw CocoaError(.fileNoSuchFile) }
-        let body = try ExtensionMultipartBody.make(job: job, directory: container.appendingPathComponent("UploadRequests", isDirectory: true))
+        let body = try ExtensionMultipartBody.make(job: job, directory: container.appendingPathComponent(SyncConstants.uploadRequestsDirectoryName, isDirectory: true))
         var request = URLRequest(url: configuration.serverURL.appendingPathComponent("calls").appendingPathComponent(job.id.uuidString))
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")

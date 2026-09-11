@@ -15,23 +15,23 @@ enum PhoneSharedContainer {
     }
 
     static func uploadsDirectory() throws -> URL {
-        try directory().appendingPathComponent("PhoneUploads", isDirectory: true)
+        try directory().appendingPathComponent(SyncConstants.phoneUploadsDirectoryName, isDirectory: true)
     }
 
     static func recordingsDirectory() throws -> URL {
-        let url = try directory().appendingPathComponent("Recordings", isDirectory: true)
+        let url = try directory().appendingPathComponent(SyncConstants.recordingsDirectoryName, isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
 
     static func requestBodiesDirectory() throws -> URL {
-        let url = try directory().appendingPathComponent("UploadRequests", isDirectory: true)
+        let url = try directory().appendingPathComponent(SyncConstants.uploadRequestsDirectoryName, isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
 
     static func sharedAudioDirectory() throws -> URL {
-        let url = try directory().appendingPathComponent("SharedAudio", isDirectory: true)
+        let url = try directory().appendingPathComponent(SyncConstants.sharedAudioDirectoryName, isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }

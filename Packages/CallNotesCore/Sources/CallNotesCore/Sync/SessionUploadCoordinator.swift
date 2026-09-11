@@ -96,6 +96,11 @@ public actor SessionUploadCoordinator {
             await starter.discardRequestBody(for: uploadID)
             return
         }
+        if let statusCode, (400..<500).contains(statusCode) {
+            try? await inbox.markCompleted(uploadID)
+            await starter.discardRequestBody(for: uploadID)
+            return
+        }
         if let job = await inbox.pending(now: .distantFuture).first(where: { $0.id == uploadID }),
            await starter.retry(job) {
             return

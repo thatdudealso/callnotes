@@ -237,7 +237,8 @@ private final class ManifestLock: @unchecked Sendable {
         let processLock = ManifestLockRegistry.lock(for: url.path)
         processLock.lock()
         defer { processLock.unlock() }
-        FileManager.default.createFile(atPath: url.path, contents: nil)
+        // O_CREAT without O_TRUNC keeps a stable inode so flock serializes
+        // across processes. FileManager.createFile unlinks and recreates.
         let descriptor = open(url.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
         guard descriptor >= 0, flock(descriptor, LOCK_EX) == 0 else {
             if descriptor >= 0 { close(descriptor) }

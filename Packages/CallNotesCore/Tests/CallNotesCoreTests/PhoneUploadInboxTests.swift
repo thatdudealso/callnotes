@@ -311,6 +311,17 @@ import Testing
         #expect(await reopened.pending(now: .distantFuture).map(\.id) == [job.id])
     }
 
+    @Test func clientErrorResponseDropsTheRejectedRecording() async throws {
+        let harness = try RelaunchHarness()
+        defer { harness.tearDown() }
+        let job = try await harness.enqueueRecording()
+
+        await harness.coordinator.taskCompleted(uploadID: job.id, error: nil, statusCode: 400)
+
+        let reopened = try PendingUploadInbox(directory: harness.inboxDirectory)
+        #expect(await reopened.pending(now: .distantFuture).isEmpty)
+    }
+
     /// 202 is the Mac resuming an upload it already holds, so the phone must
     /// release its copy instead of re-sending the whole recording on every
     /// launch until the Mac finally answers 200.
