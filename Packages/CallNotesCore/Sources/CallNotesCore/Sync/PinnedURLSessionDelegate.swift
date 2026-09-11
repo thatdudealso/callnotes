@@ -13,11 +13,14 @@ public final class PinnedURLSessionDelegate: NSObject, URLSessionDelegate {
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
-        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-              let trust = challenge.protectionSpace.serverTrust,
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        guard let trust = challenge.protectionSpace.serverTrust,
               let certificate = (SecTrustCopyCertificateChain(trust) as? [SecCertificate])?.first
         else {
-            completionHandler(.performDefaultHandling, nil)
+            completionHandler(.cancelAuthenticationChallenge, nil)
             return
         }
         let der = SecCertificateCopyData(certificate) as Data

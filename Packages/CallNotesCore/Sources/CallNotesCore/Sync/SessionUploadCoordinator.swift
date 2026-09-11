@@ -166,10 +166,12 @@ public final class SessionUploadDelegate: NSObject, URLSessionDataDelegate, @unc
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
-        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-              let fingerprint = pinnedFingerprint()
-        else {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust else {
             completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        guard let fingerprint = pinnedFingerprint() else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
             return
         }
         PinnedURLSessionDelegate(fingerprint: fingerprint)

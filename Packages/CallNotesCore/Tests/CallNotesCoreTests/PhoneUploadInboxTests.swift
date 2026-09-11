@@ -131,6 +131,28 @@ import Testing
         #expect(await reopened.pending(now: .distantFuture).map(\.id) == [job.id])
     }
 
+    /// A task queued before the pairing was cleared still gets its TLS
+    /// challenge later. Without a pin there is nothing to compare the Mac's
+    /// self-signed certificate against, so the transfer must fail rather than
+    /// fall back to system trust.
+    @Test func serverTrustChallengeIsCancelledWhenNoPinIsAvailable() throws {
+        let harness = try RelaunchHarness()
+        defer { harness.tearDown() }
+
+        let disposition = harness.disposition(forAuthenticationMethod: NSURLAuthenticationMethodServerTrust)
+
+        #expect(disposition == .cancelAuthenticationChallenge)
+    }
+
+    @Test func nonServerTrustChallengeStillUsesDefaultHandling() throws {
+        let harness = try RelaunchHarness()
+        defer { harness.tearDown() }
+
+        let disposition = harness.disposition(forAuthenticationMethod: NSURLAuthenticationMethodHTTPBasic)
+
+        #expect(disposition == .performDefaultHandling)
+    }
+
     /// UIKit hands the completion handler over before the session delivers its
     /// delegate events, so registration has to land before any of them drain.
     @Test func backgroundHandlerRegisteredJustBeforeTheEventsStillRuns() async throws {
@@ -1004,6 +1026,29 @@ private struct RelaunchHarness {
         return task
     }
 
+    func disposition(forAuthenticationMethod method: String) -> URLSession.AuthChallengeDisposition? {
+        let space = URLProtectionSpace(
+            host: "127.0.0.1",
+            port: SyncConstants.serverPort,
+            protocol: "https",
+            realm: nil,
+            authenticationMethod: method
+        )
+        let challenge = URLAuthenticationChallenge(
+            protectionSpace: space,
+            proposedCredential: nil,
+            previousFailureCount: 0,
+            failureResponse: nil,
+            error: nil,
+            sender: InertChallengeSender()
+        )
+        var observed: URLSession.AuthChallengeDisposition?
+        delegate.urlSession(session, didReceive: challenge) { disposition, _ in
+            observed = disposition
+        }
+        return observed
+    }
+
     func waitForSystemHandler() async throws {
         for _ in 0..<200 where !scheduler.log.contains("released-system-handler") {
             try await Task.sleep(for: .milliseconds(10))
@@ -1014,6 +1059,14 @@ private struct RelaunchHarness {
         session.invalidateAndCancel()
         try? FileManager.default.removeItem(at: root)
     }
+}
+
+/// `URLAuthenticationChallenge` requires a sender; the delegate under test
+/// answers through its completion handler and never touches this one.
+private final class InertChallengeSender: NSObject, URLAuthenticationChallengeSender {
+    func use(_ credential: URLCredential, for challenge: URLAuthenticationChallenge) {}
+    func continueWithoutCredential(for challenge: URLAuthenticationChallenge) {}
+    func cancel(_ challenge: URLAuthenticationChallenge) {}
 }
 
 private final class FakeMirrorStore: MirrorWriting {
