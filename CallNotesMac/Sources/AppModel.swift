@@ -82,6 +82,7 @@ final class AppModel {
     private var syncActivity: NSObjectProtocol?
     var pairingQRPayload: String?
     var pairedDevices: [PairedDevice] = []
+    var pairedDevicesWarning: String?
 
     var selectedCall: Call? {
         calls.first { $0.id == selectedCallID }
@@ -264,12 +265,18 @@ final class AppModel {
         pairedDevices = await server.pairedDevices()
     }
 
+    /// A revoke that could not be written is blocked in memory but comes back on
+    /// the next launch, so the pane the user acted in has to say so: the row
+    /// alone reads like a finished revocation.
     func revokePairedDevice(_ id: UUID) async {
         guard let server = syncServer else { return }
+        let name = pairedDevices.first { $0.id == id }?.name ?? "This iPhone"
+        pairedDevicesWarning = nil
         do {
             try await server.revoke(deviceID: id)
         } catch {
             statusMessage = error.localizedDescription
+            pairedDevicesWarning = "\(name) is blocked now, but the change could not be saved (\(error.localizedDescription)). Revoke it again once the disk is writable, or it is active again after a restart."
         }
         pairedDevices = await server.pairedDevices()
     }

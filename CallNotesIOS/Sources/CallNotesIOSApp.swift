@@ -202,11 +202,11 @@ final class SwiftDataMirrorWriter: MirrorWriting {
             context.insert(call)
             return
         }
-        call.title = remote.title
-        call.summary = remote.summary
-        call.startedAt = remote.startedAt
-        call.source = remote.source
-        call.status = remote.status
+        if call.title != remote.title { call.title = remote.title }
+        if call.summary != remote.summary { call.summary = remote.summary }
+        if call.startedAt != remote.startedAt { call.startedAt = remote.startedAt }
+        if call.source != remote.source { call.source = remote.source }
+        if call.status != remote.status { call.status = remote.status }
     }
 
     func upsertSegment(_ remote: SyncDTO.MirroredSegment, callID: UUID) throws {
@@ -226,11 +226,11 @@ final class SwiftDataMirrorWriter: MirrorWriting {
         if segment.callID != callID {
             segmentIDsByCall[segment.callID]?.remove(remote.id)
             segmentIDsByCall[callID, default: []].insert(remote.id)
+            segment.callID = callID
         }
-        segment.callID = callID
-        segment.speaker = remote.speaker
-        segment.text = remote.text
-        segment.startSec = remote.startSec
+        if segment.speaker != remote.speaker { segment.speaker = remote.speaker }
+        if segment.text != remote.text { segment.text = remote.text }
+        if segment.startSec != remote.startSec { segment.startSec = remote.startSec }
     }
 
     func upsertNote(_ remote: SyncDTO.MirroredNote, callID: UUID) throws {
@@ -245,12 +245,13 @@ final class SwiftDataMirrorWriter: MirrorWriting {
             context.insert(note)
             return
         }
-        note.summary = remote.summary
-        note.decisions = remote.decisions
-        note.actionItems = remote.actionItems
+        if note.summary != remote.summary { note.summary = remote.summary }
+        if note.decisions != remote.decisions { note.decisions = remote.decisions }
+        if note.actionItems != remote.actionItems { note.actionItems = remote.actionItems }
     }
 
     func commit() throws {
+        guard context.hasChanges else { return }
         try context.save()
     }
 }
@@ -500,9 +501,10 @@ struct PhoneSettingsView: View {
         var recordingStarted = false
         var stagingLease: SharedAudioStaging.Lease?
         defer {
-            guard !recordingStarted else { return }
-            stagingLease?.release()
-            Self.deactivateSession()
+            if !recordingStarted {
+                stagingLease?.release()
+                Self.deactivateSession()
+            }
         }
         let url = try PhoneSharedContainer.recordingsDirectory().appendingPathComponent(UUID().uuidString).appendingPathExtension("m4a")
         let lease = try SharedAudioStaging.Lease(audioURL: url)

@@ -32,6 +32,12 @@ struct DevicesSettingsView: View {
             }
 
             Section("Paired phones") {
+                if let warning = appModel.pairedDevicesWarning {
+                    Label(warning, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .accessibilityLabel("Revocation was not saved: \(warning)")
+                }
                 if appModel.pairedDevices.isEmpty {
                     Text("No iPhones are paired.")
                         .foregroundStyle(.secondary)
