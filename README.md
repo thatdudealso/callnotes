@@ -81,11 +81,15 @@ xcodegen generate
 xcodebuild -project CallNotes.xcodeproj -scheme CallNotesMac \
   -destination 'platform=macOS,arch=arm64' build CODE_SIGNING_ALLOWED=NO
 xcodebuild -project CallNotes.xcodeproj -scheme CallNotesIOS \
-  -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO
+  -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO \
+  ARCHS=arm64
 ```
 
 The `CallNotesIOS` scheme builds the iPhone app and embeds its Share
-Extension. Both are entitled to the App Group they hand recordings to the
+Extension. The simulator build is Apple silicon only: FluidAudio vendors
+`NemoTextProcessing.xcframework`, whose simulator slice is `ios-arm64-simulator`
+with no x86_64 counterpart, so dropping `ARCHS=arm64` fails the Share
+Extension link for x86_64. Both are entitled to the App Group they hand recordings to the
 background uploader through, and to the keychain group holding the paired
 Mac's token (both identifiers are listed in [docs/brand.md](docs/brand.md)),
 so a signed build needs a provisioning profile that grants them.

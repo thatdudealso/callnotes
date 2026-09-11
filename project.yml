@@ -84,6 +84,19 @@ targets:
         INFOPLIST_KEY_UIBackgroundModes: [audio]
         CODE_SIGN_ENTITLEMENTS: CallNotesIOS/CallNotesIOS.entitlements
 
+  CallNotesIOSUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - CallNotesIOS/UITests
+    dependencies:
+      - target: CallNotesIOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.thatdudealso.callnotes.ios.UITests
+        GENERATE_INFOPLIST_FILE: true
+        TEST_TARGET_NAME: CallNotesIOS
+
   CallNotesCaptureHarness:
     type: tool
     platform: macOS
@@ -159,8 +172,13 @@ schemes:
     build:
       targets:
         CallNotesIOS: all
+        CallNotesIOSUITests: [test]
     run:
       config: Debug
+    test:
+      config: Debug
+      targets:
+        - CallNotesIOSUITests
   CallNotesCaptureHarness:
     build:
       targets:
