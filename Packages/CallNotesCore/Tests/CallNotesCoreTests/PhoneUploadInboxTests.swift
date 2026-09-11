@@ -1451,6 +1451,54 @@ import Testing
         #expect(try await store.fetchCall(id: uploadID)?.audioPath == originalPath)
     }
 
+    /// The sidecar is the receipt that authorizes the next retry of an upload
+    /// this Mac already accepted, so a store failure part way through a resume
+    /// must leave it alone: unwinding it would answer the retry with a terminal
+    /// refusal, and the phone deletes its only copy of a refused recording.
+    @Test func aResumeThatFailsMidwayKeepsItsUploadReceiptForTheNextRetry() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-resume-receipt-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let store = FlakyFetchStore(failingFetches: 1, afterSuccessfulFetches: 1)
+        let uploadID = UUID()
+        try await store.upsertCall(Call(
+            id: uploadID,
+            source: .iphoneRecording,
+            startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            counterpartyName: "Priya",
+            audioPath: "/tmp/\(uploadID.uuidString)-phone.m4a",
+            sttProvider: .appleSpeech,
+            status: .failed
+        ))
+        let sidecarAnchor = root.appendingPathComponent("\(uploadID.uuidString).m4a")
+        try CallUploadMetadata(source: .iphoneRecording, counterpartyName: "Priya")
+            .writeSidecar(nextTo: sidecarAnchor)
+        let server = MacSyncServer(store: store, receivedUploadsDirectory: root)
+
+        do {
+            _ = try await server.accept(
+                uploadID: uploadID,
+                metadata: CallUploadMetadata(source: .iphoneRecording),
+                audio: Data("recording".utf8),
+                fileExtension: "m4a"
+            )
+            Issue.record("a store blip during a resume should surface as a retryable failure")
+        } catch {
+            #expect(error is StoreReadFailure)
+        }
+        #expect(CallUploadMetadata.loadSidecar(nextTo: sidecarAnchor)?.counterpartyName == "Priya")
+
+        let retried = try await server.accept(
+            uploadID: uploadID,
+            metadata: CallUploadMetadata(source: .iphoneRecording),
+            audio: Data("recording".utf8),
+            fileExtension: "m4a"
+        )
+
+        #expect(retried == .resumed)
+    }
+
     /// The iCloud Drive inbox stores its imports as `.iphoneRecording`, so the
     /// source alone does not make a call addressable: only a row this Mac wrote
     /// from an earlier phone POST, whose staging it still holds, may be resumed.
@@ -1775,17 +1823,27 @@ private struct RelaunchHarness {
 /// profile table, which on Postgres is a full scan plus vector parsing per row.
 struct StoreReadFailure: Error {}
 
-/// A store whose first reads fail the way a Postgres connection blip does, so a
+/// A store whose reads fail the way a Postgres connection blip does, so a
 /// transient failure can be told apart from "this call does not exist".
+/// `afterSuccessfulFetches` lets a blip land on a later read, which is where an
+/// upload that has already been authorized reaches the store.
 private final class FlakyFetchStore: CallStore, @unchecked Sendable {
     private let wrapped = MemoryStore()
     private let lock = NSLock()
     private var failingFetches: Int
+    private var remainingHealthyFetches: Int
 
-    init(failingFetches: Int) { self.failingFetches = failingFetches }
+    init(failingFetches: Int, afterSuccessfulFetches: Int = 0) {
+        self.failingFetches = failingFetches
+        self.remainingHealthyFetches = afterSuccessfulFetches
+    }
 
     func fetchCall(id: UUID) async throws -> Call? {
         let fails: Bool = lock.withLock {
+            guard remainingHealthyFetches == 0 else {
+                remainingHealthyFetches -= 1
+                return false
+            }
             guard failingFetches > 0 else { return false }
             failingFetches -= 1
             return true

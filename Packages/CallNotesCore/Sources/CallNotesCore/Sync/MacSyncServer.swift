@@ -179,6 +179,7 @@ public actor MacSyncServer {
                 release(uploadID)
                 return settled
             }
+            let resuming = owned != nil
             try FileManager.default.createDirectory(at: receivedUploadsDirectory, withIntermediateDirectories: true)
             let staged = try await stage()
             do {
@@ -186,10 +187,10 @@ public actor MacSyncServer {
                     uploadID: uploadID,
                     metadata: staged.metadata,
                     audioURL: staged.audioURL,
-                    resuming: owned != nil
+                    resuming: resuming
                 )
             } catch {
-                discardStaged(staged.audioURL)
+                if !resuming { discardStaged(staged.audioURL) }
                 throw error
             }
         } catch {
