@@ -555,7 +555,7 @@ final class BackgroundUploadCoordinator: @unchecked Sendable {
             return rejection ?? "Pair with your Mac to send pending recordings."
         }
         guard let coordinator else { return rejection ?? "Shared storage for recordings is unavailable." }
-        await coordinator.resume(skipping: await activeTaskIDs())
+        await coordinator.resume(skipping: await activeTaskIDs(), includeBackedOff: true)
         return rejection ?? "Pending recordings will upload in the background."
     }
 

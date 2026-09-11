@@ -58,7 +58,7 @@ public actor MacSyncServer {
     public func recoverStagedUploads() async {
         guard let onAccepted else { return }
         let calls = (try? await store.fetchCalls()) ?? []
-        for call in calls where !isProcessed(call) {
+        for call in calls where !isProcessed(call) && Self.isPhoneUpload(call.source) {
             guard let audioURL = stagedAudioURL(for: call.id) else { continue }
             // The snapshot ages while earlier uploads transcribe, so re-read the
             // call: an arriving POST may already have carried this one home.
@@ -192,6 +192,9 @@ public actor MacSyncServer {
         guard let existing = try await store.fetchCall(id: uploadID) else {
             return try await storeAccepted(uploadID: uploadID, metadata: metadata, audioURL: audioURL)
         }
+        guard Self.isPhoneUpload(existing.source) else {
+            throw HTTPError(.forbidden, message: "That recording is not a phone upload.")
+        }
         if isProcessed(existing) {
             try? FileManager.default.removeItem(at: audioURL)
             return .alreadyStored
@@ -230,6 +233,7 @@ public actor MacSyncServer {
     /// never leaves the recording stuck. `nil` means the bytes are still needed.
     private func settleExistingUpload(_ uploadID: UUID) async -> UploadOutcome? {
         guard let call = try? await store.fetchCall(id: uploadID) else { return nil }
+        guard Self.isPhoneUpload(call.source) else { return nil }
         if isProcessed(call) { return .alreadyStored }
         if processingUploadIDs.contains(uploadID) { return .inProgress }
         guard let staged = stagedAudioURL(for: uploadID) else { return nil }
@@ -290,6 +294,13 @@ public actor MacSyncServer {
     /// Only notes-ready is terminal. `.transcribed` means segments landed and
     /// notes still need to run, so a 201 whose notes stage threw stays eligible
     /// for `settleExistingUpload` / local retry.
+    private static func isPhoneUpload(_ source: CallSource) -> Bool {
+        switch source {
+        case .iphoneRecording, .iphoneMeeting, .iphoneSpeaker: true
+        case .macFaceTime, .macPhone, .macManual, .fileImport: false
+        }
+    }
+
     private func isProcessed(_ call: Call) -> Bool {
         switch call.status {
         case .notesReady: true

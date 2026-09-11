@@ -1351,6 +1351,42 @@ import Testing
         #expect(processed.call.counterpartyName == "Priya")
         #expect(processed.call.startedAt == startedAt)
     }
+
+    @Test func phoneUploadCannotReplaceAMacCapturedCall() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-phone-mac-id-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let store = MemoryStore()
+        let callID = UUID()
+        let originalPath = "/tmp/\(callID.uuidString)-mac.caf"
+        try await store.upsertCall(Call(
+            id: callID,
+            source: .macFaceTime,
+            startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            counterpartyName: "Priya",
+            audioPath: originalPath,
+            sttProvider: .appleSpeech,
+            status: .transcribed
+        ))
+        let server = MacSyncServer(store: store, receivedUploadsDirectory: root)
+
+        do {
+            _ = try await server.accept(
+                uploadID: callID,
+                metadata: CallUploadMetadata(source: .iphoneRecording),
+                audio: Data("recording".utf8),
+                fileExtension: "m4a"
+            )
+            Issue.record("phone upload of a Mac-captured call id should be rejected")
+        } catch {
+            let text = "\(error) \(error.localizedDescription)"
+            #expect(text.contains("not a phone upload"))
+        }
+        let stored = try #require(try await store.fetchCall(id: callID))
+        #expect(stored.source == .macFaceTime)
+        #expect(stored.audioPath == originalPath)
+    }
     #endif
 }
 

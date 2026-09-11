@@ -402,6 +402,57 @@ import Testing
         #expect(FileManager.default.fileExists(atPath: processed.call.audioPath))
     }
 
+    /// A silent inbox file still claims its content hash, so a later drop of
+    /// the same bytes under a new call ID is a duplicate. Retrying the same
+    /// call ID is not.
+    @Test func emptyTranscriptNewCallStillRejectsASecondDropOfTheSameBytes() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-empty-dup-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("silent.wav")
+        try ImportFixtureWriter.writeWAV(to: file, seconds: 0.3)
+
+        let store = MemoryStore()
+        let duplicates = InboxDuplicateIndex()
+        let firstID = UUID()
+        func pipeline() -> ImportPipeline {
+            ImportPipeline(
+                store: store,
+                spine: FileTranscriptionSpine(
+                    speech: ScriptedPCMTranscriber(near: [], far: []),
+                    diarizer: ScriptedDiarizer(clusters: []),
+                    store: store
+                ),
+                duplicates: duplicates,
+                audioRoot: root.appendingPathComponent("audio", isDirectory: true)
+            )
+        }
+
+        await #expect(throws: FileImportError.emptyTranscript) {
+            try await pipeline().`import`(
+                file,
+                engine: .appleSpeech,
+                job: ImportJob(fileName: file.lastPathComponent, sourceURL: file, callID: firstID)
+            )
+        }
+        await #expect(throws: FileImportError.duplicate) {
+            try await pipeline().`import`(
+                file,
+                engine: .appleSpeech,
+                job: ImportJob(fileName: file.lastPathComponent, sourceURL: file, callID: UUID())
+            )
+        }
+        await #expect(throws: FileImportError.emptyTranscript) {
+            try await pipeline().`import`(
+                file,
+                engine: .appleSpeech,
+                job: ImportJob(fileName: file.lastPathComponent, sourceURL: file, callID: firstID)
+            )
+        }
+        #expect(try await store.fetchCalls().count == 1)
+    }
+
     /// A phone upload reaches the pipeline with its Call row already written by
     /// `MacSyncServer.storeAccepted`, so an existing Call must not exempt the
     /// first processing attempt from the content-hash check.

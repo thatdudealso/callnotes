@@ -65,12 +65,19 @@ public struct ImportPipeline: Sendable {
             return storedURL
         }()
         let hash = try await duplicates.fingerprint(of: hashSource)
-        if await duplicates.contains(hash), !alreadyTranscribed {
-            try? FileManager.default.removeItem(at: storedURL)
-            progress.stage = .duplicate
-            progress.fractionComplete = 1
-            emit(progress)
-            throw FileImportError.duplicate
+        if await duplicates.contains(hash) {
+            // A brand-new inbox drop (no Call row) and a first-time phone
+            // upload (Call row written by storeAccepted, no segments yet)
+            // must still hit the hash. Retrying the same inbox call ID after
+            // empty-transcript is not a duplicate of itself.
+            let isInboxRetry = existingCall?.source == .fileImport
+            if !alreadyTranscribed && !isInboxRetry {
+                try? FileManager.default.removeItem(at: storedURL)
+                progress.stage = .duplicate
+                progress.fractionComplete = 1
+                emit(progress)
+                throw FileImportError.duplicate
+            }
         }
 
         var call = existingCall ?? Call(
@@ -118,12 +125,19 @@ public struct ImportPipeline: Sendable {
                 dualInstanceMode: .nearLiveFarBatch
             )
         } else {
-            processed = try await reportingSpine.process(
-                fileURL: storedURL,
-                call: call,
-                profiles: profiles,
-                job: progress
-            )
+            do {
+                processed = try await reportingSpine.process(
+                    fileURL: storedURL,
+                    call: call,
+                    profiles: profiles,
+                    job: progress
+                )
+            } catch FileImportError.emptyTranscript {
+                if existingCall == nil {
+                    _ = await duplicates.register(hash)
+                }
+                throw FileImportError.emptyTranscript
+            }
         }
         call = processed.call
         // Claim the bytes as soon as a transcript exists so a second drop of the

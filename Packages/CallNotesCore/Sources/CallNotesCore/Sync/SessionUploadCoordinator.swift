@@ -75,8 +75,9 @@ public actor SessionUploadCoordinator {
         await inbox.takeRejections()
     }
 
-    public func resume(skipping active: Set<UUID> = []) async {
-        for job in await inbox.pending() where !active.contains(job.id) {
+    public func resume(skipping active: Set<UUID> = [], includeBackedOff: Bool = false) async {
+        let now = includeBackedOff ? Date.distantFuture : Date()
+        for job in await inbox.pending(now: now) where !active.contains(job.id) {
             await starter.start(job)
         }
     }
