@@ -475,11 +475,37 @@ public enum SharedRecordingTitleParser {
         return String(title[title.startIndex..<dot])
     }
 
+    /// The title regex accepts every English region, so the date half has to as
+    /// well. The device that wrote the title rendered it with its own locale, so
+    /// that rendering is tried first; the fixed English orderings behind it cover
+    /// a title shared from a differently configured device. Anything else still
+    /// uploads with no guessed start time.
     private static func date(from text: String) -> Date? {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone.current
-        formatter.dateFormat = "MMM d, yyyy 'at' h:mm a"
-        return formatter.date(from: text)
+        for formatter in dateFormatters {
+            if let date = formatter.date(from: text) { return date }
+        }
+        return nil
+    }
+
+    private static let englishDateFormats = [
+        "MMM d, yyyy 'at' h:mm a",
+        "MMM d, yyyy 'at' HH:mm",
+        "d MMM yyyy 'at' h:mm a",
+        "d MMM yyyy 'at' HH:mm",
+    ]
+
+    private static var dateFormatters: [DateFormatter] {
+        let localized = DateFormatter()
+        localized.locale = .current
+        localized.timeZone = TimeZone.current
+        localized.dateStyle = .medium
+        localized.timeStyle = .short
+        return [localized] + englishDateFormats.map { format in
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone.current
+            formatter.dateFormat = format
+            return formatter
+        }
     }
 }

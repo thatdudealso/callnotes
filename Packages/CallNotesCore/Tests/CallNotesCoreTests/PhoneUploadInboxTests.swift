@@ -23,6 +23,31 @@ import Testing
         #expect(components.minute == 30)
     }
 
+    /// The title regex accepts every English region, so the date half has to as
+    /// well: a device that writes its titles day-month-year on a 24-hour clock
+    /// must pre-fill the start time too, or the Mac files the call at share time
+    /// instead of call time. A date it cannot read still uploads unguessed.
+    @Test func aDayFirstTwentyFourHourTitlePrefillsTheStartTime() throws {
+        let metadata = try #require(
+            SharedRecordingTitleParser.parse("Call with Priya Shah, 10 Sep 2026 at 13:30")
+        )
+
+        #expect(metadata.counterpartyName == "Priya Shah")
+        let components = Calendar.current.dateComponents(
+            [.year, .month, .day, .hour, .minute],
+            from: try #require(metadata.startedAt)
+        )
+        #expect(components.year == 2026)
+        #expect(components.month == 9)
+        #expect(components.day == 10)
+        #expect(components.hour == 13)
+        #expect(components.minute == 30)
+
+        let unreadable = try #require(SharedRecordingTitleParser.parse("Call with Priya Shah, sometime last Tuesday"))
+        #expect(unreadable.counterpartyName == "Priya Shah")
+        #expect(unreadable.startedAt == nil)
+    }
+
     /// A file-backed share hands over a filename, not a bare title, so the start
     /// time must survive the extension the provider appends.
     @Test func fileBackedShareNameStillPrefillsTheStartTime() throws {
@@ -1567,6 +1592,94 @@ import Testing
         let audioURL = root.appendingPathComponent("\(uploadID.uuidString).m4a")
         #expect(CallUploadMetadata.loadSidecar(nextTo: audioURL)?.source == .iphoneRecording)
     }
+
+    /// A resume files the POST the same way a fresh accept does. A device that
+    /// re-sends an upload it owns under an import source must not rewrite the
+    /// receipt or the metadata processing runs on: both decide whether this is a
+    /// phone recording at all.
+    @Test func aResumedUploadIsAlsoFiledAsAPhoneUpload() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-resume-source-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let store = MemoryStore()
+        let uploadID = UUID()
+        try await store.upsertCall(Call(
+            id: uploadID,
+            source: .iphoneRecording,
+            startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            counterpartyName: "Priya",
+            audioPath: "/tmp/\(uploadID.uuidString)-phone.m4a",
+            sttProvider: .appleSpeech,
+            status: .failed
+        ))
+        let anchor = root.appendingPathComponent("\(uploadID.uuidString).m4a")
+        try CallUploadMetadata(source: .iphoneRecording, counterpartyName: "Priya").writeSidecar(nextTo: anchor)
+        let processed = ProcessedUploadMetadata()
+        let server = MacSyncServer(
+            store: store,
+            receivedUploadsDirectory: root,
+            processingAttemptLimit: 1,
+            onAccepted: { _, _, metadata in await processed.record(metadata) }
+        )
+
+        let resumed = try await server.accept(
+            uploadID: uploadID,
+            metadata: CallUploadMetadata(source: .fileImport, counterpartyName: "Priya"),
+            audio: Data("recording".utf8),
+            fileExtension: "m4a"
+        )
+
+        #expect(resumed == .resumed)
+        #expect(CallUploadMetadata.loadSidecar(nextTo: anchor)?.source == .iphoneRecording)
+        var sources = await processed.sources
+        for _ in 0..<200 where sources.isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+            sources = await processed.sources
+        }
+        #expect(sources == [.iphoneRecording])
+    }
+
+    /// An upload identifier must resolve to exactly one staged recording. The
+    /// client names the extension, so a body arriving as `<id>.wav` has to clear
+    /// an `<id>.m4a` an earlier accept left behind: the resume and startup paths
+    /// look the audio up by identifier alone and would transcribe the stale one.
+    @Test func aStagedBodyClearsAnEarlierRecordingUnderAnotherExtension() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-staging-stem-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let uploadID = UUID()
+        try Data("superseded".utf8).write(to: root.appendingPathComponent("\(uploadID.uuidString).m4a"))
+        let store = MemoryStore()
+        let transcribed = TranscribedUploadAudio()
+        let server = MacSyncServer(
+            store: store,
+            receivedUploadsDirectory: root,
+            processingAttemptLimit: 1,
+            onAccepted: { _, audioURL, _ in await transcribed.record(try Data(contentsOf: audioURL)) }
+        )
+
+        let created = try await server.accept(
+            uploadID: uploadID,
+            metadata: CallUploadMetadata(source: .iphoneRecording),
+            audio: Data("current".utf8),
+            fileExtension: "wav"
+        )
+
+        #expect(created == .created)
+        let current = root.appendingPathComponent("\(uploadID.uuidString).wav")
+        let staged = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension.lowercased() != "json" }
+        #expect(staged.map(\.lastPathComponent) == [current.lastPathComponent])
+        #expect(try await store.fetchCall(id: uploadID)?.audioPath == current.path)
+        var heard = await transcribed.recordings
+        for _ in 0..<200 where heard.isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+            heard = await transcribed.recordings
+        }
+        #expect(heard == [Data("current".utf8)])
+    }
     #endif
 }
 
@@ -1614,6 +1727,16 @@ private actor UploadCounter {
 }
 
 private struct ProcessingFailure: Error {}
+
+private actor ProcessedUploadMetadata {
+    private(set) var sources: [CallSource] = []
+    func record(_ metadata: CallUploadMetadata) { sources.append(metadata.source) }
+}
+
+private actor TranscribedUploadAudio {
+    private(set) var recordings: [Data] = []
+    func record(_ audio: Data) { recordings.append(audio) }
+}
 
 private actor ProcessingAttempts {
     private(set) var count = 0

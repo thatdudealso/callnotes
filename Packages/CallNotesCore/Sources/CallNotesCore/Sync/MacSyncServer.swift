@@ -158,8 +158,11 @@ public actor MacSyncServer {
     func accept(uploadID: UUID, metadata: CallUploadMetadata, audio: Data, fileExtension: String) async throws -> UploadOutcome {
         guard !audio.isEmpty else { throw HTTPError(.badRequest, message: "Audio upload is empty.") }
         return try await acceptUpload(uploadID: uploadID) {
-            let audioURL = self.receivedUploadsDirectory
-                .appendingPathComponent("\(uploadID.uuidString).\(MultipartCallUpload.safeAudioExtension(fileExtension))")
+            let audioURL = MultipartCallUpload.makeStagingURL(
+                in: self.receivedUploadsDirectory,
+                uploadID: uploadID,
+                fileExtension: fileExtension
+            )
             try audio.write(to: audioURL, options: .atomic)
             return (metadata, audioURL)
         }
@@ -185,7 +188,7 @@ public actor MacSyncServer {
             do {
                 return try await acceptReserved(
                     uploadID: uploadID,
-                    metadata: staged.metadata,
+                    metadata: Self.filedAsPhoneUpload(staged.metadata),
                     audioURL: staged.audioURL,
                     resuming: resuming
                 )
@@ -255,25 +258,31 @@ public actor MacSyncServer {
         return .resumed
     }
 
-    /// The stored source decides which uploads may later resume this identifier,
-    /// so it is the Mac's to choose: a client that names a Mac or import source
-    /// is still filed as the phone recording it actually sent.
     private func storeAccepted(uploadID: UUID, metadata: CallUploadMetadata, audioURL: URL) async throws -> UploadOutcome {
-        var accepted = metadata
-        if !Self.isPhoneUpload(accepted.source) { accepted.source = .iphoneRecording }
-        try accepted.writeSidecar(nextTo: audioURL)
+        try metadata.writeSidecar(nextTo: audioURL)
         let call = Call(
             id: uploadID,
-            source: accepted.source,
-            startedAt: accepted.startedAt ?? Date(),
-            counterpartyName: accepted.counterpartyName,
+            source: metadata.source,
+            startedAt: metadata.startedAt ?? Date(),
+            counterpartyName: metadata.counterpartyName,
             audioPath: audioURL.path,
             sttProvider: .appleSpeech,
             status: .uploaded
         )
         try await store.upsertCall(call)
-        launchProcessing(uploadID: uploadID, audioURL: audioURL, metadata: accepted)
+        launchProcessing(uploadID: uploadID, audioURL: audioURL, metadata: metadata)
         return .created
+    }
+
+    /// The stored source decides which uploads may later resume this identifier,
+    /// so it is the Mac's to choose: a client that names a Mac or import source
+    /// is still filed as the phone recording it actually sent, whether the POST
+    /// creates the call or resumes one.
+    private static func filedAsPhoneUpload(_ metadata: CallUploadMetadata) -> CallUploadMetadata {
+        guard !isPhoneUpload(metadata.source) else { return metadata }
+        var filed = metadata
+        filed.source = .iphoneRecording
+        return filed
     }
 
     /// Decides what an upload identifier the Mac has already authorized deserves.
@@ -360,9 +369,7 @@ public actor MacSyncServer {
     /// durable record that a retry can resume without re-sending the recording.
     private func stagedAudioURL(for uploadID: UUID) -> URL? {
         let contents = (try? FileManager.default.contentsOfDirectory(at: receivedUploadsDirectory, includingPropertiesForKeys: nil)) ?? []
-        return contents.first {
-            $0.deletingPathExtension().lastPathComponent == uploadID.uuidString && $0.pathExtension.lowercased() != "json"
-        }
+        return contents.first { MultipartCallUpload.isStagedAudio($0, uploadID: uploadID) }
     }
 
     private func discardStaged(_ audioURL: URL) {
@@ -439,6 +446,22 @@ enum MultipartCallUpload {
         return ["wav", "m4a", "caf", "mp3", "aac", "aiff", "aif"].contains(normalized) ? normalized : "m4a"
     }
 
+    /// The client names the staging file's extension, so an upload identifier
+    /// only stays resolvable to one recording if a new body clears every other
+    /// audio file it already has. The metadata sidecar is the upload receipt and
+    /// is left alone.
+    static func makeStagingURL(in directory: URL, uploadID: UUID, fileExtension: String) -> URL {
+        let contents = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        for stale in contents where isStagedAudio(stale, uploadID: uploadID) {
+            try? FileManager.default.removeItem(at: stale)
+        }
+        return directory.appendingPathComponent("\(uploadID.uuidString).\(safeAudioExtension(fileExtension))")
+    }
+
+    static func isStagedAudio(_ url: URL, uploadID: UUID) -> Bool {
+        url.deletingPathExtension().lastPathComponent == uploadID.uuidString && url.pathExtension.lowercased() != "json"
+    }
+
     static func stream(_ body: RequestBody, boundary: String, directory: URL, uploadID: UUID) async throws -> StagedUpload? {
         var parser = try MultipartStreamParser(boundary: boundary, directory: directory, uploadID: uploadID)
         defer { parser.abort() }
@@ -496,9 +519,11 @@ struct MultipartStreamParser {
                     let text = String(decoding: headers, as: UTF8.self)
                     guard text.contains("name=\"audio\"") else { throw CocoaError(.fileReadCorruptFile) }
                     let filename = text.components(separatedBy: "filename=\"").dropFirst().first?.split(separator: "\"").first
-                    let ext = MultipartCallUpload.safeAudioExtension(filename.map { URL(fileURLWithPath: String($0)).pathExtension } ?? "")
-                    let url = directory.appendingPathComponent("\(uploadID.uuidString).\(ext)")
-                    try? FileManager.default.removeItem(at: url)
+                    let url = MultipartCallUpload.makeStagingURL(
+                        in: directory,
+                        uploadID: uploadID,
+                        fileExtension: filename.map { URL(fileURLWithPath: String($0)).pathExtension } ?? ""
+                    )
                     FileManager.default.createFile(atPath: url.path, contents: nil)
                     audioURL = url
                     output = try FileHandle(forWritingTo: url)
