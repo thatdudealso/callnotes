@@ -7,7 +7,11 @@
 ///   swift Scripts/render-app-icon-concepts.swift \
 ///     --out Resources/AppIcon \
 ///     --proof /path/to/firstmate/data/callnotes-app-icon-p1 \
-///     --voices
+///     --voices \
+///     --catalog Resources/Assets.xcassets
+///
+/// `--catalog` writes only the shipped mark (diary-facing-voices).
+/// The menu-bar SVG is independently authored from `drawVoiceMenuMark`.
 
 import AppKit
 import Foundation
@@ -19,12 +23,14 @@ struct Args {
     var outDir: URL
     var proofDir: URL?
     var voicesOnly: Bool
+    var catalogDir: URL?
 
     static func parse() -> Args {
         let argv = CommandLine.arguments
         var out = "Resources/AppIcon"
         var proof: String?
         var voices = false
+        var catalog: String?
         var i = 1
         while i < argv.count {
             switch argv[i] {
@@ -36,6 +42,9 @@ struct Args {
                 proof = argv[i]
             case "--voices":
                 voices = true
+            case "--catalog":
+                i += 1
+                catalog = argv[i]
             default:
                 fputs("unknown argument \(argv[i])\n", stderr)
                 exit(2)
@@ -46,7 +55,8 @@ struct Args {
         return Args(
             outDir: URL(fileURLWithPath: out, relativeTo: cwd).absoluteURL,
             proofDir: proof.map { URL(fileURLWithPath: $0, relativeTo: cwd).absoluteURL },
-            voicesOnly: voices
+            voicesOnly: voices,
+            catalogDir: catalog.map { URL(fileURLWithPath: $0, relativeTo: cwd).absoluteURL }
         )
     }
 }
@@ -527,13 +537,21 @@ func drawLinedVoices(_ ctx: CGContext, size: CGFloat, detail: Detail) {
     }
 }
 
-func drawFacingArcs(_ ctx: CGContext, origin: CGPoint, radii: [CGFloat], facingRight: Bool, color: RGB, width: CGFloat) {
+func drawFacingArcs(
+    _ ctx: CGContext,
+    origin: CGPoint,
+    radii: [CGFloat],
+    facingRight: Bool,
+    color: RGB,
+    width: CGFloat,
+    openness: CGFloat
+) {
     ctx.saveGState()
     ctx.setStrokeColor(color.cg)
     ctx.setLineWidth(width)
     ctx.setLineCap(.round)
-    let start: CGFloat = facingRight ? -.pi * 0.42 : .pi * 0.58
-    let end: CGFloat = facingRight ? .pi * 0.42 : .pi * 1.42
+    let start: CGFloat = facingRight ? -.pi * openness : .pi * (1 - openness)
+    let end: CGFloat = facingRight ? .pi * openness : .pi * (1 + openness)
     for r in radii {
         ctx.addArc(center: origin, radius: r, startAngle: start, endAngle: end, clockwise: false)
         ctx.strokePath()
@@ -544,30 +562,25 @@ func drawFacingArcs(_ ctx: CGContext, origin: CGPoint, radii: [CGFloat], facingR
 func drawFacingVoices(_ ctx: CGContext, size: CGFloat, detail: Detail) {
     let body = drawClosedDiaryBody(ctx, size: size, detail: detail)
     let box = body.content
-    let thick = max(size * 0.018, detail == .tiny ? 1.6 : 11 / 1024 * size)
-    let leftOrigin = CGPoint(x: box.minX + box.width * (detail == .tiny ? 0.12 : 0.16), y: box.midY)
-    let rightOrigin = CGPoint(x: box.maxX - box.width * (detail == .tiny ? 0.12 : 0.16), y: box.midY)
-    let span = box.width * (detail == .tiny ? 0.16 : 0.26)
-    // Left voice: 3 tighter rings. Right voice: 4 looser rings. Different count
-    // so they cannot read as one symmetric decoration.
-    let leftRadii: [CGFloat]
-    let rightRadii: [CGFloat]
-    if detail == .tiny {
-        leftRadii = [span * 0.45, span * 0.90]
-        rightRadii = [span * 0.35, span * 0.70, span * 1.05]
-    } else if detail == .small {
-        leftRadii = [span * 0.35, span * 0.65, span * 0.95]
-        rightRadii = [span * 0.28, span * 0.52, span * 0.76, span * 1.00]
-    } else {
-        leftRadii = [span * 0.30, span * 0.55, span * 0.80]
-        rightRadii = [span * 0.24, span * 0.44, span * 0.64, span * 0.86]
+    // Two heavy rings per voice. Asymmetry is spacing + aperture, not ring count.
+    let thick: CGFloat
+    switch detail {
+    case .tiny: thick = max(2.3, size * 0.14)
+    case .small: thick = max(2.6, size * 0.085)
+    case .full: thick = max(12 / 1024 * size, size * 0.028)
     }
-    if detail != .tiny {
-        fill(ctx, CGPath(ellipseIn: CGRect(x: leftOrigin.x - thick, y: leftOrigin.y - thick, width: thick * 2, height: thick * 2), transform: nil), Palette.tealInk)
-        fill(ctx, CGPath(ellipseIn: CGRect(x: rightOrigin.x - thick, y: rightOrigin.y - thick, width: thick * 2, height: thick * 2), transform: nil), Palette.line)
+    let leftOrigin = CGPoint(x: box.minX + box.width * 0.10, y: box.midY)
+    let rightOrigin = CGPoint(x: box.maxX - box.width * 0.10, y: box.midY)
+    let span = box.width * (detail == .tiny ? 0.28 : 0.32)
+    // Left: compact pair. Right: larger outer ring and more air between rings.
+    let leftRadii = [span * 0.38, span * 0.82]
+    let rightRadii = [span * 0.50, span * 1.12]
+    if detail == .full {
+        fill(ctx, CGPath(ellipseIn: CGRect(x: leftOrigin.x - thick * 0.55, y: leftOrigin.y - thick * 0.55, width: thick * 1.1, height: thick * 1.1), transform: nil), Palette.tealInk)
+        fill(ctx, CGPath(ellipseIn: CGRect(x: rightOrigin.x - thick * 0.45, y: rightOrigin.y - thick * 0.45, width: thick * 0.9, height: thick * 0.9), transform: nil), Palette.line)
     }
-    drawFacingArcs(ctx, origin: leftOrigin, radii: leftRadii, facingRight: true, color: Palette.tealInk, width: thick)
-    drawFacingArcs(ctx, origin: rightOrigin, radii: rightRadii, facingRight: false, color: Palette.line, width: thick)
+    drawFacingArcs(ctx, origin: leftOrigin, radii: leftRadii, facingRight: true, color: Palette.tealInk, width: thick, openness: 0.36)
+    drawFacingArcs(ctx, origin: rightOrigin, radii: rightRadii, facingRight: false, color: Palette.line, width: thick * 0.88, openness: 0.48)
 }
 
 func drawVoiceVariant(_ variant: VoiceVariant, ctx: CGContext, size: CGFloat, clipSquircle: Bool) {
@@ -586,8 +599,15 @@ func drawVoiceVariant(_ variant: VoiceVariant, ctx: CGContext, size: CGFloat, cl
 }
 
 func renderVoiceIcon(_ variant: VoiceVariant, size: Int, squircle: Bool) -> Data {
-    let ctx = makeContext(width: size, height: size)
+    let ctx = makeContext(width: size, height: size, opaque: !squircle)
     drawVoiceVariant(variant, ctx: ctx, size: CGFloat(size), clipSquircle: squircle)
+    return pngData(from: ctx)
+}
+
+func renderVoiceCatalogGlyph(variant: VoiceVariant, state: MenuState, size: Int, color: RGB, template: Bool) -> Data {
+    let ctx = makeContext(width: size, height: size)
+    ctx.clear(CGRect(x: 0, y: 0, width: size, height: size))
+    drawVoiceMenuMark(variant, ctx: ctx, size: CGFloat(size), color: color, state: state, template: template)
     return pngData(from: ctx)
 }
 
@@ -759,7 +779,7 @@ func drawMenuMark(_ concept: Concept, ctx: CGContext, size: CGFloat, color: RGB,
     }
 }
 
-func drawVoiceMenuMark(_ variant: VoiceVariant, ctx: CGContext, size: CGFloat, color: RGB, state: MenuState) {
+func drawVoiceMenuMark(_ variant: VoiceVariant, ctx: CGContext, size: CGFloat, color: RGB, state: MenuState, template: Bool = false) {
     let inset = size * 0.06
     let canvas = CGRect(x: inset, y: inset, width: size - inset * 2, height: size - inset * 2)
     let filled = state != .idle
@@ -836,11 +856,11 @@ func drawVoiceMenuMark(_ variant: VoiceVariant, ctx: CGContext, size: CGFloat, c
             ctx.setBlendMode(.clear)
             let punch = CGRect(x: spineX - max(1.1, size * 0.04), y: cover.minY + cover.height * 0.08, width: max(1.1, size * 0.05), height: cover.height * 0.84)
             fill(ctx, roundedRect(punch, rx: punch.width / 2), RGB(0, 0, 0))
-            let leftO = CGPoint(x: cover.minX + cover.width * 0.32, y: cover.midY)
-            let rightO = CGPoint(x: cover.maxX - cover.width * 0.12, y: cover.midY)
-            let span = cover.width * 0.14
-            drawFacingArcs(ctx, origin: leftO, radii: [span * 0.50, span * 1.00], facingRight: true, color: RGB(0, 0, 0), width: waveW)
-            drawFacingArcs(ctx, origin: rightO, radii: [span * 0.40, span * 0.75, span * 1.15], facingRight: false, color: RGB(0, 0, 0), width: waveW)
+            let leftO = CGPoint(x: cover.minX + cover.width * 0.30, y: cover.midY)
+            let rightO = CGPoint(x: cover.maxX - cover.width * 0.10, y: cover.midY)
+            let span = cover.width * 0.20
+            drawFacingArcs(ctx, origin: leftO, radii: [span * 0.38, span * 0.82], facingRight: true, color: RGB(0, 0, 0), width: max(2.2, waveW * 1.35), openness: 0.36)
+            drawFacingArcs(ctx, origin: rightO, radii: [span * 0.50, span * 1.12], facingRight: false, color: RGB(0, 0, 0), width: max(1.9, waveW * 1.15), openness: 0.48)
             ctx.restoreGState()
         } else {
             stroke(ctx, coverPath, color, width: lineW)
@@ -851,11 +871,11 @@ func drawVoiceMenuMark(_ variant: VoiceVariant, ctx: CGContext, size: CGFloat, c
             ctx.addLine(to: CGPoint(x: spineX, y: cover.maxY - lineW))
             ctx.strokePath()
             ctx.restoreGState()
-            let leftO = CGPoint(x: cover.minX + cover.width * 0.32, y: cover.midY)
-            let rightO = CGPoint(x: cover.maxX - cover.width * 0.12, y: cover.midY)
-            let span = cover.width * 0.14
-            drawFacingArcs(ctx, origin: leftO, radii: [span * 0.50, span * 1.00], facingRight: true, color: color, width: waveW)
-            drawFacingArcs(ctx, origin: rightO, radii: [span * 0.40, span * 0.75, span * 1.15], facingRight: false, color: color, width: waveW)
+            let leftO = CGPoint(x: cover.minX + cover.width * 0.30, y: cover.midY)
+            let rightO = CGPoint(x: cover.maxX - cover.width * 0.10, y: cover.midY)
+            let span = cover.width * 0.20
+            drawFacingArcs(ctx, origin: leftO, radii: [span * 0.38, span * 0.82], facingRight: true, color: color, width: max(2.2, waveW * 1.35), openness: 0.36)
+            drawFacingArcs(ctx, origin: rightO, radii: [span * 0.50, span * 1.12], facingRight: false, color: color, width: max(1.9, waveW * 1.15), openness: 0.48)
         }
     }
 
@@ -881,7 +901,12 @@ func drawVoiceMenuMark(_ variant: VoiceVariant, ctx: CGContext, size: CGFloat, c
         ctx.restoreGState()
         fill(ctx, CGPath(ellipseIn: badge, transform: nil), color)
         ctx.saveGState()
-        ctx.setStrokeColor(RGB(255, 252, 250).cg)
+        if template {
+            ctx.setBlendMode(.clear)
+            ctx.setStrokeColor(RGB(0, 0, 0).cg)
+        } else {
+            ctx.setStrokeColor(RGB(255, 252, 250).cg)
+        }
         ctx.setLineWidth(max(1.2, size * 0.07))
         ctx.setLineCap(.round)
         ctx.addArc(
@@ -1097,11 +1122,10 @@ func svgVoiceMark(_ variant: VoiceVariant) -> String {
         <svg xmlns='http://www.w3.org/2000/svg' width='128' height='128' viewBox='0 0 128 128'>
           <rect x='20' y='12' width='88' height='104' rx='12' fill='none' stroke='\(ink)' stroke-width='8'/>
           <rect x='20' y='12' width='18' height='104' rx='8' fill='\(ink)'/>
-          <path d='M58,44 A18,22 0 0 1 58,84' fill='none' stroke='\(ink)' stroke-width='6' stroke-linecap='round'/>
-          <path d='M52,50 A12,16 0 0 1 52,78' fill='none' stroke='\(ink)' stroke-width='6' stroke-linecap='round'/>
-          <path d='M96,40 A22,28 0 0 0 96,88' fill='none' stroke='\(ink)' stroke-width='6' stroke-linecap='round'/>
-          <path d='M88,48 A14,18 0 0 0 88,80' fill='none' stroke='\(ink)' stroke-width='6' stroke-linecap='round'/>
-          <path d='M82,54 A8,12 0 0 0 82,74' fill='none' stroke='\(ink)' stroke-width='6' stroke-linecap='round'/>
+          <path d='M54,46 A16,20 0 0 1 54,82' fill='none' stroke='\(ink)' stroke-width='8' stroke-linecap='round'/>
+          <path d='M48,52 A10,14 0 0 1 48,76' fill='none' stroke='\(ink)' stroke-width='8' stroke-linecap='round'/>
+          <path d='M100,40 A22,28 0 0 0 100,88' fill='none' stroke='\(ink)' stroke-width='7' stroke-linecap='round'/>
+          <path d='M90,50 A14,18 0 0 0 90,78' fill='none' stroke='\(ink)' stroke-width='7' stroke-linecap='round'/>
         </svg>
         """
     }
@@ -1113,8 +1137,9 @@ func svgForVoice(_ variant: VoiceVariant) -> String {
 
 // MARK: - Raster
 
-func makeContext(width: Int, height: Int) -> CGContext {
+func makeContext(width: Int, height: Int, opaque: Bool = false) -> CGContext {
     let cs = CGColorSpaceCreateDeviceRGB()
+    let alpha: CGImageAlphaInfo = opaque ? .noneSkipLast : .premultipliedLast
     guard let ctx = CGContext(
         data: nil,
         width: width,
@@ -1122,7 +1147,7 @@ func makeContext(width: Int, height: Int) -> CGContext {
         bitsPerComponent: 8,
         bytesPerRow: 0,
         space: cs,
-        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        bitmapInfo: alpha.rawValue
     ) else {
         fputs("failed to create bitmap \(width)x\(height)\n", stderr)
         exit(1)
@@ -1279,6 +1304,183 @@ func renderContactSheet(concepts: [Concept], sizes: [Int]) -> Data {
     return pngData(from: ctx)
 }
 
+// MARK: - Shipped catalog (diary-facing-voices only)
+
+func writeJSON(_ object: String, to url: URL) {
+    try! FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try! object.write(to: url, atomically: true, encoding: .utf8)
+}
+
+func writeCatalog(_ catalogDir: URL) {
+    let shipped = VoiceVariant.facingVoices
+    let fm = FileManager.default
+    try! fm.createDirectory(at: catalogDir, withIntermediateDirectories: true)
+    writeJSON(
+        """
+        {
+          "info" : {
+            "author" : "xcode",
+            "version" : 1
+          }
+        }
+
+        """,
+        to: catalogDir.appendingPathComponent("Contents.json")
+    )
+
+    let appIcon = catalogDir.appendingPathComponent("AppIcon.appiconset")
+    try! fm.createDirectory(at: appIcon, withIntermediateDirectories: true)
+    struct MacIcon {
+        var size: Int
+        var scale: Int
+        var filename: String
+        var pixels: Int { size * scale }
+    }
+    let macIcons: [MacIcon] = [
+        .init(size: 16, scale: 1, filename: "icon_16x16.png"),
+        .init(size: 16, scale: 2, filename: "icon_16x16@2x.png"),
+        .init(size: 32, scale: 1, filename: "icon_32x32.png"),
+        .init(size: 32, scale: 2, filename: "icon_32x32@2x.png"),
+        .init(size: 128, scale: 1, filename: "icon_128x128.png"),
+        .init(size: 128, scale: 2, filename: "icon_128x128@2x.png"),
+        .init(size: 256, scale: 1, filename: "icon_256x256.png"),
+        .init(size: 256, scale: 2, filename: "icon_256x256@2x.png"),
+        .init(size: 512, scale: 1, filename: "icon_512x512.png"),
+        .init(size: 512, scale: 2, filename: "icon_512x512@2x.png"),
+    ]
+    var imagesJSON: [String] = []
+    for icon in macIcons {
+        writePNG(
+            renderVoiceIcon(shipped, size: icon.pixels, squircle: false),
+            to: appIcon.appendingPathComponent(icon.filename)
+        )
+        imagesJSON.append(
+            """
+                {
+                  "filename" : "\(icon.filename)",
+                  "idiom" : "mac",
+                  "scale" : "\(icon.scale)x",
+                  "size" : "\(icon.size)x\(icon.size)"
+                }
+            """
+        )
+    }
+    imagesJSON.append(
+        """
+            {
+              "filename" : "icon_512x512@2x.png",
+              "idiom" : "universal",
+              "platform" : "ios",
+              "size" : "1024x1024"
+            }
+        """
+    )
+    writeJSON(
+        """
+        {
+          "images" : [
+        \(imagesJSON.joined(separator: ",\n"))
+          ],
+          "info" : {
+            "author" : "xcode",
+            "version" : 1
+          }
+        }
+
+        """,
+        to: appIcon.appendingPathComponent("Contents.json")
+    )
+
+    struct MenuAsset {
+        var name: String
+        var state: MenuState
+        var original: Bool
+        var includeDark: Bool
+    }
+    let menuAssets: [MenuAsset] = [
+        .init(name: "CallNotesMark", state: .idle, original: false, includeDark: false),
+        .init(name: "CallNotesMarkFill", state: .armed, original: false, includeDark: false),
+        .init(name: "CallNotesMarkRecording", state: .recording, original: true, includeDark: true),
+        .init(name: "CallNotesMarkProcessing", state: .processing, original: false, includeDark: false),
+    ]
+    let scales = [(1, 18), (2, 36), (3, 54)]
+    for asset in menuAssets {
+        let set = catalogDir.appendingPathComponent("\(asset.name).imageset")
+        try! fm.createDirectory(at: set, withIntermediateDirectories: true)
+        var entries: [String] = []
+        for (scale, pixels) in scales {
+            let filename = scale == 1 ? "\(asset.name).png" : "\(asset.name)@\(scale)x.png"
+            let color = asset.original ? Palette.menuLightGlyph : RGB(0, 0, 0)
+            writePNG(
+                renderVoiceCatalogGlyph(
+                    variant: shipped,
+                    state: asset.state,
+                    size: pixels,
+                    color: color,
+                    template: !asset.original
+                ),
+                to: set.appendingPathComponent(filename)
+            )
+            entries.append(
+                """
+                    {
+                      "filename" : "\(filename)",
+                      "idiom" : "universal",
+                      "scale" : "\(scale)x"
+                    }
+                """
+            )
+            if asset.includeDark {
+                let darkName = scale == 1 ? "\(asset.name)-dark.png" : "\(asset.name)-dark@\(scale)x.png"
+                writePNG(
+                    renderVoiceCatalogGlyph(
+                        variant: shipped,
+                        state: asset.state,
+                        size: pixels,
+                        color: Palette.menuDarkGlyph,
+                        template: false
+                    ),
+                    to: set.appendingPathComponent(darkName)
+                )
+                entries.append(
+                    """
+                        {
+                          "appearances" : [
+                            {
+                              "appearance" : "luminosity",
+                              "value" : "dark"
+                            }
+                          ],
+                          "filename" : "\(darkName)",
+                          "idiom" : "universal",
+                          "scale" : "\(scale)x"
+                        }
+                    """
+                )
+            }
+        }
+        let intent = asset.original ? "original" : "template"
+        writeJSON(
+            """
+            {
+              "images" : [
+            \(entries.joined(separator: ",\n"))
+              ],
+              "info" : {
+                "author" : "xcode",
+                "version" : 1
+              },
+              "properties" : {
+                "template-rendering-intent" : "\(intent)"
+              }
+            }
+
+            """,
+            to: set.appendingPathComponent("Contents.json")
+        )
+    }
+}
+
 // MARK: - Main
 
 let args = Args.parse()
@@ -1381,4 +1583,8 @@ publish(voiceSheet, name: "voice-waves-contact-sheet.png")
 fputs("wrote concepts to \(args.outDir.path)\n", stderr)
 if let proof = args.proofDir {
     fputs("wrote proofs to \(proof.path)\n", stderr)
+}
+if let catalog = args.catalogDir {
+    writeCatalog(catalog)
+    fputs("wrote catalog to \(catalog.path)\n", stderr)
 }

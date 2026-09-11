@@ -7,12 +7,15 @@ enum RecordingState: Equatable, Sendable {
     case recording
     case processing
 
-    var systemImage: String {
+    /// Asset-catalog image of the shipped diary-facing-voices mark.
+    /// Idle is outline, armed is filled; recording and processing keep that
+    /// filled mark and layer the red-dot or spinner cue on top.
+    var menuBarImage: String {
         switch self {
-        case .idle: return "phone.badge.waveform"
-        case .armed: return "phone.badge.waveform.fill"
-        case .recording: return "record.circle"
-        case .processing: return "arrow.triangle.2.circlepath"
+        case .idle: return "CallNotesMark"
+        case .armed: return "CallNotesMarkFill"
+        case .recording: return "CallNotesMarkRecording"
+        case .processing: return "CallNotesMarkProcessing"
         }
     }
 }

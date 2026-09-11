@@ -8,7 +8,7 @@ struct CallNotesApp: App {
     @State private var model = AppModel()
 
     var body: some Scene {
-        MenuBarExtra("CallNotes", systemImage: coordinator.recordingState.systemImage) {
+        MenuBarExtra("CallNotes", image: coordinator.recordingState.menuBarImage) {
             MenuBarContentView(coordinator: coordinator, model: model)
         }
 
