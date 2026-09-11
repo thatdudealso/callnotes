@@ -267,13 +267,14 @@ final class AppModel {
 
     /// A revoke that could not be written is blocked in memory but comes back on
     /// the next launch, so the pane the user acted in has to say so. The failure
-    /// is kept per device: the row it belongs to is the one that reads wrong, and
-    /// revoking a different phone must not clear a warning that is still true.
+    /// is kept per device, because that row is the one that reads wrong. A write
+    /// that lands serialises every device, so it clears all of them: an earlier
+    /// revocation this snapshot just saved is no longer at risk.
     func revokePairedDevice(_ id: UUID) async {
         guard let server = syncServer else { return }
         do {
             try await server.revoke(deviceID: id)
-            unsavedRevocations[id] = nil
+            unsavedRevocations.removeAll()
         } catch {
             statusMessage = error.localizedDescription
             unsavedRevocations[id] = error.localizedDescription

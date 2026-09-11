@@ -171,9 +171,15 @@ public actor PendingUploadInbox {
             guard let index = entries.firstIndex(where: { $0.id == id }) else {
                 throw PendingUploadInboxError.unknownUpload
             }
+            let previousEntries = entries
             let entry = entries.remove(at: index)
+            do {
+                try persist()
+            } catch {
+                entries = previousEntries
+                throw error
+            }
             try? FileManager.default.removeItem(at: entry.audioURL)
-            try persist()
         }
     }
 

@@ -118,6 +118,33 @@ import Testing
         #expect(uploads.isEmpty)
     }
 
+    /// Deleting the audio before the shortened manifest is durable would leave an
+    /// entry the next process reloads but can never start, complete, or sweep,
+    /// because `pending()` drops entries whose file is gone.
+    @Test func completionThatCannotPersistKeepsTheQueuedRecording() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("recording.m4a")
+        try Data("recording".utf8).write(to: source)
+        let directory = root.appendingPathComponent("shared", isDirectory: true)
+        let inbox = try PendingUploadInbox(directory: directory)
+        let job = try await inbox.enqueue(audioAt: source, metadata: .init(source: .iphoneRecording))
+
+        let failingInbox = try PendingUploadInbox(
+            directory: directory,
+            persistenceWriter: { _, _ in throw CocoaError(.fileWriteNoPermission) }
+        )
+        await #expect(throws: CocoaError.self) {
+            try await failingInbox.markCompleted(job.id)
+        }
+
+        #expect(FileManager.default.fileExists(atPath: job.audioURL.path))
+        #expect(await failingInbox.pending().map(\.id) == [job.id])
+        let reopened = try PendingUploadInbox(directory: directory)
+        #expect(await reopened.pending().map(\.id) == [job.id])
+    }
+
     @Test func failedRelaunchUploadRemainsQueuedForRetry() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
