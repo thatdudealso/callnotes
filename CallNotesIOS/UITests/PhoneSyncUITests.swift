@@ -42,10 +42,18 @@ final class PhoneSyncUITests: XCTestCase {
         XCTAssertTrue(unnamed.waitForExistence(timeout: 20), "The mirrored call with no counterparty name never appeared.")
         XCTAssertTrue(callRow(in: app, headline: "Priya Shah").waitForExistence(timeout: 10))
         // The status a row carries as its accessibility value is a phrase,
-        // never the wire token.
+        // never the wire token. These are every phrase `CallStatus.displayName`
+        // owns; no raw `CallStatus` rawValue is among them, so a row that spoke
+        // its wire token would match none of them.
+        let statusPhrases: Set<String> = ["Recording", "Processing", "Writing notes", "Notes ready", "Could not finish"]
+        let spoken = callRow(in: app, headline: "Priya Shah").value as? String
+        XCTAssertTrue(
+            statusPhrases.contains(spoken ?? ""),
+            "A Calls row spoke \"\(spoken ?? "nothing")\" as its status instead of a human phrase."
+        )
         XCTAssertFalse(
             app.descendants(matching: .any)
-                .matching(NSPredicate(format: "label CONTAINS %@", "notes_ready"))
+                .matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", "notes_ready", "notes_ready"))
                 .firstMatch.exists,
             "A Calls row spoke the serialized status token instead of a phrase."
         )
