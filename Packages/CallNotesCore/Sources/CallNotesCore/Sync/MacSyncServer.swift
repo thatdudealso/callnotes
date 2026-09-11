@@ -63,6 +63,10 @@ public actor MacSyncServer {
             // The snapshot ages while earlier uploads transcribe, so re-read the
             // call: an arriving POST may already have carried this one home.
             guard let current = try? await store.fetchCall(id: call.id), !isProcessed(current) else { continue }
+            // A reservation is held for the whole multipart stream, and the
+            // stream writes the very file this loop just found, so a reserved
+            // upload is a half-written one. The POST that owns it finishes it.
+            guard !acceptingUploadIDs.contains(call.id) else { continue }
             let metadata = CallUploadMetadata.loadSidecar(nextTo: audioURL)
                 ?? CallUploadMetadata(source: current.source, startedAt: current.startedAt, counterpartyName: current.counterpartyName)
             guard processingUploadIDs.insert(call.id).inserted else { continue }
@@ -302,11 +306,12 @@ public actor MacSyncServer {
         }
     }
 
-    private func reserve(_ uploadID: UUID) -> Bool {
+    @discardableResult
+    func reserve(_ uploadID: UUID) -> Bool {
         acceptingUploadIDs.insert(uploadID).inserted
     }
 
-    private func release(_ uploadID: UUID) {
+    func release(_ uploadID: UUID) {
         acceptingUploadIDs.remove(uploadID)
     }
 

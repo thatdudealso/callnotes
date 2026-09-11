@@ -938,6 +938,50 @@ import Testing
         }
     }
 
+    /// The staging path a POST streams into is the same path recovery looks for,
+    /// so recovering a reserved upload would transcribe a half-written file and
+    /// then answer 200 for it, letting the phone delete the only full copy.
+    @Test func startupRecoverySkipsAnUploadAPostIsStillStreaming() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-recovery-race-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let store = MemoryStore()
+        let uploadID = UUID()
+        let audioURL = root.appendingPathComponent("\(uploadID.uuidString).m4a")
+        try Data("partially written".utf8).write(to: audioURL)
+        try CallUploadMetadata(source: .iphoneRecording, startedAt: Date()).writeSidecar(nextTo: audioURL)
+        try await store.upsertCall(Call(
+            id: uploadID,
+            source: .iphoneRecording,
+            startedAt: Date(),
+            audioPath: audioURL.path,
+            sttProvider: .appleSpeech,
+            status: .transcribed
+        ))
+
+        let recovered = RecoveredUploads()
+        let server = MacSyncServer(store: store, receivedUploadsDirectory: root, onAccepted: { callID, _, _ in
+            recovered.record(callID)
+            guard var call = try await store.fetchCall(id: callID) else { throw ProcessingFailure() }
+            call.status = .notesReady
+            try await store.upsertCall(call)
+        })
+
+        #expect(await server.reserve(uploadID))
+        await server.recoverStagedUploads()
+
+        #expect(recovered.ids.isEmpty)
+        #expect(try await store.fetchCall(id: uploadID)?.status == .transcribed)
+
+        await server.release(uploadID)
+        await server.recoverStagedUploads()
+
+        #expect(recovered.ids == [uploadID])
+        #expect(try await store.fetchCall(id: uploadID)?.status == .notesReady)
+    }
+
     /// A call the Mac gave up on must not keep reading as work in progress on
     /// the phone, where the mirrored summary is the only visible status.
     @Test func mirrorDoesNotDescribeAGivenUpRecordingAsStillProcessing() async throws {
@@ -1299,6 +1343,14 @@ private final class FakeMirrorStore: MirrorWriting {
 
 private final class ProbeAttempts: @unchecked Sendable {
     var count = 0
+}
+
+private final class RecoveredUploads: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [UUID] = []
+
+    var ids: [UUID] { lock.withLock { recorded } }
+    func record(_ id: UUID) { lock.withLock { recorded.append(id) } }
 }
 
 
