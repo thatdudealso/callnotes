@@ -384,18 +384,25 @@ struct PhoneSettingsView: View {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.record, mode: .measurement)
         try session.setActive(true)
+        var recordingStarted = false
+        var stagingLease: SharedAudioStaging.Lease?
+        defer {
+            guard !recordingStarted else { return }
+            stagingLease?.release()
+            Self.deactivateSession()
+        }
         let url = try PhoneSharedContainer.recordingsDirectory().appendingPathComponent(UUID().uuidString).appendingPathExtension("m4a")
         let lease = try SharedAudioStaging.Lease(audioURL: url)
+        stagingLease = lease
         recorder = try AVAudioRecorder(url: url, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 44_100, AVNumberOfChannelsKey: 1])
         guard recorder?.record() == true else {
-            lease.release()
             recorder = nil
-            Self.deactivateSession()
             throw NSError(domain: "CallNotes.Recorder", code: 2, userInfo: [NSLocalizedDescriptionKey: "Could not start recording."])
         }
         self.lease = lease
         captureStartedAt = Date()
         isRecording = true
+        recordingStarted = true
     }
 
     /// The capture start, not the moment Stop was tapped: history ordering and

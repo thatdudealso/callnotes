@@ -106,6 +106,7 @@ public actor PairingAuthority {
     private let maximumAttempts: Int
     private let attemptWindow: TimeInterval
     private let persistenceURL: URL?
+    private let persistenceWriter: @Sendable (URL, Data) throws -> Void
     private var pendingCodes: [String: PendingCode] = [:]
     private var devices: [UUID: StoredDevice] = [:]
     private var failedAttemptDates: [Date] = []
@@ -115,13 +116,17 @@ public actor PairingAuthority {
         codeLifetime: TimeInterval = 120,
         maximumAttempts: Int = 5,
         attemptWindow: TimeInterval = 15 * 60,
-        persistenceURL: URL? = nil
+        persistenceURL: URL? = nil,
+        persistenceWriter: (@Sendable (URL, Data) throws -> Void)? = nil
     ) {
         self.now = now
         self.codeLifetime = codeLifetime
         self.maximumAttempts = maximumAttempts
         self.attemptWindow = attemptWindow
         self.persistenceURL = persistenceURL
+        self.persistenceWriter = persistenceWriter ?? { url, data in
+            try Self.writeSnapshot(to: url, data: data)
+        }
         if let persistenceURL {
             devices = Self.load(from: persistenceURL)
         }
@@ -155,7 +160,12 @@ public actor PairingAuthority {
         let device = PairedDevice(id: UUID(), name: deviceName, pairedAt: now())
         let token = Self.makeToken()
         devices[device.id] = StoredDevice(device: device, tokenDigest: Self.digest(token))
-        persist()
+        do {
+            try persist()
+        } catch {
+            devices[device.id] = nil
+            throw error
+        }
         return SyncDTO.PairResponse(deviceID: device.id, token: token)
     }
 
@@ -168,15 +178,20 @@ public actor PairingAuthority {
         var updated = stored.device
         updated.lastSeenAt = now()
         devices[id] = StoredDevice(device: updated, tokenDigest: stored.tokenDigest)
-        persist()
         return updated
     }
 
     public func revoke(deviceID: UUID) throws {
         guard var stored = devices[deviceID] else { throw PairingError.unknownDevice }
+        let original = stored
         stored.device.revokedAt = now()
         devices[deviceID] = stored
-        persist()
+        do {
+            try persist()
+        } catch {
+            devices[deviceID] = original
+            throw error
+        }
     }
 
     public func pairedDevices() -> [PairedDevice] {
@@ -193,15 +208,19 @@ public actor PairingAuthority {
         pendingCodes = pendingCodes.filter { $0.value.expiresAt >= cutoff }
     }
 
-    private func persist() {
+    private func persist() throws {
         guard let persistenceURL else { return }
         let snapshot = Snapshot(devices: devices.values.map { Snapshot.Record(device: $0.device, tokenDigest: $0.tokenDigest) })
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys]
-        guard let data = try? encoder.encode(snapshot) else { return }
-        try? FileManager.default.createDirectory(at: persistenceURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: persistenceURL, options: .atomic)
+        let data = try encoder.encode(snapshot)
+        try persistenceWriter(persistenceURL, data)
+    }
+
+    private static func writeSnapshot(to url: URL, data: Data) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: url, options: .atomic)
     }
 
     private static func load(from url: URL) -> [UUID: StoredDevice] {

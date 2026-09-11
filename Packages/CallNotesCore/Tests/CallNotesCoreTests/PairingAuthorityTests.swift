@@ -50,6 +50,30 @@ import Testing
         #expect(await afterRevoke.authorize(token: pair.token) == nil)
     }
 
+    @Test func revocationFailsWhenItsSnapshotCannotBePersisted() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-paired-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let original = PairingAuthority(persistenceURL: url)
+        let ticket = await original.issueTicket(
+            serverURL: URL(string: "https://macbook.local:47800")!,
+            certificateFingerprint: "AABBCC"
+        )
+        let pair = try await original.pair(PairingRequest(code: ticket.code, deviceName: "Maya’s iPhone"))
+        let failing = PairingAuthority(
+            persistenceURL: url,
+            persistenceWriter: { _, _ in throw CocoaError(.fileWriteNoPermission) }
+        )
+
+        await #expect(throws: CocoaError.self) {
+            try await failing.revoke(deviceID: pair.deviceID)
+        }
+        #expect(await failing.authorize(token: pair.token)?.id == pair.deviceID)
+
+        let reloaded = PairingAuthority(persistenceURL: url)
+        #expect(await reloaded.authorize(token: pair.token)?.id == pair.deviceID)
+    }
+
     @Test func pairingRateLimitExpiresWithTheAttemptWindow() async throws {
         let clock = MutableClock(Date(timeIntervalSince1970: 1_700_000_000))
         let authority = PairingAuthority(
