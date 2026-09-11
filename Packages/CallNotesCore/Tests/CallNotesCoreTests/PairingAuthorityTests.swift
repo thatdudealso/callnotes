@@ -77,6 +77,42 @@ import Testing
         #expect(await reloaded.authorize(token: pair.token)?.id == pair.deviceID)
     }
 
+    /// Every write serialises the whole device set, so a later pairing carries an
+    /// earlier failed revocation to disk. The Devices pane must stop warning that
+    /// the revoked phone comes back after a restart, because it no longer does.
+    @Test func aLaterPairingMakesAnEarlierFailedRevocationDurable() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-paired-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let writes = FlakyWriter()
+        let authority = PairingAuthority(
+            persistenceURL: url,
+            persistenceWriter: { destination, data in try writes.write(data, to: destination) }
+        )
+        let firstTicket = await authority.issueTicket(
+            serverURL: URL(string: "https://macbook.local:47800")!,
+            certificateFingerprint: "AABBCC"
+        )
+        let lost = try await authority.pair(PairingRequest(code: firstTicket.code, deviceName: "Lost iPhone"))
+
+        writes.fail = true
+        await #expect(throws: CocoaError.self) {
+            try await authority.revoke(deviceID: lost.deviceID)
+        }
+        #expect(await authority.unsavedRevocationIDs() == [lost.deviceID])
+
+        writes.fail = false
+        let secondTicket = await authority.issueTicket(
+            serverURL: URL(string: "https://macbook.local:47800")!,
+            certificateFingerprint: "AABBCC"
+        )
+        _ = try await authority.pair(PairingRequest(code: secondTicket.code, deviceName: "New iPhone"))
+
+        #expect(await authority.unsavedRevocationIDs().isEmpty)
+        let reloaded = PairingAuthority(persistenceURL: url)
+        #expect(await reloaded.authorize(token: lost.token) == nil)
+    }
+
     @Test func pairingRateLimitExpiresWithTheAttemptWindow() async throws {
         let clock = MutableClock(Date(timeIntervalSince1970: 1_700_000_000))
         let authority = PairingAuthority(
@@ -211,4 +247,14 @@ import Testing
 private final class MutableClock: @unchecked Sendable {
     var now: Date
     init(_ now: Date) { self.now = now }
+}
+
+/// A snapshot volume that can be taken away and given back between writes.
+private final class FlakyWriter: @unchecked Sendable {
+    var fail = false
+
+    func write(_ data: Data, to url: URL) throws {
+        if fail { throw CocoaError(.fileWriteNoPermission) }
+        try data.write(to: url, options: .atomic)
+    }
 }

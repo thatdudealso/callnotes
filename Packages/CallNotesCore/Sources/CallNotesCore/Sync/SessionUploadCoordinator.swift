@@ -61,6 +61,10 @@ public actor SessionUploadCoordinator {
         return job
     }
 
+    public func sweepOrphanedUploads() async {
+        await inbox.sweepOrphans()
+    }
+
     public func resume(skipping active: Set<UUID> = []) async {
         for job in await inbox.pending() where !active.contains(job.id) {
             await starter.start(job)

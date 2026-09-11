@@ -110,6 +110,7 @@ public actor PairingAuthority {
     private var pendingCodes: [String: PendingCode] = [:]
     private var devices: [UUID: StoredDevice] = [:]
     private var failedAttemptDates: [Date] = []
+    private var unpersistedRevocations: Set<UUID> = []
 
     public init(
         now: @escaping @Sendable () -> Date = Date.init,
@@ -188,7 +189,20 @@ public actor PairingAuthority {
         guard var stored = devices[deviceID] else { throw PairingError.unknownDevice }
         stored.device.revokedAt = now()
         devices[deviceID] = stored
-        try persist()
+        do {
+            try persist()
+        } catch {
+            unpersistedRevocations.insert(deviceID)
+            throw error
+        }
+    }
+
+    /// Devices revoked in memory whose revocation has not reached disk, so they
+    /// authorize again after a restart. Only this type knows: every write
+    /// serialises the whole snapshot, so a later `pair` makes an earlier failed
+    /// revocation durable without the caller that attempted it ever hearing.
+    public func unsavedRevocationIDs() -> Set<UUID> {
+        unpersistedRevocations
     }
 
     public func pairedDevices() -> [PairedDevice] {
@@ -213,6 +227,7 @@ public actor PairingAuthority {
         encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(snapshot)
         try persistenceWriter(persistenceURL, data)
+        unpersistedRevocations.removeAll()
     }
 
     private static func writeSnapshot(to url: URL, data: Data) throws {

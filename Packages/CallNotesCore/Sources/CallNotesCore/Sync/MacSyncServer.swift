@@ -48,6 +48,10 @@ public actor MacSyncServer {
         await pairing.pairedDevices()
     }
 
+    public func unsavedRevocationIDs() async -> Set<UUID> {
+        await pairing.unsavedRevocationIDs()
+    }
+
     /// One stuck upload at a time. Each one drives a whole `FileTranscriptionSpine`,
     /// so fanning the backlog out would run N SpeechAnalyzer instances against the
     /// same ANE and N deep-notes requests against the same 60s budget.

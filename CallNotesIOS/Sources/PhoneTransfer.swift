@@ -501,6 +501,7 @@ final class BackgroundUploadCoordinator: @unchecked Sendable {
     }
 
     func resume() async -> String {
+        await coordinator?.sweepOrphanedUploads()
         guard PhonePairingStore.load() != nil else {
             return "Pair with your Mac to send pending recordings."
         }

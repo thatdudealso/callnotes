@@ -145,6 +145,31 @@ import Testing
         #expect(await reopened.pending().map(\.id) == [job.id])
     }
 
+    /// A share extension killed mid-copy leaves a full-size file in `uploads/`
+    /// that no manifest entry names, so nothing would ever start, complete, or
+    /// clean it.
+    @Test func launchSweepDropsUnqueuedUploadsAndKeepsPendingOnes() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("recording.m4a")
+        try Data("recording".utf8).write(to: source)
+        let directory = root.appendingPathComponent("shared", isDirectory: true)
+        let inbox = try PendingUploadInbox(directory: directory)
+        let job = try await inbox.enqueue(audioAt: source, metadata: .init(source: .iphoneRecording))
+        let orphan = directory
+            .appendingPathComponent("uploads", isDirectory: true)
+            .appendingPathComponent("\(UUID().uuidString).m4a")
+        try Data("abandoned".utf8).write(to: orphan)
+
+        let relaunched = try PendingUploadInbox(directory: directory)
+        await relaunched.sweepOrphans()
+
+        #expect(!FileManager.default.fileExists(atPath: orphan.path))
+        #expect(FileManager.default.fileExists(atPath: job.audioURL.path))
+        #expect(await inbox.pending().map(\.id) == [job.id])
+    }
+
     @Test func failedRelaunchUploadRemainsQueuedForRetry() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

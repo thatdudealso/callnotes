@@ -183,6 +183,25 @@ public actor PendingUploadInbox {
         }
     }
 
+    /// Every write to `uploads/` happens under the manifest lock, so a file that
+    /// has no entry while the lock is held belongs to a process that died
+    /// mid-copy or to a completion whose delete failed. Nothing can reach it
+    /// again: `pending()` keys off entries, so it would sit in the App Group
+    /// forever otherwise.
+    public func sweepOrphans() {
+        try? withManifestLock {
+            reload()
+            let queued = Set(entries.map(\.audioURL.lastPathComponent))
+            let staged = (try? FileManager.default.contentsOfDirectory(
+                at: uploadsDirectory,
+                includingPropertiesForKeys: nil
+            )) ?? []
+            for file in staged where !queued.contains(file.lastPathComponent) {
+                try? FileManager.default.removeItem(at: file)
+            }
+        }
+    }
+
     /// The manifest, not this actor, is the source of truth: the Share Extension
     /// and the app each hold their own inbox over the same App Group directory.
     private func reload() {

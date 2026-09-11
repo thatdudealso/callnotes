@@ -262,24 +262,29 @@ final class AppModel {
         guard let serverURL = URL(string: "https://\(host):\(SyncConstants.serverPort)") else { return }
         let ticket = await server.pairingTicket(serverURL: serverURL, identity: identity)
         pairingQRPayload = try? ticket.qrPayload()
-        pairedDevices = await server.pairedDevices()
+        await refreshPairedDevices(from: server)
     }
 
     /// A revoke that could not be written is blocked in memory but comes back on
-    /// the next launch, so the pane the user acted in has to say so. The failure
-    /// is kept per device, because that row is the one that reads wrong. A write
-    /// that lands serialises every device, so it clears all of them: an earlier
-    /// revocation this snapshot just saved is no longer at risk.
+    /// the next launch, so the pane the user acted in has to say so. Which ones
+    /// are still at risk is the authority's to answer: a phone pairing over
+    /// `POST /pair` writes the same whole-device snapshot without passing
+    /// through here, and that write makes an earlier failed revocation durable.
     func revokePairedDevice(_ id: UUID) async {
         guard let server = syncServer else { return }
         do {
             try await server.revoke(deviceID: id)
-            unsavedRevocations.removeAll()
         } catch {
             statusMessage = error.localizedDescription
             unsavedRevocations[id] = error.localizedDescription
         }
+        await refreshPairedDevices(from: server)
+    }
+
+    private func refreshPairedDevices(from server: MacSyncServer) async {
         pairedDevices = await server.pairedDevices()
+        let stillUnsaved = await server.unsavedRevocationIDs()
+        unsavedRevocations = unsavedRevocations.filter { stillUnsaved.contains($0.key) }
     }
 
     /// The content-hash index is what keeps a re-shared recording from becoming a

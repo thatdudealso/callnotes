@@ -229,6 +229,8 @@ final class ShareViewController: UIViewController {
     private func sweepOrphanedSharedAudio() {
         guard let container = try? sharedContainer() else { return }
         SharedAudioStaging.sweepOrphans(in: container.appendingPathComponent("SharedAudio", isDirectory: true))
+        let uploads = container.appendingPathComponent("PhoneUploads", isDirectory: true)
+        Task { try? await PendingUploadInbox(directory: uploads).sweepOrphans() }
     }
 
     private nonisolated static func stageSharedAudio(_ source: URL, inPlace: Bool) throws -> SharedAudioStaging.Lease {
