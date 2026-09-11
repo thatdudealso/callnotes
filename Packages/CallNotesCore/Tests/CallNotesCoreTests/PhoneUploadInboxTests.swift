@@ -287,6 +287,27 @@ import Testing
         #expect(await reopened.pending().map(\.id) == [job.id])
     }
 
+    /// The Sync button is the only affordance for forcing a queued recording,
+    /// so it ignores the retry backoff. An automatic launch resume must not, or
+    /// every launch rebuilds the whole multipart body of every backed-off job
+    /// against a Mac that is still unreachable.
+    @Test func onlyAUserInitiatedResumeStartsABackedOffUpload() async throws {
+        let harness = try RelaunchHarness()
+        defer { harness.tearDown() }
+        let job = try await harness.enqueueRecording()
+        let inbox = try PendingUploadInbox(directory: harness.inboxDirectory)
+        try await inbox.markFailed(job.id)
+        #expect(await inbox.pending().isEmpty)
+
+        await harness.coordinator.resume()
+
+        #expect(harness.scheduler.log == [])
+
+        await harness.coordinator.resume(includeBackedOff: true)
+
+        #expect(harness.scheduler.log == ["start:\(job.id)"])
+    }
+
     /// The App Group must not accumulate a second full-size copy of every
     /// recording: once the durable job owns the audio, the staging copy goes.
     @Test func enqueueConsumesTheStagedSourceRecording() async throws {
@@ -1386,6 +1407,36 @@ import Testing
         let stored = try #require(try await store.fetchCall(id: callID))
         #expect(stored.source == .macFaceTime)
         #expect(stored.audioPath == originalPath)
+        let staged = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+        #expect(staged.isEmpty)
+    }
+
+    /// The stored source decides which later uploads may resume an identifier,
+    /// and whether the import pipeline treats the first attempt as an inbox
+    /// retry that skips the content-hash duplicate check. A client does not get
+    /// to name itself into either exemption.
+    @Test func aClientSuppliedNonPhoneSourceIsStoredAsAPhoneUpload() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-phone-source-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let store = MemoryStore()
+        let server = MacSyncServer(store: store, receivedUploadsDirectory: root)
+        let uploadID = UUID()
+
+        let created = try await server.accept(
+            uploadID: uploadID,
+            metadata: CallUploadMetadata(source: .fileImport, counterpartyName: "Priya"),
+            audio: Data("recording".utf8),
+            fileExtension: "m4a"
+        )
+
+        #expect(created == .created)
+        let stored = try #require(try await store.fetchCall(id: uploadID))
+        #expect(stored.source == .iphoneRecording)
+        #expect(stored.counterpartyName == "Priya")
+        let audioURL = root.appendingPathComponent("\(uploadID.uuidString).m4a")
+        #expect(CallUploadMetadata.loadSidecar(nextTo: audioURL)?.source == .iphoneRecording)
     }
     #endif
 }

@@ -547,7 +547,11 @@ final class BackgroundUploadCoordinator: @unchecked Sendable {
     /// A recording the Mac refused was deleted from the queue, so that report
     /// outranks the queue's own status - but it never replaces the work, or a
     /// single drop would hold back every other pending upload for a cycle.
-    func resume() async -> String {
+    ///
+    /// Only a resume the user asked for ignores the retry backoff. An automatic
+    /// one honors it, or a launch would rebuild every backed-off multipart body
+    /// against a Mac that is still unreachable.
+    func resume(userInitiated: Bool) async -> String {
         await coordinator?.sweepOrphanedUploads()
         var rejection: String?
         if let coordinator { rejection = RejectedUpload.summary(of: await coordinator.takeRejections()) }
@@ -555,7 +559,7 @@ final class BackgroundUploadCoordinator: @unchecked Sendable {
             return rejection ?? "Pair with your Mac to send pending recordings."
         }
         guard let coordinator else { return rejection ?? "Shared storage for recordings is unavailable." }
-        await coordinator.resume(skipping: await activeTaskIDs(), includeBackedOff: true)
+        await coordinator.resume(skipping: await activeTaskIDs(), includeBackedOff: userInitiated)
         return rejection ?? "Pending recordings will upload in the background."
     }
 

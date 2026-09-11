@@ -174,7 +174,7 @@ public actor MacSyncServer {
     ) async throws -> UploadOutcome {
         guard reserve(uploadID) else { return .inProgress }
         do {
-            if let settled = await settleExistingUpload(uploadID) {
+            if let settled = try await settleExistingUpload(uploadID) {
                 release(uploadID)
                 return settled
             }
@@ -193,6 +193,7 @@ public actor MacSyncServer {
             return try await storeAccepted(uploadID: uploadID, metadata: metadata, audioURL: audioURL)
         }
         guard Self.isPhoneUpload(existing.source) else {
+            discardStaged(audioURL)
             throw HTTPError(.forbidden, message: "That recording is not a phone upload.")
         }
         if isProcessed(existing) {
@@ -211,19 +212,24 @@ public actor MacSyncServer {
         return .resumed
     }
 
+    /// The stored source decides which uploads may later resume this identifier,
+    /// so it is the Mac's to choose: a client that names a Mac or import source
+    /// is still filed as the phone recording it actually sent.
     private func storeAccepted(uploadID: UUID, metadata: CallUploadMetadata, audioURL: URL) async throws -> UploadOutcome {
-        try metadata.writeSidecar(nextTo: audioURL)
+        var accepted = metadata
+        if !Self.isPhoneUpload(accepted.source) { accepted.source = .iphoneRecording }
+        try accepted.writeSidecar(nextTo: audioURL)
         let call = Call(
             id: uploadID,
-            source: metadata.source,
-            startedAt: metadata.startedAt ?? Date(),
-            counterpartyName: metadata.counterpartyName,
+            source: accepted.source,
+            startedAt: accepted.startedAt ?? Date(),
+            counterpartyName: accepted.counterpartyName,
             audioPath: audioURL.path,
             sttProvider: .appleSpeech,
             status: .uploaded
         )
         try await store.upsertCall(call)
-        launchProcessing(uploadID: uploadID, audioURL: audioURL, metadata: metadata)
+        launchProcessing(uploadID: uploadID, audioURL: audioURL, metadata: accepted)
         return .created
     }
 
@@ -231,9 +237,14 @@ public actor MacSyncServer {
     /// A finished call is acknowledged untouched; an accepted-but-unprocessed one
     /// resumes from its retained staging audio, so a 201 whose processing failed
     /// never leaves the recording stuck. `nil` means the bytes are still needed.
-    private func settleExistingUpload(_ uploadID: UUID) async -> UploadOutcome? {
+    ///
+    /// A call this Mac captured itself is refused here, before the request body
+    /// is streamed, so a refused upload never writes audio into staging.
+    private func settleExistingUpload(_ uploadID: UUID) async throws -> UploadOutcome? {
         guard let call = try? await store.fetchCall(id: uploadID) else { return nil }
-        guard Self.isPhoneUpload(call.source) else { return nil }
+        guard Self.isPhoneUpload(call.source) else {
+            throw HTTPError(.forbidden, message: "That recording is not a phone upload.")
+        }
         if isProcessed(call) { return .alreadyStored }
         if processingUploadIDs.contains(uploadID) { return .inProgress }
         guard let staged = stagedAudioURL(for: uploadID) else { return nil }
@@ -315,6 +326,11 @@ public actor MacSyncServer {
         return contents.first {
             $0.deletingPathExtension().lastPathComponent == uploadID.uuidString && $0.pathExtension.lowercased() != "json"
         }
+    }
+
+    private func discardStaged(_ audioURL: URL) {
+        try? FileManager.default.removeItem(at: audioURL)
+        try? FileManager.default.removeItem(at: CallUploadMetadata.sidecarURL(nextTo: audioURL))
     }
 
     @discardableResult

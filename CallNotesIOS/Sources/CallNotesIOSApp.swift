@@ -306,13 +306,15 @@ final class PhoneAppModel {
         }
     }
 
-    func resumePendingUploads() async { uploadStatus = await BackgroundUploadCoordinator.shared.resume() }
+    func resumePendingUploads(userInitiated: Bool = false) async {
+        uploadStatus = await BackgroundUploadCoordinator.shared.resume(userInitiated: userInitiated)
+    }
     func pair(ticketPayload: String) async {
         do {
             _ = try await PhonePairingCoordinator.pair(ticketPayload: ticketPayload, deviceName: UIDevice.current.name)
             isPaired = true
             pairedMacName = "Paired Mac"
-            uploadStatus = await BackgroundUploadCoordinator.shared.resume()
+            uploadStatus = await BackgroundUploadCoordinator.shared.resume(userInitiated: true)
         } catch {
             uploadStatus = error.localizedDescription
         }
@@ -355,7 +357,7 @@ final class PhoneAppModel {
                 audioAt: capture.url,
                 metadata: .init(source: .iphoneMeeting, startedAt: capture.startedAt)
             )
-            uploadStatus = await BackgroundUploadCoordinator.shared.resume()
+            uploadStatus = await BackgroundUploadCoordinator.shared.resume(userInitiated: true)
         } catch { uploadStatus = error.localizedDescription }
     }
 }
@@ -384,7 +386,7 @@ struct CallsView: View {
             }
             .navigationTitle("Calls")
             .toolbar {
-                Button("Sync", systemImage: "arrow.triangle.2.circlepath") { Task { await model.resumePendingUploads(); await model.refreshMirror(in: modelContext) } }
+                Button("Sync", systemImage: "arrow.triangle.2.circlepath") { Task { await model.resumePendingUploads(userInitiated: true); await model.refreshMirror(in: modelContext) } }
                     .accessibilityLabel("Sync calls with Mac")
             }
         }
