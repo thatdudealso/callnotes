@@ -102,6 +102,12 @@ struct RootTabView: View {
         self.id = id; self.title = title; self.summary = summary
         self.startedAt = startedAt; self.source = source; self.status = status
     }
+
+    /// `status` is the Mac's wire token, so VoiceOver reads the phrase for it
+    /// rather than `notes_ready`.
+    var statusPhrase: String {
+        CallStatus(rawValue: status)?.displayName ?? status.replacingOccurrences(of: "_", with: " ")
+    }
 }
 
 @Model final class MirroredSegment {
@@ -372,7 +378,7 @@ struct CallsView: View {
                                 Text(call.summary).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
                                 Text(call.startedAt.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.tertiary)
                             }.padding(.vertical, 4)
-                        }.accessibilityLabel("\(call.title), \(call.status)")
+                        }.accessibilityLabel("\(call.title), \(call.statusPhrase)")
                     }.navigationDestination(for: UUID.self) { CallDetailView(callID: $0) }
                 }
             }

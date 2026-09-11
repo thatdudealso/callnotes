@@ -35,10 +35,18 @@ final class PhoneSyncUITests: XCTestCase {
 
         app.tabBars.buttons["Calls"].tap()
         // A recording shared with an empty Contact field must read as "Call",
-        // never as a blank headline.
-        let unnamed = app.staticTexts["Call"]
+        // never as a blank headline. A row reads as "<headline>, <status>", so
+        // the headline is matched rather than the whole label.
+        let unnamed = callRow(in: app, headline: "Call")
         XCTAssertTrue(unnamed.waitForExistence(timeout: 20), "The mirrored call with no counterparty name never appeared.")
-        XCTAssertTrue(app.staticTexts["Priya Shah"].waitForExistence(timeout: 10))
+        XCTAssertTrue(callRow(in: app, headline: "Priya Shah").waitForExistence(timeout: 10))
+        // The status a row speaks is a phrase, never the wire token.
+        XCTAssertFalse(
+            app.descendants(matching: .any)
+                .matching(NSPredicate(format: "label CONTAINS %@", "notes_ready"))
+                .firstMatch.exists,
+            "A Calls row spoke the serialized status token instead of a phrase."
+        )
         attach(app.screenshot(), named: "calls-mirrored")
 
         unnamed.tap()
@@ -48,6 +56,11 @@ final class PhoneSyncUITests: XCTestCase {
         let farSide = app.staticTexts.containing(NSPredicate(format: "label BEGINSWITH 'Speaker 2: '")).firstMatch
         XCTAssertTrue(farSide.waitForExistence(timeout: 10), "The far side never got a per-call speaker label.")
         attach(app.screenshot(), named: "call-detail-unnamed")
+    }
+
+    private func callRow(in app: XCUIApplication, headline: String) -> XCUIElement {
+        let predicate = NSPredicate(format: "label == %@ OR label BEGINSWITH %@", headline, headline + ", ")
+        return app.descendants(matching: .any).matching(predicate).firstMatch
     }
 
     private func attach(_ screenshot: XCUIScreenshot, named name: String) {

@@ -242,6 +242,10 @@ private final class PhoneBonjourResolver: NSObject, NetServiceBrowserDelegate, N
 
     private static let candidateTimeout: TimeInterval = 2
     private static let discoveryWindow: TimeInterval = 5
+    /// The whole sweep is bounded, not just the window new candidates may
+    /// appear in: a queue settled during a background relaunch waits on this
+    /// before the system's completion handler is released.
+    private static let sweepBudget: TimeInterval = discoveryWindow + candidateTimeout * 2 + 1
 
     static func resolve(fingerprint: String) async throws -> URL {
         try await PhoneBonjourResolver().resolveService(fingerprint: fingerprint)
@@ -270,6 +274,9 @@ private final class PhoneBonjourResolver: NSObject, NetServiceBrowserDelegate, N
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.discoveryWindow) { [self] in
                 endDiscovery()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.sweepBudget) { [self] in
+                finish(.failure(URLError(.timedOut)))
             }
         }
     }
@@ -394,8 +401,16 @@ final class PhoneUploadScheduler: SessionUploadTaskStarting, @unchecked Sendable
     static let uploadRejectedNotification = Notification.Name("CallNotesUploadRejected")
     static let uploadRejectionMessageKey = "message"
 
+    /// A sweep that found no reachable Mac answers for the whole network, not
+    /// for one recording, so its result is remembered for this long. One
+    /// background drain settles every queued upload in turn, and without this
+    /// each of them would pay for its own full discovery window before the
+    /// system's relaunch completion handler is released.
+    private static let emptySweepMemo: TimeInterval = 30
+
     private let lock = NSLock()
     private var sessionProvider: (@Sendable () -> URLSession)?
+    private var emptySweepExpiry: Date?
 
     func attach(_ provider: @escaping @Sendable () -> URLSession) {
         lock.withLock { sessionProvider = provider }
@@ -409,7 +424,7 @@ final class PhoneUploadScheduler: SessionUploadTaskStarting, @unchecked Sendable
     func retry(_ job: PendingUpload) async -> Bool {
         guard let session = currentSession(),
               let (connection, token) = PhonePairingStore.load(),
-              let endpoint = try? await PhoneBonjourResolver.resolve(fingerprint: connection.certificateFingerprint),
+              let endpoint = await rediscoverEndpoint(fingerprint: connection.certificateFingerprint),
               endpoint != connection.serverURL,
               (try? PhonePairingStore.updateServerURL(endpoint)) != nil
         else { return false }
@@ -447,6 +462,17 @@ final class PhoneUploadScheduler: SessionUploadTaskStarting, @unchecked Sendable
     func discardRequestBody(for uploadID: UUID) async {
         guard let directory = try? PhoneSharedContainer.requestBodiesDirectory() else { return }
         try? FileManager.default.removeItem(at: directory.appendingPathComponent(uploadID.uuidString).appendingPathExtension("multipart"))
+    }
+
+    private func rediscoverEndpoint(fingerprint: String) async -> URL? {
+        let suppressed = lock.withLock { emptySweepExpiry.map { $0 > Date() } ?? false }
+        guard !suppressed else { return nil }
+        guard let endpoint = try? await PhoneBonjourResolver.resolve(fingerprint: fingerprint) else {
+            lock.withLock { emptySweepExpiry = Date().addingTimeInterval(Self.emptySweepMemo) }
+            return nil
+        }
+        lock.withLock { emptySweepExpiry = nil }
+        return endpoint
     }
 
     private func currentSession() -> URLSession? {

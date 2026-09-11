@@ -130,9 +130,11 @@ public struct ImportPipeline: Sendable {
         // same recording is rejected even if notes later fail. Only a callID
         // that already owns segments is exempt above; a phone upload arrives
         // with its Call row already written, so its first attempt is checked.
-        // A run that produced no turns stored no segments, so it cannot take
-        // that exemption on its retry and must not claim the hash either.
-        if !processed.turns.isEmpty {
+        // A run that reused an existing call row and produced no turns stored
+        // no segments, so it cannot take that exemption on its retry and must
+        // not claim the hash either. A brand-new call row never had that
+        // exemption to lose, so it always claims the bytes it owns.
+        if existingCall == nil || !processed.turns.isEmpty {
             _ = await duplicates.register(hash)
         }
 
