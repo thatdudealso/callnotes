@@ -17,7 +17,10 @@ optional Meta Muse cloud transcription engine: local transcription stays the
 default, the default engine is chosen in Settings (Engines) or onboarding,
 each call can override it or be re-transcribed with Meta, billed Meta seconds
 are tracked per call, and any Meta failure falls back to local transcription
-without losing the call. Phase 5 adds Mac import paths: an iCloud Drive
+without losing the call. The Mac history also includes a real-time dashboard
+for per-call and day/week/month call volume, talk time, Meta costs, engine
+usage, and repeat contacts; selecting a period or contact reveals its calls.
+Phase 5 adds Mac import paths: an iCloud Drive
 `CallNotes/Inbox` watcher (FSEvents, with an Application Support fallback)
 imports dropped audio after the file settles, skips duplicates, transcribes
 through Apple SpeechAnalyzer, FluidAudio Parakeet, or Meta using the same

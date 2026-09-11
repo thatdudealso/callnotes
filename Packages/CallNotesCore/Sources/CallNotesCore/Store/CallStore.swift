@@ -6,6 +6,8 @@ public protocol CallStore: Sendable {
     func upsertCall(_ call: Call) async throws
     func fetchCalls() async throws -> [Call]
     func fetchCall(id: UUID) async throws -> Call?
+    func fetchDashboardAnalytics(asOf: Date) async throws -> DashboardAnalytics
+    func dashboardChanges() async -> AsyncStream<Void>
     func replaceSegments(callID: UUID, provider: STTProviderID, _ segments: [Segment]) async throws
     func fetchSegments(callID: UUID, provider: STTProviderID?) async throws -> [Segment]
     func upsertSpeakerProfile(_ profile: SpeakerProfile) async throws
@@ -21,9 +23,15 @@ public protocol CallStore: Sendable {
     ) async throws
     func upsertNotes(_ record: NotesRecord) async throws
     func fetchNotes(callID: UUID) async throws -> [NotesRecord]
+    func fetchPreferredNotesByCall() async throws -> [UUID: NotesRecord]
+    func closeStrandedRecordings(excluding liveCallID: UUID?) async throws -> [Call]
 }
 
 extension CallStore {
+    public func fetchDashboardAnalytics(asOf: Date) async throws -> DashboardAnalytics {
+        DashboardAnalytics.make(from: try await fetchCalls(), now: asOf)
+    }
+
     public func fetchPreferredNotes(callID: UUID) async throws -> NotesRecord? {
         NotesRecord.preferred(in: try await fetchNotes(callID: callID))
     }

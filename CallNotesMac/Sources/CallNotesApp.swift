@@ -144,7 +144,7 @@ struct OnboardingGate: View {
         Group {
             if onboardingComplete {
                 HistorySplitView(model: model)
-                    .frame(minWidth: 720, minHeight: 420)
+                    .frame(minWidth: 800, minHeight: 520)
             } else {
                 SetupWizardView {
                     onboardingComplete = true

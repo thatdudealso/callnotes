@@ -4,10 +4,17 @@ import Foundation
 import Observation
 import SwiftUI
 
+enum SidebarItem: Hashable {
+    case dashboard
+    case call(UUID)
+}
+
 @MainActor
 @Observable
 final class AppModel {
-    var recordingState: RecordingState = .idle
+    var recordingState: RecordingState = .idle {
+        didSet { updateDashboardTicker() }
+    }
     var calls: [Call] = []
     var selectedCallID: UUID?
     var turnsByCall: [UUID: [AttributedTurn]] = [:]
@@ -21,6 +28,7 @@ final class AppModel {
     var notesGeneratingCallID: UUID?
     var importProgress = ImportProgress()
     var inboxURL: URL?
+    var dashboardAnalytics = DashboardAnalytics.make(from: [])
 
     private var store: any CallStore
     private var notesSpine: NotesGenerationSpine?
@@ -38,6 +46,34 @@ final class AppModel {
     private var pendingInboxFiles: [URL] = []
     private var isImporting = false
     private var importNoticeTask: Task<Void, Never>?
+    private var showsDashboard = false
+    private var dashboardObservationTask: Task<Void, Never>?
+    private var dashboardTickerTask: Task<Void, Never>?
+
+    /// The sidebar owns navigation, but the model owns the state so a closed and
+    /// reopened window lands back on the Dashboard or the call the user was reading.
+    var sidebarSelection: SidebarItem? {
+        get {
+            if showsDashboard { return .dashboard }
+            return selectedCallID.map(SidebarItem.call)
+        }
+        set {
+            switch newValue {
+            case .dashboard:
+                showsDashboard = true
+            case .call(let id):
+                showsDashboard = false
+                selectedCallID = id
+                if let call = calls.first(where: { $0.id == id }) {
+                    Task { [weak self] in
+                        await self?.select(call)
+                    }
+                }
+            case nil:
+                break
+            }
+        }
+    }
 
     var selectedCall: Call? {
         calls.first { $0.id == selectedCallID }
@@ -82,7 +118,8 @@ final class AppModel {
     }
 
     var canStartLiveSession: Bool {
-        recordingState == .idle
+        isStoreInitialized
+            && recordingState == .idle
             && liveSession == nil
             && !isStartingLiveSession
             && !isProcessingSample
@@ -91,12 +128,14 @@ final class AppModel {
     init() {
         self.store = memoryStore
         statusMessage = "Checking dedicated CallNotes Postgres..."
+        observeDashboardChanges()
         Task { await bootstrap() }
     }
 
     func bootstrap() async {
         guard let postgres = await PostgresStore.makeIfAvailable() else {
             storeBackendName = "unavailable"
+            isStoreInitialized = true
             statusMessage = "Dedicated CallNotes Postgres is unavailable. Load sample call is disabled."
             return
         }
@@ -105,19 +144,66 @@ final class AppModel {
         } catch {
             store = memoryStore
             storeBackendName = "unavailable"
-            isStoreInitialized = false
+            isStoreInitialized = true
             statusMessage = "Dedicated CallNotes Postgres is unavailable: \(error.localizedDescription). Load sample call is disabled."
             return
         }
         statusMessage = "Validating Apple SpeechAnalyzer dual-instance support..."
         speech = await AppleSpeechProvider.validated()
         live.dualInstanceMode = speech.dualInstanceMode
+        // The repair reads every `.recording` row, so it has to finish before
+        // `postgres` becomes the published store: a call started while it is in
+        // flight would otherwise land in the table it is about to close out.
+        var repairFailure: String?
+        do {
+            _ = try await postgres.closeStrandedRecordings(excluding: instantCallAtHangUp?.id)
+        } catch {
+            repairFailure = error.localizedDescription
+        }
         store = postgres
         storeBackendName = "postgres"
         isStoreInitialized = true
+        observeDashboardChanges()
         notesSpine = NotesGenerationSpine(client: OllamaClient(), store: postgres)
-        statusMessage = nil
+        statusMessage = repairFailure
         startInboxWatcher()
+    }
+
+    func refresh() async throws {
+        dashboardAnalytics = try await store.fetchDashboardAnalytics(asOf: .now)
+        calls = dashboardAnalytics.calls.map(\.call)
+        if selectedCallID == nil {
+            selectedCallID = calls.first?.id
+        }
+        guard !showsDashboard else { return }
+        notesByCall = try await store.fetchPreferredNotesByCall()
+        if let selectedCallID {
+            turnsByCall[selectedCallID] = try await loadTurns(callID: selectedCallID)
+        }
+    }
+
+    /// Processing one call writes its row several times. The store keeps only the
+    /// newest pending change and this window lets a burst settle, so a single write
+    /// never fans out into one refresh per store write.
+    private static let dashboardRefreshSettle = Duration.milliseconds(250)
+
+    private func observeDashboardChanges() {
+        dashboardObservationTask?.cancel()
+        let observedStore = store
+        dashboardObservationTask = Task { [weak self] in
+            let changes = await observedStore.dashboardChanges()
+            guard !Task.isCancelled, let self else { return }
+            await self.refreshReportingFailure()
+            for await _ in changes {
+                guard !Task.isCancelled else { return }
+                try? await Task.sleep(for: Self.dashboardRefreshSettle)
+                guard !Task.isCancelled else { return }
+                await self.refreshReportingFailure()
+            }
+        }
+    }
+
+    private func refreshReportingFailure() async {
         do {
             try await refresh()
         } catch {
@@ -125,18 +211,20 @@ final class AppModel {
         }
     }
 
-    func refresh() async throws {
-        calls = try await store.fetchCalls()
-        if selectedCallID == nil {
-            selectedCallID = calls.first?.id
+    private func updateDashboardTicker() {
+        guard recordingState == .recording else {
+            dashboardTickerTask?.cancel()
+            dashboardTickerTask = nil
+            return
         }
-        for call in calls {
-            if let notes = try await store.fetchPreferredNotes(callID: call.id) {
-                notesByCall[call.id] = notes
+        guard dashboardTickerTask == nil else { return }
+        dashboardTickerTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, self.recordingState == .recording else { return }
+                guard let liveCallID = self.instantCallAtHangUp?.id else { continue }
+                self.dashboardAnalytics = self.dashboardAnalytics.updatingLiveDuration(for: liveCallID)
             }
-        }
-        if let selectedCallID {
-            turnsByCall[selectedCallID] = try await loadTurns(callID: selectedCallID)
         }
     }
 
@@ -371,7 +459,6 @@ final class AppModel {
                 }
                 try await store.replaceSegments(callID: call.id, provider: call.sttProvider, segments)
                 try await store.upsertCall(call)
-                try await refresh()
             } catch {
                 statusMessage = error.localizedDescription
                 return
@@ -416,7 +503,6 @@ final class AppModel {
         call.errorStage = "capture"
         do {
             try await store.upsertCall(call)
-            try await refresh()
         } catch {
             statusMessage = error.localizedDescription
             return
@@ -424,7 +510,7 @@ final class AppModel {
         statusMessage = "Audio capture could not start: \(message)"
     }
 
-    func updateCounterpartyName(for callID: UUID, name: String) {
+    func updateCounterpartyName(for callID: UUID, name: String) async {
         guard let index = calls.firstIndex(where: { $0.id == callID }) else { return }
         let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
         calls[index].counterpartyName = normalized.isEmpty ? nil : normalized
@@ -432,12 +518,10 @@ final class AppModel {
         if instantCallAtHangUp?.id == callID {
             instantCallAtHangUp = call
         }
-        Task {
-            do {
-                try await store.upsertCall(call)
-            } catch {
-                statusMessage = error.localizedDescription
-            }
+        do {
+            try await store.upsertCall(call)
+        } catch {
+            statusMessage = error.localizedDescription
         }
     }
 
@@ -499,7 +583,6 @@ final class AppModel {
                 try await persistRetranscription(segments, provider: .appleSpeech, call: &call)
                 statusMessage = "Re-transcribed locally."
             }
-            try await refresh()
             await select(call)
         } catch {
             guard provider == .metaMuse else {
@@ -520,7 +603,6 @@ final class AppModel {
                     config: STTSessionConfig()
                 )
                 try await persistRetranscription(segments, provider: .appleSpeech, call: &call)
-                try await refresh()
                 await select(call)
                 statusMessage = "Meta was unavailable. Re-transcribed locally instead."
             } catch {

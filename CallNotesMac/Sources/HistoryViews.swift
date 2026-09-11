@@ -8,17 +8,23 @@ struct HistorySplitView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $model.selectedCallID) {
-                if model.calls.isEmpty {
-                    empty
-                } else {
-                    ForEach(model.calls) { call in
-                        HistoryRow(call: call, notesTitle: model.notesByCall[call.id]?.body.title)
-                            .tag(call.id)
+            List(selection: $model.sidebarSelection) {
+                Label("Dashboard", systemImage: "chart.bar.xaxis")
+                    .tag(SidebarItem.dashboard)
+                Section("Calls") {
+                    if model.calls.isEmpty {
+                        Text("No calls yet.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(model.calls) { call in
+                            HistoryRow(call: call, notesTitle: model.notesByCall[call.id]?.body.title)
+                                .tag(SidebarItem.call(call.id))
+                        }
                     }
                 }
             }
-            .navigationTitle("Calls")
+            .navigationTitle("CallNotes")
             .safeAreaInset(edge: .bottom) {
                 VStack(alignment: .leading, spacing: 4) {
                     ImportProgressView(progress: model.importProgress) { jobID in
@@ -34,15 +40,13 @@ struct HistorySplitView: View {
                 }
             }
         } detail: {
-            if model.selectedCall != nil {
+            switch model.sidebarSelection {
+            case .dashboard:
+                DashboardView(model: model)
+            case .call where model.selectedCall != nil:
                 CallDetailView(model: model)
-            } else {
+            default:
                 empty
-            }
-        }
-        .onChange(of: model.selectedCallID) { _, newValue in
-            if let call = model.calls.first(where: { $0.id == newValue }) {
-                Task { await model.select(call) }
             }
         }
     }
@@ -106,6 +110,67 @@ struct HistoryRow: View {
         case .fluidParakeet: "Parakeet"
         case .metaMuse: "Meta"
         }
+    }
+}
+
+/// The draft lives here rather than in `AppModel.calls` so a store refresh that
+/// lands mid-edit cannot rewrite what is being typed. The name is committed on
+/// submit or focus loss, and an external change is only adopted while idle.
+private struct CounterpartyNameField: View {
+    var model: AppModel
+    let call: Call
+
+    @State private var draft: Draft?
+    @FocusState private var isEditing: Bool
+
+    /// The draft carries the call it belongs to and the name it started from, so a
+    /// rebind to another call commits the edit to its own call instead of dropping
+    /// it or writing it onto whatever is selected by then.
+    private struct Draft {
+        let callID: UUID
+        var committedName: String
+        var text: String
+
+        var normalized: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        var isDirty: Bool { normalized != committedName }
+    }
+
+    var body: some View {
+        TextField(
+            "Counterparty",
+            text: Binding(get: { draft?.text ?? "" }, set: { draft?.text = $0 })
+        )
+        .textFieldStyle(.roundedBorder)
+        .focused($isEditing)
+        .onSubmit { commit() }
+        .onChange(of: isEditing) { _, editing in
+            if !editing { commit() }
+        }
+        .onChange(of: call.id) { _, _ in rebind() }
+        .onDisappear { commit() }
+        .onChange(of: call.counterpartyName) { _, name in
+            guard !isEditing, let draft, draft.callID == call.id, !draft.isDirty else { return }
+            self.draft = Draft(callID: call.id, committedName: name ?? "", text: name ?? "")
+        }
+        .task { rebind() }
+    }
+
+    @MainActor
+    private func rebind() {
+        guard draft?.callID != call.id else { return }
+        commit()
+        draft = Draft(
+            callID: call.id,
+            committedName: call.counterpartyName ?? "",
+            text: call.counterpartyName ?? ""
+        )
+    }
+
+    @MainActor
+    private func commit() {
+        guard let pending = draft, pending.isDirty else { return }
+        draft?.committedName = pending.normalized
+        Task { await model.updateCounterpartyName(for: pending.callID, name: pending.normalized) }
     }
 }
 
@@ -176,14 +241,7 @@ struct CallDetailView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(call.counterpartyName ?? "Untitled call")
                     .font(.title2.weight(.semibold))
-                TextField(
-                    "Counterparty",
-                    text: Binding(
-                        get: { call.counterpartyName ?? "" },
-                        set: { model.updateCounterpartyName(for: call.id, name: $0) }
-                    )
-                )
-                .textFieldStyle(.roundedBorder)
+                CounterpartyNameField(model: model, call: call)
                 HStack(spacing: 12) {
                     Text(call.startedAt.formatted(date: .abbreviated, time: .shortened))
                     Text(call.source.rawValue.replacingOccurrences(of: "_", with: " "))

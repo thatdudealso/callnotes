@@ -8,6 +8,7 @@ public actor MemoryStore: CallStore {
     private var callSpeakers: [UUID: [CallSpeaker]] = [:]
     private var samples: [SpeakerSample] = []
     private var notes: [UUID: [NotesRecord]] = [:]
+    private var dashboardObservers = DashboardObservers()
 
     public init() {}
 
@@ -15,6 +16,7 @@ public actor MemoryStore: CallStore {
 
     public func upsertCall(_ call: Call) async throws {
         calls[call.id] = call
+        dashboardObservers.notify()
     }
 
     public func fetchCalls() async throws -> [Call] {
@@ -23,6 +25,20 @@ public actor MemoryStore: CallStore {
 
     public func fetchCall(id: UUID) async throws -> Call? {
         calls[id]
+    }
+
+    public func fetchDashboardAnalytics(asOf: Date) async throws -> DashboardAnalytics {
+        DashboardAnalytics.make(
+            from: Array(calls.values),
+            counterpartyNames: dashboardCounterpartyNames(),
+            now: asOf
+        )
+    }
+
+    public func dashboardChanges() async -> AsyncStream<Void> {
+        dashboardObservers.register { [weak self] id in
+            Task { await self?.removeDashboardObserver(id) }
+        }
     }
 
     public func replaceSegments(
@@ -90,6 +106,56 @@ public actor MemoryStore: CallStore {
 
     public func fetchNotes(callID: UUID) async throws -> [NotesRecord] {
         (notes[callID] ?? []).sorted { $0.createdAt > $1.createdAt }
+    }
+
+    public func fetchPreferredNotesByCall() async throws -> [UUID: NotesRecord] {
+        notes.compactMapValues(NotesRecord.preferred(in:))
+    }
+
+    public func closeStrandedRecordings(excluding liveCallID: UUID?) async throws -> [Call] {
+        var repaired: [Call] = []
+        for call in calls.values where StrandedRecordingRepair.isStranded(call, liveCallID: liveCallID) {
+            let closed = StrandedRecordingRepair.closed(
+                call,
+                lastSegmentEndSec: segments[call.id]?.map(\.endSec).max()
+            )
+            calls[closed.id] = closed
+            repaired.append(closed)
+        }
+        if !repaired.isEmpty {
+            dashboardObservers.notify()
+        }
+        return repaired
+    }
+
+    private func removeDashboardObserver(_ id: UUID) {
+        dashboardObservers.remove(id)
+    }
+
+    private func dashboardCounterpartyNames() -> [UUID: String] {
+        var names: [UUID: String] = [:]
+        for (callID, speakers) in callSpeakers {
+            guard let call = calls[callID], !hasCounterpartyName(call) else { continue }
+            let matches = speakers.compactMap { speaker -> (String, Float)? in
+                guard let profileID = speaker.profileID,
+                    let profile = profiles[profileID],
+                    !profile.isOwner,
+                    !profile.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                else { return nil }
+                return (profile.displayName, speaker.confidence ?? 0)
+            }
+            if let match = matches.sorted(by: { lhs, rhs in
+                lhs.1 == rhs.1 ? lhs.0 < rhs.0 : lhs.1 > rhs.1
+            }).first {
+                names[callID] = match.0
+            }
+        }
+        return names
+    }
+
+    private func hasCounterpartyName(_ call: Call) -> Bool {
+        guard let name = call.counterpartyName else { return false }
+        return !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
 
