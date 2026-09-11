@@ -10,7 +10,8 @@ identifiers and strings.
 
 - Product name: **CallNotes** (one word, capital C and N).
 - Bundle ids: `com.thatdudealso.callnotes` (Mac), `com.thatdudealso.callnotes.ios` (iPhone), `com.thatdudealso.callnotes.ios.ShareExtension`.
-- App Group (Phase 6): `group.com.thatdudealso.callnotes`.
+- App Group (Phase 6): `group.com.thatdudealso.callnotes`, shared by the iPhone app and its Share Extension.
+- Keychain access group (Phase 6): `$(AppIdentifierPrefix)group.com.thatdudealso.callnotes`; the team prefix is resolved at runtime, never hardcoded.
 - Log subsystem: `com.thatdudealso.callnotes`.
 - Bonjour service: `_callnotes._tcp`.
 

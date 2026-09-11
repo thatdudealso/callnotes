@@ -28,7 +28,16 @@ through Apple SpeechAnalyzer, FluidAudio Parakeet, or Meta using the same
 Postgres store with the same notes spine as live calls, and shows import
 progress in the history window. Live Meta file imports stay deferred until
 tenant billing is enabled; the simulated harness covers that path in tests.
-Phone sync remains later-phase work.
+Phase 6 adds iPhone sync. The Mac serves a TLS API to the local network,
+advertises it over Bonjour as `_callnotes._tcp`, and shows a pairing QR code in
+Settings → Devices, where a paired iPhone can also be revoked. The iPhone app
+scans that code, pins the Mac's certificate, and uploads recordings to it in
+the background: a call recording shared into CallNotes from Notes, Voice Memos,
+Files, or Mail, or a meeting captured with the app's own in-person recorder.
+Uploads resume after a relaunch, a recording the Mac refuses is dropped from
+the queue and reported under Settings → Uploads instead of retried forever,
+and the phone mirrors the resulting calls, transcripts, and notes so they can
+be read without the Mac.
 
 Some docs and code comments cite "plan section" numbers. These refer to the
 private implementation plan that maintainers keep locally at
@@ -46,9 +55,11 @@ provider seams, with the API key kept in the Keychain and local providers as
 the automatic fallback.
 Drop a supported audio file (`.m4a`, `.caf`, `.wav`, `.aiff`, `.aif`, or
 `.aac`) into the Inbox folder (menu bar → Open Inbox folder) to import a
-recording. Hummingbird remains planned for the phone-sync phase. The iPhone app
-and Share Extension are intentionally minimal Phase 0 shells that will later
-upload recordings to the paired Mac.
+recording. Phone sync is a Hummingbird server over TLS on the Mac; pairing,
+the Mac's TLS identity, and the phone upload types live in the core package's
+`Sync` folder. The iPhone app and its Share Extension stage audio in a shared
+App Group and upload it with a background `URLSession` pinned to the paired
+Mac's certificate, and the phone keeps a SwiftData mirror of the Mac's calls.
 
 ## Capture harness
 
@@ -69,7 +80,15 @@ swift test --package-path Packages/CallNotesCore
 xcodegen generate
 xcodebuild -project CallNotes.xcodeproj -scheme CallNotesMac \
   -destination 'platform=macOS,arch=arm64' build CODE_SIGNING_ALLOWED=NO
+xcodebuild -project CallNotes.xcodeproj -scheme CallNotesIOS \
+  -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO
 ```
+
+The `CallNotesIOS` scheme builds the iPhone app and embeds its Share
+Extension. Both are entitled to the App Group they hand recordings to the
+background uploader through, and to the keychain group holding the paired
+Mac's token (both identifiers are listed in [docs/brand.md](docs/brand.md)),
+so a signed build needs a provisioning profile that grants them.
 
 `project.yml` is the source of truth for the Xcode project. Run `xcodegen
 generate` whenever it changes; the generated project is deliberately ignored.

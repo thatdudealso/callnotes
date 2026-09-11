@@ -27,7 +27,8 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 - Pairing, TLS identity, Hummingbird server, and phone upload types live in `CallNotesCore/Sync`. The Mac keeps the server in `AppModel`; Settings -> Devices shows the QR payload and Revoke. Device tokens persist at Application Support `CallNotes/Sync/paired-devices.json` (SHA-256 digests only).
 - Phone uploads are not dropped into the Inbox watcher. They land in Application Support `CallNotes/PhoneUploads` with a `{callID}.json` sidecar and keep that call ID through `ImportPipeline.import`.
-- The Share Extension copies into the App Group (`group.com.thatdudealso.callnotes`) and schedules a background `URLSession` with `sharedContainerIdentifier` set. Pairing tickets are ISO-8601 JSON (`PairingTicket.qrPayload()`).
+- The Share Extension copies into the App Group (`group.com.thatdudealso.callnotes`) and schedules a background `URLSession` with `sharedContainerIdentifier` set. Pairing tickets are ISO-8601 JSON (`PairingTicket.qrPayload()`). App Group subdirectory names come from `SyncConstants`, and both targets POST through `PhoneUploadRequest.start` / `MultipartUploadBody` rather than repeating the literals or the body format in the extension; the device token lives in the `$(AppIdentifierPrefix)group.com.thatdudealso.callnotes` keychain group both targets are entitled to.
+- The phone's queue is the App Group manifest in `PendingUploadInbox` (`pending-uploads.json`, plus the `rejected-uploads.json` drop log the app drains into `uploadStatus`). Mac responses decide the job's fate in `SessionUploadCoordinator.taskCompleted`: 200/201/202 complete it, 409 leaves it alone, 401 unpairs and clears backoff, and every other 4xx is terminal - the queued copy is dropped and reported rather than retried.
 
 ## Mac capture (Phase 1)
 
