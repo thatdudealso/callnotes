@@ -6,7 +6,8 @@
 /// Usage:
 ///   swift Scripts/render-app-icon-concepts.swift \
 ///     --out Resources/AppIcon \
-///     --proof /path/to/firstmate/data/callnotes-app-icon-p1
+///     --proof /path/to/firstmate/data/callnotes-app-icon-p1 \
+///     --voices
 
 import AppKit
 import Foundation
@@ -17,11 +18,13 @@ import CoreGraphics
 struct Args {
     var outDir: URL
     var proofDir: URL?
+    var voicesOnly: Bool
 
     static func parse() -> Args {
         let argv = CommandLine.arguments
         var out = "Resources/AppIcon"
         var proof: String?
+        var voices = false
         var i = 1
         while i < argv.count {
             switch argv[i] {
@@ -31,6 +34,8 @@ struct Args {
             case "--proof":
                 i += 1
                 proof = argv[i]
+            case "--voices":
+                voices = true
             default:
                 fputs("unknown argument \(argv[i])\n", stderr)
                 exit(2)
@@ -40,7 +45,8 @@ struct Args {
         let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         return Args(
             outDir: URL(fileURLWithPath: out, relativeTo: cwd).absoluteURL,
-            proofDir: proof.map { URL(fileURLWithPath: $0, relativeTo: cwd).absoluteURL }
+            proofDir: proof.map { URL(fileURLWithPath: $0, relativeTo: cwd).absoluteURL },
+            voicesOnly: voices
         )
     }
 }
@@ -99,6 +105,23 @@ enum Concept: String, CaseIterable {
         case .handsetOverPage: return "Handset over page"
         case .notepadReceiver: return "Notepad receiver"
         case .diaryEmboss: return "Diary emboss"
+        }
+    }
+
+    var slug: String { rawValue }
+}
+
+/// Two-voice wave marks on the diary body. No phone glyph.
+enum VoiceVariant: String, CaseIterable {
+    case splitWaves = "diary-split-waves"
+    case linedVoices = "diary-lined-voices"
+    case facingVoices = "diary-facing-voices"
+
+    var title: String {
+        switch self {
+        case .splitWaves: return "Split waves"
+        case .linedVoices: return "Lined voices"
+        case .facingVoices: return "Facing voices"
         }
     }
 
@@ -355,6 +378,219 @@ func drawDiaryEmboss(_ ctx: CGContext, size: CGFloat, detail: Detail) {
     }
 }
 
+// MARK: - Closed diary body (no cover stamp)
+
+func drawClosedDiaryBody(_ ctx: CGContext, size: CGFloat, detail: Detail) -> (cover: CGRect, content: CGRect) {
+    drawBackground(ctx, size: size, top: RGB(16, 138, 136), bottom: Palette.tealDark)
+
+    let cover = scaleRect(CGRect(x: 196, y: 156, width: 600, height: 712), size)
+    let coverR = 52 / 1024 * size
+    fill(ctx, roundedRect(cover, rx: coverR), Palette.paper)
+
+    let spine = scaleRect(CGRect(x: 196, y: 156, width: 88, height: 712), size)
+    let spinePath = CGMutablePath()
+    spinePath.move(to: CGPoint(x: spine.minX + coverR, y: spine.minY))
+    spinePath.addLine(to: CGPoint(x: spine.maxX, y: spine.minY))
+    spinePath.addLine(to: CGPoint(x: spine.maxX, y: spine.maxY))
+    spinePath.addLine(to: CGPoint(x: spine.minX + coverR, y: spine.maxY))
+    spinePath.addQuadCurve(
+        to: CGPoint(x: spine.minX, y: spine.maxY - coverR),
+        control: CGPoint(x: spine.minX, y: spine.maxY)
+    )
+    spinePath.addLine(to: CGPoint(x: spine.minX, y: spine.minY + coverR))
+    spinePath.addQuadCurve(
+        to: CGPoint(x: spine.minX + coverR, y: spine.minY),
+        control: CGPoint(x: spine.minX, y: spine.minY)
+    )
+    spinePath.closeSubpath()
+    fill(ctx, spinePath, Palette.spine)
+
+    if detail == .full {
+        for t in [0.22, 0.50, 0.78] as [CGFloat] {
+            let y = spine.minY + spine.height * t
+            let rib = CGRect(x: spine.minX + 14 / 1024 * size, y: y - 4 / 1024 * size, width: spine.width - 28 / 1024 * size, height: 8 / 1024 * size)
+            fill(ctx, roundedRect(rib, rx: 3 / 1024 * size), RGB(160, 140, 108))
+        }
+    }
+
+    if detail != .tiny {
+        let edgeX: [CGFloat] = [808, 828, 848]
+        for (i, x) in edgeX.enumerated() {
+            let inset: CGFloat = CGFloat(i) * 6
+            let edge = scaleRect(CGRect(x: x, y: 176 + inset, width: 16, height: 672 - inset * 2), size)
+            fill(ctx, roundedRect(edge, rx: 6 / 1024 * size), Palette.pageEdge)
+        }
+    }
+
+    let content = CGRect(
+        x: cover.minX + cover.width * 0.22,
+        y: cover.minY + cover.height * 0.14,
+        width: cover.width * 0.68,
+        height: cover.height * 0.72
+    )
+    return (cover, content)
+}
+
+/// One voice: a sine whose amplitude changes per syllable so two voices
+/// cannot collapse into one repeating clip.
+func waveformPath(centerY: CGFloat, x0: CGFloat, width: CGFloat, height: CGFloat, amps: [CGFloat], invert: Bool) -> CGPath {
+    let path = CGMutablePath()
+    let n = max(amps.count, 1)
+    let samples = max(28, n * 14)
+    let sign: CGFloat = invert ? -1 : 1
+    for i in 0...samples {
+        let t = CGFloat(i) / CGFloat(samples)
+        let x = x0 + t * width
+        let idx = min(Int(floor(t * CGFloat(n))), n - 1)
+        let local = t * CGFloat(n) - CGFloat(idx)
+        let a = amps[idx]
+        let y = centerY - sign * sin(local * .pi) * height * a
+        if i == 0 { path.move(to: CGPoint(x: x, y: y)) }
+        else { path.addLine(to: CGPoint(x: x, y: y)) }
+    }
+    return path
+}
+
+func strokeWave(_ ctx: CGContext, _ path: CGPath, _ color: RGB, width: CGFloat) {
+    ctx.saveGState()
+    ctx.addPath(path)
+    ctx.setStrokeColor(color.cg)
+    ctx.setLineWidth(width)
+    ctx.setLineJoin(.round)
+    ctx.setLineCap(.round)
+    ctx.strokePath()
+    ctx.restoreGState()
+}
+
+/// Voice A: fewer, punchier peaks. Voice B: more syllables, different rhythm.
+let voiceAAmps: [CGFloat] = [1.00, 0.40, 0.82]
+let voiceBAmps: [CGFloat] = [0.38, 0.72, 0.48, 0.95, 0.42]
+let voiceATiny: [CGFloat] = [1.00, 0.45]
+let voiceBTiny: [CGFloat] = [0.40, 0.95, 0.50]
+
+func drawSplitWaves(_ ctx: CGContext, size: CGFloat, detail: Detail) {
+    let body = drawClosedDiaryBody(ctx, size: size, detail: detail)
+    let box = body.content
+    let waveH = detail == .tiny ? box.height * 0.22 : box.height * 0.18
+    let thick = max(size * 0.018, detail == .tiny ? 1.6 : 10 / 1024 * size)
+    let aAmps = detail == .tiny ? voiceATiny : voiceAAmps
+    let bAmps = detail == .tiny ? voiceBTiny : voiceBAmps
+    let midY = box.midY
+    if detail != .tiny {
+        ctx.saveGState()
+        ctx.setStrokeColor(Palette.line.cg)
+        ctx.setLineWidth(max(2, size * 0.008))
+        ctx.setLineCap(.round)
+        ctx.move(to: CGPoint(x: box.minX, y: midY))
+        ctx.addLine(to: CGPoint(x: box.maxX, y: midY))
+        ctx.strokePath()
+        ctx.restoreGState()
+    }
+    let top = waveformPath(centerY: midY - box.height * 0.22, x0: box.minX, width: box.width, height: waveH, amps: aAmps, invert: false)
+    let bot = waveformPath(centerY: midY + box.height * 0.22, x0: box.minX, width: box.width, height: waveH, amps: bAmps, invert: true)
+    strokeWave(ctx, top, Palette.tealInk, width: thick)
+    strokeWave(ctx, bot, Palette.line, width: thick)
+}
+
+func drawLinedVoices(_ ctx: CGContext, size: CGFloat, detail: Detail) {
+    drawBackground(ctx, size: size, top: RGB(16, 138, 136), bottom: Palette.tealDark)
+    let left = scaleRect(CGRect(x: 140, y: 180, width: 372, height: 664), size)
+    let right = scaleRect(CGRect(x: 512, y: 180, width: 372, height: 664), size)
+    let pageR = 40 / 1024 * size
+    fill(ctx, roundedRect(left, rx: pageR), Palette.paper)
+    fill(ctx, roundedRect(right, rx: pageR), Palette.paper)
+    let gutter = scaleRect(CGRect(x: 500, y: 180, width: 24, height: 664), size)
+    fill(ctx, roundedRect(gutter, rx: 8 / 1024 * size), Palette.spine)
+
+    let thick = max(size * 0.018, detail == .tiny ? 1.7 : 12 / 1024 * size)
+    let aAmps = detail == .tiny ? voiceATiny : voiceAAmps
+    let bAmps = detail == .tiny ? voiceBTiny : voiceBAmps
+    let inset: CGFloat = left.width * 0.14
+    let leftBox = left.insetBy(dx: inset, dy: left.height * 0.18)
+    let rightBox = right.insetBy(dx: inset, dy: right.height * 0.18)
+    let waveH = detail == .tiny ? leftBox.height * 0.28 : leftBox.height * 0.16
+    let leftWave = waveformPath(
+        centerY: leftBox.midY - (detail == .tiny ? 0 : leftBox.height * 0.12),
+        x0: leftBox.minX, width: leftBox.width, height: waveH, amps: aAmps, invert: false
+    )
+    let rightWave = waveformPath(
+        centerY: rightBox.midY + (detail == .tiny ? 0 : rightBox.height * 0.12),
+        x0: rightBox.minX, width: rightBox.width, height: waveH, amps: bAmps, invert: true
+    )
+    strokeWave(ctx, leftWave, Palette.tealInk, width: thick)
+    strokeWave(ctx, rightWave, Palette.line, width: thick)
+    if detail == .full {
+        let left2 = waveformPath(centerY: leftBox.midY + leftBox.height * 0.22, x0: leftBox.minX, width: leftBox.width * 0.72, height: waveH * 0.7, amps: [0.7, 0.35], invert: false)
+        let right2 = waveformPath(centerY: rightBox.midY - rightBox.height * 0.22, x0: rightBox.minX, width: rightBox.width * 0.78, height: waveH * 0.7, amps: [0.4, 0.8, 0.45], invert: true)
+        strokeWave(ctx, left2, Palette.line, width: thick * 0.7)
+        strokeWave(ctx, right2, Palette.tealInk, width: thick * 0.7)
+    }
+}
+
+func drawFacingArcs(_ ctx: CGContext, origin: CGPoint, radii: [CGFloat], facingRight: Bool, color: RGB, width: CGFloat) {
+    ctx.saveGState()
+    ctx.setStrokeColor(color.cg)
+    ctx.setLineWidth(width)
+    ctx.setLineCap(.round)
+    let start: CGFloat = facingRight ? -.pi * 0.42 : .pi * 0.58
+    let end: CGFloat = facingRight ? .pi * 0.42 : .pi * 1.42
+    for r in radii {
+        ctx.addArc(center: origin, radius: r, startAngle: start, endAngle: end, clockwise: false)
+        ctx.strokePath()
+    }
+    ctx.restoreGState()
+}
+
+func drawFacingVoices(_ ctx: CGContext, size: CGFloat, detail: Detail) {
+    let body = drawClosedDiaryBody(ctx, size: size, detail: detail)
+    let box = body.content
+    let thick = max(size * 0.018, detail == .tiny ? 1.6 : 11 / 1024 * size)
+    let leftOrigin = CGPoint(x: box.minX + box.width * (detail == .tiny ? 0.12 : 0.16), y: box.midY)
+    let rightOrigin = CGPoint(x: box.maxX - box.width * (detail == .tiny ? 0.12 : 0.16), y: box.midY)
+    let span = box.width * (detail == .tiny ? 0.16 : 0.26)
+    // Left voice: 3 tighter rings. Right voice: 4 looser rings. Different count
+    // so they cannot read as one symmetric decoration.
+    let leftRadii: [CGFloat]
+    let rightRadii: [CGFloat]
+    if detail == .tiny {
+        leftRadii = [span * 0.45, span * 0.90]
+        rightRadii = [span * 0.35, span * 0.70, span * 1.05]
+    } else if detail == .small {
+        leftRadii = [span * 0.35, span * 0.65, span * 0.95]
+        rightRadii = [span * 0.28, span * 0.52, span * 0.76, span * 1.00]
+    } else {
+        leftRadii = [span * 0.30, span * 0.55, span * 0.80]
+        rightRadii = [span * 0.24, span * 0.44, span * 0.64, span * 0.86]
+    }
+    if detail != .tiny {
+        fill(ctx, CGPath(ellipseIn: CGRect(x: leftOrigin.x - thick, y: leftOrigin.y - thick, width: thick * 2, height: thick * 2), transform: nil), Palette.tealInk)
+        fill(ctx, CGPath(ellipseIn: CGRect(x: rightOrigin.x - thick, y: rightOrigin.y - thick, width: thick * 2, height: thick * 2), transform: nil), Palette.line)
+    }
+    drawFacingArcs(ctx, origin: leftOrigin, radii: leftRadii, facingRight: true, color: Palette.tealInk, width: thick)
+    drawFacingArcs(ctx, origin: rightOrigin, radii: rightRadii, facingRight: false, color: Palette.line, width: thick)
+}
+
+func drawVoiceVariant(_ variant: VoiceVariant, ctx: CGContext, size: CGFloat, clipSquircle: Bool) {
+    ctx.saveGState()
+    if clipSquircle {
+        ctx.addPath(squirclePath(in: CGRect(x: 0, y: 0, width: size, height: size)))
+        ctx.clip()
+    }
+    let detail = Detail.forSize(size)
+    switch variant {
+    case .splitWaves: drawSplitWaves(ctx, size: size, detail: detail)
+    case .linedVoices: drawLinedVoices(ctx, size: size, detail: detail)
+    case .facingVoices: drawFacingVoices(ctx, size: size, detail: detail)
+    }
+    ctx.restoreGState()
+}
+
+func renderVoiceIcon(_ variant: VoiceVariant, size: Int, squircle: Bool) -> Data {
+    let ctx = makeContext(width: size, height: size)
+    drawVoiceVariant(variant, ctx: ctx, size: CGFloat(size), clipSquircle: squircle)
+    return pngData(from: ctx)
+}
+
 func drawConcept(_ concept: Concept, ctx: CGContext, size: CGFloat, clipSquircle: Bool) {
     ctx.saveGState()
     if clipSquircle {
@@ -523,6 +759,169 @@ func drawMenuMark(_ concept: Concept, ctx: CGContext, size: CGFloat, color: RGB,
     }
 }
 
+func drawVoiceMenuMark(_ variant: VoiceVariant, ctx: CGContext, size: CGFloat, color: RGB, state: MenuState) {
+    let inset = size * 0.06
+    let canvas = CGRect(x: inset, y: inset, width: size - inset * 2, height: size - inset * 2)
+    let filled = state != .idle
+    let lineW = max(1.35, size * 0.085)
+    let waveW = max(1.4, size * 0.09)
+
+    switch variant {
+    case .splitWaves:
+        let cover = canvas.insetBy(dx: canvas.width * 0.10, dy: canvas.height * 0.06)
+        let coverPath = roundedRect(cover, rx: cover.width * 0.12)
+        let spineX = cover.minX + cover.width * 0.16
+        if filled {
+            fill(ctx, coverPath, color)
+            ctx.saveGState()
+            ctx.setBlendMode(.clear)
+            let punch = CGRect(x: spineX - max(1.1, size * 0.04), y: cover.minY + cover.height * 0.08, width: max(1.1, size * 0.05), height: cover.height * 0.84)
+            fill(ctx, roundedRect(punch, rx: punch.width / 2), RGB(0, 0, 0))
+            let box = CGRect(x: cover.minX + cover.width * 0.26, y: cover.minY + cover.height * 0.18, width: cover.width * 0.62, height: cover.height * 0.64)
+            let top = waveformPath(centerY: box.midY - box.height * 0.22, x0: box.minX, width: box.width, height: box.height * 0.18, amps: voiceATiny, invert: false)
+            let bot = waveformPath(centerY: box.midY + box.height * 0.22, x0: box.minX, width: box.width, height: box.height * 0.18, amps: voiceBTiny, invert: true)
+            strokeWave(ctx, top, RGB(0, 0, 0), width: waveW)
+            strokeWave(ctx, bot, RGB(0, 0, 0), width: waveW)
+            ctx.setLineWidth(max(1.1, size * 0.05))
+            ctx.setLineCap(.round)
+            ctx.move(to: CGPoint(x: box.minX, y: box.midY))
+            ctx.addLine(to: CGPoint(x: box.maxX, y: box.midY))
+            ctx.strokePath()
+            ctx.restoreGState()
+        } else {
+            stroke(ctx, coverPath, color, width: lineW)
+            ctx.saveGState()
+            ctx.setStrokeColor(color.cg)
+            ctx.setLineWidth(lineW)
+            ctx.move(to: CGPoint(x: spineX, y: cover.minY + lineW))
+            ctx.addLine(to: CGPoint(x: spineX, y: cover.maxY - lineW))
+            ctx.strokePath()
+            ctx.restoreGState()
+            let box = CGRect(x: cover.minX + cover.width * 0.26, y: cover.minY + cover.height * 0.18, width: cover.width * 0.62, height: cover.height * 0.64)
+            let top = waveformPath(centerY: box.midY - box.height * 0.22, x0: box.minX, width: box.width, height: box.height * 0.18, amps: voiceATiny, invert: false)
+            let bot = waveformPath(centerY: box.midY + box.height * 0.22, x0: box.minX, width: box.width, height: box.height * 0.18, amps: voiceBTiny, invert: true)
+            strokeWave(ctx, top, color, width: waveW)
+            strokeWave(ctx, bot, color, width: waveW)
+        }
+
+    case .linedVoices:
+        let left = CGRect(x: canvas.minX, y: canvas.minY + canvas.height * 0.08, width: canvas.width * 0.46, height: canvas.height * 0.84)
+        let right = CGRect(x: canvas.midX + canvas.width * 0.02, y: canvas.minY + canvas.height * 0.08, width: canvas.width * 0.46, height: canvas.height * 0.84)
+        if filled {
+            fill(ctx, roundedRect(left, rx: left.width * 0.14), color)
+            fill(ctx, roundedRect(right, rx: right.width * 0.14), color)
+            ctx.saveGState()
+            ctx.setBlendMode(.clear)
+            let lWave = waveformPath(centerY: left.midY, x0: left.minX + left.width * 0.14, width: left.width * 0.72, height: left.height * 0.16, amps: voiceATiny, invert: false)
+            let rWave = waveformPath(centerY: right.midY, x0: right.minX + right.width * 0.14, width: right.width * 0.72, height: right.height * 0.16, amps: voiceBTiny, invert: true)
+            strokeWave(ctx, lWave, RGB(0, 0, 0), width: waveW)
+            strokeWave(ctx, rWave, RGB(0, 0, 0), width: waveW)
+            ctx.restoreGState()
+        } else {
+            stroke(ctx, roundedRect(left, rx: left.width * 0.14), color, width: lineW)
+            stroke(ctx, roundedRect(right, rx: right.width * 0.14), color, width: lineW)
+            let lWave = waveformPath(centerY: left.midY, x0: left.minX + left.width * 0.14, width: left.width * 0.72, height: left.height * 0.16, amps: voiceATiny, invert: false)
+            let rWave = waveformPath(centerY: right.midY, x0: right.minX + right.width * 0.14, width: right.width * 0.72, height: right.height * 0.16, amps: voiceBTiny, invert: true)
+            strokeWave(ctx, lWave, color, width: waveW)
+            strokeWave(ctx, rWave, color, width: waveW)
+        }
+
+    case .facingVoices:
+        let cover = canvas.insetBy(dx: canvas.width * 0.10, dy: canvas.height * 0.06)
+        let coverPath = roundedRect(cover, rx: cover.width * 0.12)
+        let spineX = cover.minX + cover.width * 0.16
+        if filled {
+            fill(ctx, coverPath, color)
+            ctx.saveGState()
+            ctx.setBlendMode(.clear)
+            let punch = CGRect(x: spineX - max(1.1, size * 0.04), y: cover.minY + cover.height * 0.08, width: max(1.1, size * 0.05), height: cover.height * 0.84)
+            fill(ctx, roundedRect(punch, rx: punch.width / 2), RGB(0, 0, 0))
+            let leftO = CGPoint(x: cover.minX + cover.width * 0.32, y: cover.midY)
+            let rightO = CGPoint(x: cover.maxX - cover.width * 0.12, y: cover.midY)
+            let span = cover.width * 0.14
+            drawFacingArcs(ctx, origin: leftO, radii: [span * 0.50, span * 1.00], facingRight: true, color: RGB(0, 0, 0), width: waveW)
+            drawFacingArcs(ctx, origin: rightO, radii: [span * 0.40, span * 0.75, span * 1.15], facingRight: false, color: RGB(0, 0, 0), width: waveW)
+            ctx.restoreGState()
+        } else {
+            stroke(ctx, coverPath, color, width: lineW)
+            ctx.saveGState()
+            ctx.setStrokeColor(color.cg)
+            ctx.setLineWidth(lineW)
+            ctx.move(to: CGPoint(x: spineX, y: cover.minY + lineW))
+            ctx.addLine(to: CGPoint(x: spineX, y: cover.maxY - lineW))
+            ctx.strokePath()
+            ctx.restoreGState()
+            let leftO = CGPoint(x: cover.minX + cover.width * 0.32, y: cover.midY)
+            let rightO = CGPoint(x: cover.maxX - cover.width * 0.12, y: cover.midY)
+            let span = cover.width * 0.14
+            drawFacingArcs(ctx, origin: leftO, radii: [span * 0.50, span * 1.00], facingRight: true, color: color, width: waveW)
+            drawFacingArcs(ctx, origin: rightO, radii: [span * 0.40, span * 0.75, span * 1.15], facingRight: false, color: color, width: waveW)
+        }
+    }
+
+    switch state {
+    case .idle, .armed:
+        break
+    case .recording:
+        let d = size * 0.28
+        let badge = CGRect(x: size - d - size * 0.02, y: size - d - size * 0.02, width: d, height: d)
+        ctx.saveGState()
+        ctx.setBlendMode(.clear)
+        fill(ctx, CGPath(ellipseIn: badge.insetBy(dx: -size * 0.04, dy: -size * 0.04), transform: nil), RGB(0, 0, 0))
+        ctx.restoreGState()
+        fill(ctx, CGPath(ellipseIn: badge, transform: nil), Palette.record)
+        let inner = badge.insetBy(dx: d * 0.28, dy: d * 0.28)
+        fill(ctx, CGPath(ellipseIn: inner, transform: nil), RGB(255, 252, 250))
+    case .processing:
+        let d = size * 0.30
+        let badge = CGRect(x: size - d - size * 0.02, y: size - d - size * 0.02, width: d, height: d)
+        ctx.saveGState()
+        ctx.setBlendMode(.clear)
+        fill(ctx, CGPath(ellipseIn: badge.insetBy(dx: -size * 0.04, dy: -size * 0.04), transform: nil), RGB(0, 0, 0))
+        ctx.restoreGState()
+        fill(ctx, CGPath(ellipseIn: badge, transform: nil), color)
+        ctx.saveGState()
+        ctx.setStrokeColor(RGB(255, 252, 250).cg)
+        ctx.setLineWidth(max(1.2, size * 0.07))
+        ctx.setLineCap(.round)
+        ctx.addArc(
+            center: CGPoint(x: badge.midX, y: badge.midY),
+            radius: d * 0.28,
+            startAngle: -.pi * 0.15,
+            endAngle: .pi * 1.15,
+            clockwise: false
+        )
+        ctx.strokePath()
+        ctx.restoreGState()
+    }
+}
+
+func renderVoiceMenuBar(variant: VoiceVariant, state: MenuState, dark: Bool, glyphPt: CGFloat, barWidth: Int, barHeight: Int) -> Data {
+    let ctx = makeContext(width: barWidth, height: barHeight)
+    let bg = dark ? Palette.menuDark : Palette.menuLight
+    ctx.setFillColor(bg.cg)
+    ctx.fill(CGRect(x: 0, y: 0, width: barWidth, height: barHeight))
+    let glyphPx = Int((glyphPt * 2).rounded())
+    ctx.saveGState()
+    let x = CGFloat(barWidth - glyphPx) / 2
+    let y = CGFloat(barHeight - glyphPx) / 2
+    ctx.translateBy(x: x, y: y)
+    let color = dark ? Palette.menuDarkGlyph : Palette.menuLightGlyph
+    drawVoiceMenuMark(variant, ctx: ctx, size: CGFloat(glyphPx), color: color, state: state)
+    ctx.restoreGState()
+    return pngData(from: ctx)
+}
+
+func renderVoiceGlyph(variant: VoiceVariant, state: MenuState, size: Int, dark: Bool) -> Data {
+    let ctx = makeContext(width: size, height: size)
+    let bg = dark ? Palette.menuDark : Palette.menuLight
+    ctx.setFillColor(bg.cg)
+    ctx.fill(CGRect(x: 0, y: 0, width: size, height: size))
+    let color = dark ? Palette.menuDarkGlyph : Palette.menuLightGlyph
+    drawVoiceMenuMark(variant, ctx: ctx, size: CGFloat(size), color: color, state: state)
+    return pngData(from: ctx)
+}
+
 // MARK: - SVG export
 
 func svgHandset(rect: CGRect, fill hex: String, earsDown: Bool = true) -> String {
@@ -653,6 +1052,65 @@ func svgMenuMark(_ concept: Concept) -> String {
     }
 }
 
+func svgWave(centerY: CGFloat, x0: CGFloat, width: CGFloat, height: CGFloat, amps: [CGFloat], invert: Bool, stroke hex: String, sw: CGFloat) -> String {
+    let n = max(amps.count, 1)
+    let samples = max(28, n * 14)
+    let sign: CGFloat = invert ? -1 : 1
+    var d = ""
+    for i in 0...samples {
+        let t = CGFloat(i) / CGFloat(samples)
+        let x = x0 + t * width
+        let idx = min(Int(floor(t * CGFloat(n))), n - 1)
+        let local = t * CGFloat(n) - CGFloat(idx)
+        let y = centerY - sign * sin(local * .pi) * height * amps[idx]
+        d += i == 0 ? String(format: "M%.2f,%.2f", x, y) : String(format: " L%.2f,%.2f", x, y)
+    }
+    return "<path d='\(d)' fill='none' stroke='\(hex)' stroke-width='\(sw)' stroke-linecap='round' stroke-linejoin='round'/>"
+}
+
+func svgVoiceMark(_ variant: VoiceVariant) -> String {
+    let ink = "#1C1C1E"
+    switch variant {
+    case .splitWaves:
+        return """
+        <?xml version='1.0' encoding='UTF-8'?>
+        <svg xmlns='http://www.w3.org/2000/svg' width='128' height='128' viewBox='0 0 128 128'>
+          <rect x='20' y='12' width='88' height='104' rx='12' fill='none' stroke='\(ink)' stroke-width='8'/>
+          <rect x='20' y='12' width='18' height='104' rx='8' fill='\(ink)'/>
+          \(svgWave(centerY: 48, x0: 46, width: 54, height: 12, amps: voiceATiny, invert: false, stroke: ink, sw: 5))
+          \(svgWave(centerY: 86, x0: 46, width: 54, height: 12, amps: voiceBTiny, invert: true, stroke: ink, sw: 5))
+        </svg>
+        """
+    case .linedVoices:
+        return """
+        <?xml version='1.0' encoding='UTF-8'?>
+        <svg xmlns='http://www.w3.org/2000/svg' width='128' height='128' viewBox='0 0 128 128'>
+          <rect x='10' y='16' width='50' height='96' rx='10' fill='none' stroke='\(ink)' stroke-width='7'/>
+          <rect x='68' y='16' width='50' height='96' rx='10' fill='none' stroke='\(ink)' stroke-width='7'/>
+          \(svgWave(centerY: 64, x0: 18, width: 34, height: 14, amps: voiceATiny, invert: false, stroke: ink, sw: 5))
+          \(svgWave(centerY: 64, x0: 76, width: 34, height: 14, amps: voiceBTiny, invert: true, stroke: ink, sw: 5))
+        </svg>
+        """
+    case .facingVoices:
+        return """
+        <?xml version='1.0' encoding='UTF-8'?>
+        <svg xmlns='http://www.w3.org/2000/svg' width='128' height='128' viewBox='0 0 128 128'>
+          <rect x='20' y='12' width='88' height='104' rx='12' fill='none' stroke='\(ink)' stroke-width='8'/>
+          <rect x='20' y='12' width='18' height='104' rx='8' fill='\(ink)'/>
+          <path d='M58,44 A18,22 0 0 1 58,84' fill='none' stroke='\(ink)' stroke-width='6' stroke-linecap='round'/>
+          <path d='M52,50 A12,16 0 0 1 52,78' fill='none' stroke='\(ink)' stroke-width='6' stroke-linecap='round'/>
+          <path d='M96,40 A22,28 0 0 0 96,88' fill='none' stroke='\(ink)' stroke-width='6' stroke-linecap='round'/>
+          <path d='M88,48 A14,18 0 0 0 88,80' fill='none' stroke='\(ink)' stroke-width='6' stroke-linecap='round'/>
+          <path d='M82,54 A8,12 0 0 0 82,74' fill='none' stroke='\(ink)' stroke-width='6' stroke-linecap='round'/>
+        </svg>
+        """
+    }
+}
+
+func svgForVoice(_ variant: VoiceVariant) -> String {
+    svgVoiceMark(variant)
+}
+
 // MARK: - Raster
 
 func makeContext(width: Int, height: Int) -> CGContext {
@@ -726,6 +1184,53 @@ func renderGlyphOnly(concept: Concept, state: MenuState, size: Int, dark: Bool) 
     return pngData(from: ctx)
 }
 
+func renderVoiceContactSheet(variants: [VoiceVariant], sizes: [Int]) -> Data {
+    let cell: Int = 160
+    let labelH: Int = 28
+    let cols = sizes.count
+    let rows = variants.count
+    let pad = 16
+    let width = pad * 2 + cols * cell + (cols - 1) * 12
+    let height = pad * 2 + rows * (cell + labelH) + (rows - 1) * 12 + 36
+    let ctx = makeContext(width: width, height: height)
+    ctx.setFillColor(RGB(28, 28, 30).cg)
+    ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+    func drawLabel(_ text: String, at point: CGPoint, size fontSize: CGFloat, color: RGB) {
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: fontSize, weight: .medium),
+            .foregroundColor: NSColor(srgbRed: color.r, green: color.g, blue: color.b, alpha: 1)
+        ]
+        let str = NSAttributedString(string: text, attributes: attrs)
+        ctx.saveGState()
+        ctx.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
+        let line = CTLineCreateWithAttributedString(str)
+        ctx.textPosition = point
+        CTLineDraw(line, ctx)
+        ctx.restoreGState()
+    }
+    drawLabel("CallNotes voice-wave variants  ·  no phone", at: CGPoint(x: pad, y: 22), size: 13, color: RGB(200, 200, 204))
+    for (r, variant) in variants.enumerated() {
+        for (c, sz) in sizes.enumerated() {
+            let x = pad + c * (cell + 12)
+            let y = 40 + pad + r * (cell + labelH + 12)
+            ctx.setFillColor(RGB(44, 44, 46).cg)
+            ctx.fill(CGRect(x: x, y: y, width: cell, height: cell))
+            let icon = renderVoiceIcon(variant, size: sz, squircle: true)
+            let nsimage = NSImage(data: icon)!
+            let cg = nsimage.cgImage(forProposedRect: nil, context: nil, hints: nil)!
+            let dest = CGRect(x: x, y: y, width: cell, height: cell)
+            ctx.saveGState()
+            ctx.translateBy(x: dest.minX, y: dest.maxY)
+            ctx.scaleBy(x: 1, y: -1)
+            ctx.interpolationQuality = sz <= 32 ? .none : .high
+            ctx.draw(cg, in: CGRect(origin: .zero, size: dest.size))
+            ctx.restoreGState()
+            drawLabel("\(variant.slug)  \(sz)pt", at: CGPoint(x: x, y: y + cell + 16), size: 11, color: RGB(170, 170, 176))
+        }
+    }
+    return pngData(from: ctx)
+}
+
 func renderContactSheet(concepts: [Concept], sizes: [Int]) -> Data {
     let cell: Int = 160
     let labelH: Int = 28
@@ -796,6 +1301,7 @@ func publish(_ data: Data, name: String) {
     }
 }
 
+if !args.voicesOnly {
 for concept in Concept.allCases {
     let svg = svgForConcept(concept)
     let svgURL = args.outDir.appendingPathComponent("Concepts").appendingPathComponent("\(concept.slug).svg")
@@ -838,6 +1344,39 @@ for concept in Concept.allCases {
 
 let sheet = renderContactSheet(concepts: Concept.allCases, sizes: sizes)
 publish(sheet, name: "concepts-contact-sheet.png")
+}
+
+for variant in VoiceVariant.allCases {
+    let svg = svgForVoice(variant)
+    let svgURL = args.outDir.appendingPathComponent("Concepts").appendingPathComponent("\(variant.slug).svg")
+    try! svg.write(to: svgURL, atomically: true, encoding: .utf8)
+    let markURL = args.outDir.appendingPathComponent("Concepts").appendingPathComponent("\(variant.slug)-menubar.svg")
+    try! svgVoiceMark(variant).write(to: markURL, atomically: true, encoding: .utf8)
+
+    for size in sizes {
+        let png = renderVoiceIcon(variant, size: size, squircle: true)
+        publish(png, name: "\(variant.slug)-\(size).png")
+        let unmasked = renderVoiceIcon(variant, size: size, squircle: false)
+        writePNG(unmasked, to: args.outDir.appendingPathComponent("Renders").appendingPathComponent("\(variant.slug)-\(size)-square.png"))
+    }
+
+    for dark in [false, true] {
+        let appearance = dark ? "dark" : "light"
+        let strip = renderVoiceMenuBar(variant: variant, state: .idle, dark: dark, glyphPt: 18, barWidth: 360, barHeight: 48)
+        publish(strip, name: "\(variant.slug)-menubar-18-\(appearance).png")
+        let glyph = renderVoiceGlyph(variant: variant, state: .idle, size: 36, dark: dark)
+        publish(glyph, name: "\(variant.slug)-menubar-18pt@2x-\(appearance).png")
+        let armed = renderVoiceMenuBar(variant: variant, state: .armed, dark: dark, glyphPt: 18, barWidth: 360, barHeight: 48)
+        publish(armed, name: "\(variant.slug)-menubar-armed-18-\(appearance).png")
+    }
+    publish(renderVoiceMenuBar(variant: variant, state: .recording, dark: false, glyphPt: 18, barWidth: 360, barHeight: 48), name: "\(variant.slug)-menubar-recording-light.png")
+    publish(renderVoiceMenuBar(variant: variant, state: .recording, dark: true, glyphPt: 18, barWidth: 360, barHeight: 48), name: "\(variant.slug)-menubar-recording-dark.png")
+    publish(renderVoiceMenuBar(variant: variant, state: .processing, dark: false, glyphPt: 18, barWidth: 360, barHeight: 48), name: "\(variant.slug)-menubar-processing-light.png")
+    publish(renderVoiceMenuBar(variant: variant, state: .processing, dark: true, glyphPt: 18, barWidth: 360, barHeight: 48), name: "\(variant.slug)-menubar-processing-dark.png")
+}
+
+let voiceSheet = renderVoiceContactSheet(variants: VoiceVariant.allCases, sizes: sizes)
+publish(voiceSheet, name: "voice-waves-contact-sheet.png")
 
 fputs("wrote concepts to \(args.outDir.path)\n", stderr)
 if let proof = args.proofDir {
