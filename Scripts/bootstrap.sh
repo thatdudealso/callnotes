@@ -24,6 +24,8 @@ POSTGRES_PLIST="$LAUNCH_AGENTS_DIR/com.thatdudealso.callnotes.postgresql.plist"
 OLLAMA_PLIST="$LAUNCH_AGENTS_DIR/com.thatdudealso.callnotes.ollama.plist"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CALLNOTES_OLLAMA_HOST="127.0.0.1:11434"
+LOCAL_SIGNING_NAME="CallNotes Local Signing"
+LOCAL_SIGNING_SYNC="$ROOT/Scripts/sync-local-signing.sh"
 
 say() { printf '%s\n' "$*"; }
 
@@ -33,6 +35,108 @@ run() {
   else
     "$@"
   fi
+}
+
+local_signing_identity_present() {
+  security find-identity -v -p codesigning 2>/dev/null | grep -F "\"$LOCAL_SIGNING_NAME\"" >/dev/null
+}
+
+login_keychain_path() {
+  local keychain="$HOME/Library/Keychains/login.keychain-db"
+  if [[ -f "$keychain" ]]; then
+    printf '%s\n' "$keychain"
+    return
+  fi
+  keychain="$HOME/Library/Keychains/login.keychain"
+  if [[ -f "$keychain" ]]; then
+    printf '%s\n' "$keychain"
+    return
+  fi
+  say "login keychain not found"
+  exit 1
+}
+
+# Self-signed identity so macOS TCC grants (Microphone, Screen & System Audio)
+# survive rebuilds. Ad-hoc signatures bind the designated requirement to the
+# cdhash, which changes every build. A certificate leaf does not. Local
+# development only: cannot notarize or distribute.
+create_local_signing_identity() {
+  local work keychain p12_pass
+  work="$(mktemp -d)"
+  keychain="$(login_keychain_path)"
+
+  # Always delete the temp key material, including on `set -e` abort.
+  # shellcheck disable=SC2064
+  trap 'rm -rf "'"$work"'"' EXIT
+
+  cat > "$work/openssl.cnf" <<CNF
+[ req ]
+distinguished_name = dn
+x509_extensions    = v3
+prompt             = no
+
+[ dn ]
+CN = $LOCAL_SIGNING_NAME
+
+[ v3 ]
+basicConstraints       = critical,CA:false
+keyUsage               = critical,digitalSignature
+extendedKeyUsage       = critical,codeSigning
+subjectKeyIdentifier   = hash
+CNF
+
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$work/key.pem" -out "$work/cert.pem" \
+    -days 3650 -config "$work/openssl.cnf"
+
+  # macOS Security.framework cannot read OpenSSL 3's default PKCS12 encoding
+  # (AES-256-CBC + SHA-256 MAC) and fails with "MAC verification failed".
+  # SHA1/3DES is what `security import` accepts.
+  p12_pass="$(openssl rand -base64 24)"
+  openssl pkcs12 -export \
+    -inkey "$work/key.pem" -in "$work/cert.pem" \
+    -name "$LOCAL_SIGNING_NAME" -out "$work/identity.p12" \
+    -macalg sha1 -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES \
+    -passout "pass:$p12_pass"
+
+  security import "$work/identity.p12" \
+    -k "$keychain" \
+    -P "$p12_pass" -A -T /usr/bin/codesign -T /usr/bin/security
+
+  security add-trusted-cert \
+    -p codeSign -r trustRoot \
+    -k "$keychain" \
+    "$work/cert.pem"
+
+  rm -rf "$work"
+  trap - EXIT
+
+  if ! local_signing_identity_present; then
+    say "FAILED: identity '$LOCAL_SIGNING_NAME' is not visible to codesign"
+    exit 1
+  fi
+}
+
+ensure_local_signing_identity() {
+  if local_signing_identity_present; then
+    say "local signing identity '$LOCAL_SIGNING_NAME': present"
+    if "$CHECK_ONLY"; then
+      say "would write Configs/signing.local.xcconfig"
+      return
+    fi
+    "$LOCAL_SIGNING_SYNC"
+    return
+  fi
+
+  say "local signing identity '$LOCAL_SIGNING_NAME': absent"
+  if "$CHECK_ONLY"; then
+    say "would create identity '$LOCAL_SIGNING_NAME' and write Configs/signing.local.xcconfig"
+    return
+  fi
+
+  say "Creating local development code-signing identity '$LOCAL_SIGNING_NAME'"
+  create_local_signing_identity
+  "$LOCAL_SIGNING_SYNC"
 }
 
 write_ollama_plist() {
@@ -165,6 +269,8 @@ if ! command -v brew >/dev/null 2>&1; then
   say "Homebrew is required: https://brew.sh"
   exit 1
 fi
+
+ensure_local_signing_identity
 
 say "Installing or updating dedicated PostgreSQL 18 dependencies"
 run brew install postgresql@18 pgvector

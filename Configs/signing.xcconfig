@@ -1,0 +1,5 @@
+// Optional local code-signing overlay for Mac targets that hold TCC grants.
+// Scripts/sync-local-signing.sh writes signing.local.xcconfig when the
+// "CallNotes Local Signing" identity is in the login keychain.
+// A missing include is ignored: CODE_SIGN_STYLE stays Automatic (ad-hoc).
+#include? "signing.local.xcconfig"

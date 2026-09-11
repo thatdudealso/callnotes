@@ -8,6 +8,9 @@ options:
     macOS: "26.0"
     iOS: "26.0"
   createIntermediateGroups: true
+  # Writes Configs/signing.local.xcconfig when the local development identity
+  # exists so Mac TCC grants survive rebuilds. No-op (ad-hoc) without it.
+  preGenCommand: Scripts/sync-local-signing.sh
 
 settings:
   base:
@@ -31,6 +34,9 @@ targets:
         buildPhase: resources
     dependencies:
       - package: CallNotesCore
+    configFiles:
+      Debug: Configs/signing.xcconfig
+      Release: Configs/signing.xcconfig
     settings:
       base:
         PRODUCT_NAME: CallNotes
@@ -112,6 +118,9 @@ targets:
     dependencies:
       - target: CallNotesCaptureHarnessPlayback
       - package: CallNotesCore
+    configFiles:
+      Debug: Configs/signing.xcconfig
+      Release: Configs/signing.xcconfig
     settings:
       base:
         PRODUCT_NAME: CallNotesCaptureHarness

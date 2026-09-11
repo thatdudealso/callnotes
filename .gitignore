@@ -19,6 +19,7 @@ Package.resolved.lock
 
 # Secrets / local config
 *.local.env
+*.local.xcconfig
 
 # Private maintainer docs (implementation plan etc.); never commit
 docs/private/

@@ -98,11 +98,27 @@ profile that grants them.
 `project.yml` is the source of truth for the Xcode project. Run `xcodegen
 generate` whenever it changes; the generated project is deliberately ignored.
 
-For the dedicated local Postgres instance and the pinned Ollama notes models,
-review then run `Scripts/bootstrap.sh`. Use `Scripts/bootstrap.sh --check` to
-see the operations without making changes. The script pull-then-verifies each
-model digest in [docs/models.md](docs/models.md). Live notes generation against
-those models is gated on `CALLNOTES_OLLAMA=1`.
+For the dedicated local Postgres instance, the local code-signing identity,
+and the pinned Ollama notes models, review then run `Scripts/bootstrap.sh`.
+Use `Scripts/bootstrap.sh --check` to see the operations without making
+changes. The script pull-then-verifies each model digest in
+[docs/models.md](docs/models.md). Live notes generation against those models
+is gated on `CALLNOTES_OLLAMA=1`.
+
+## Local code signing
+
+macOS stores Microphone and Screen & System Audio Recording grants against an
+app's designated requirement. An ad-hoc signature's requirement is the
+cdhash, which changes on every rebuild, so those prompts return. Bootstrap
+creates a self-signed identity named `CallNotes Local Signing` in the login
+keychain (idempotent). `xcodegen generate` then signs `CallNotesMac` and
+`CallNotesCaptureHarness` with it so the grants survive rebuilds.
+
+This identity is local-development only. It is not an Apple Developer
+certificate and cannot notarize or distribute. CI and any clone without the
+certificate keep the previous ad-hoc behavior. Set
+`CALLNOTES_LOCAL_SIGNING=0` before `xcodegen generate` to force that fallback
+on a machine that has the identity.
 
 ## License and attribution
 
