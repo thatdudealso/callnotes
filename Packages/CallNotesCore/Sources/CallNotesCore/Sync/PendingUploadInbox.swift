@@ -308,13 +308,16 @@ public enum SharedRecordingTitleParser {
         )
     }
 
-    /// A file-backed share carries its filename, so the strict date format would
-    /// otherwise choke on the extension. Only known audio extensions are removed:
-    /// "Call with Dr. Smith" must keep its surname.
+    /// A share title is text, not a path: "Call with A/B Growth" must survive, so
+    /// the suffix is trimmed as a string rather than through `URL` components.
+    /// Only known audio extensions go, keeping "Call with Dr. Smith" intact.
+    private static let strippableExtensions: Set<String> = ["m4a", "caf", "wav", "mp3", "mp4", "aac", "aiff", "aif"]
+
     private static func droppingAudioExtension(_ title: String) -> String {
-        let candidate = URL(fileURLWithPath: title)
-        guard InboxPaths.audioExtensions.contains(candidate.pathExtension.lowercased()) else { return title }
-        return candidate.deletingPathExtension().lastPathComponent
+        guard let dot = title.lastIndex(of: "."),
+              strippableExtensions.contains(title[title.index(after: dot)...].lowercased())
+        else { return title }
+        return String(title[title.startIndex..<dot])
     }
 
     private static func date(from text: String) -> Date? {

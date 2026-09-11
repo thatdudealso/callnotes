@@ -41,6 +41,23 @@ import Testing
         #expect(components.minute == 30)
     }
 
+    /// A share title is not a file path: a slash in the counterparty name must
+    /// not truncate it while the extension is being trimmed.
+    @Test func aCounterpartyNameContainingASlashSurvivesTheFilenameSuffix() throws {
+        let metadata = try #require(
+            SharedRecordingTitleParser.parse("Call with A/B Growth, Sep 10, 2026 at 1:30 PM.m4a")
+        )
+
+        #expect(metadata.counterpartyName == "A/B Growth")
+        let components = Calendar.current.dateComponents(
+            [.year, .month, .day, .hour, .minute],
+            from: try #require(metadata.startedAt)
+        )
+        #expect(components.year == 2026)
+        #expect(components.hour == 13)
+        #expect(components.minute == 30)
+    }
+
     /// Only audio extensions are dropped; a surname after a period is not one.
     @Test func aTitleEndingInAnAbbreviationKeepsItsCounterparty() throws {
         let metadata = try #require(
@@ -890,6 +907,38 @@ import Testing
         #expect(mirrored.summary == "Could not finish this recording")
     }
 
+    /// Speaker profiles are global to the store, so one `GET /mirror` must read
+    /// them once however much history the Mac holds - the phone triggers this on
+    /// every Calls tab appearance.
+    @Test func mirrorReadsTheSpeakerProfileTableOncePerRequest() async throws {
+        let store = ProfileCountingStore()
+        let server = MacSyncServer(store: store)
+        try await store.upsertSpeakerProfile(
+            SpeakerProfile(id: UUID(), displayName: "Priya", centroid: Array(repeating: 0.1, count: 8), embeddingModel: "test", sampleCount: 1)
+        )
+        for index in 0..<3 {
+            let callID = UUID()
+            try await store.upsertCall(Call(
+                id: callID,
+                source: .iphoneRecording,
+                startedAt: Date(timeIntervalSince1970: 1_700_000_000 + Double(index)),
+                counterpartyName: "Priya",
+                audioPath: "/tmp/\(callID.uuidString).m4a",
+                sttProvider: .appleSpeech,
+                status: .notesReady
+            ))
+            try await store.replaceSegments(callID: callID, provider: .appleSpeech, [
+                Segment(callID: callID, seq: 0, startSec: 0, endSec: 1, channel: .near, text: "Hello.", provider: .appleSpeech)
+            ])
+        }
+
+        let mirror = try await server.mirror()
+
+        #expect(mirror.calls.count == 3)
+        #expect(mirror.calls.allSatisfy { $0.segments.count == 1 })
+        #expect(store.profileFetchCount == 1)
+    }
+
     @Test func importedPhoneUploadKeepsTheUploadedCallAndItsMetadata() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("callnotes-phone-handoff-\(UUID().uuidString)", isDirectory: true)
@@ -1088,6 +1137,67 @@ private struct RelaunchHarness {
         session.invalidateAndCancel()
         try? FileManager.default.removeItem(at: root)
     }
+}
+
+/// A `MemoryStore` that reports how often the mirror re-reads the global speaker
+/// profile table, which on Postgres is a full scan plus vector parsing per row.
+private final class ProfileCountingStore: CallStore, @unchecked Sendable {
+    private let wrapped = MemoryStore()
+    private let lock = NSLock()
+    private var profileFetches = 0
+
+    var profileFetchCount: Int { lock.withLock { profileFetches } }
+
+    func fetchSpeakerProfiles() async throws -> [SpeakerProfile] {
+        lock.withLock { profileFetches += 1 }
+        return try await wrapped.fetchSpeakerProfiles()
+    }
+
+    func migrate() async throws { try await wrapped.migrate() }
+    func upsertCall(_ call: Call) async throws { try await wrapped.upsertCall(call) }
+    func deleteCall(id: UUID) async throws { try await wrapped.deleteCall(id: id) }
+    func fetchCalls() async throws -> [Call] { try await wrapped.fetchCalls() }
+    func fetchCall(id: UUID) async throws -> Call? { try await wrapped.fetchCall(id: id) }
+    func dashboardChanges() async -> AsyncStream<Void> { await wrapped.dashboardChanges() }
+
+    func fetchPreferredNotesByCall() async throws -> [UUID: NotesRecord] {
+        try await wrapped.fetchPreferredNotesByCall()
+    }
+
+    func closeStrandedRecordings(excluding liveCallID: UUID?) async throws -> [Call] {
+        try await wrapped.closeStrandedRecordings(excluding: liveCallID)
+    }
+
+    func replaceSegments(callID: UUID, provider: STTProviderID, _ segments: [Segment]) async throws {
+        try await wrapped.replaceSegments(callID: callID, provider: provider, segments)
+    }
+
+    func fetchSegments(callID: UUID, provider: STTProviderID?) async throws -> [Segment] {
+        try await wrapped.fetchSegments(callID: callID, provider: provider)
+    }
+
+    func upsertSpeakerProfile(_ profile: SpeakerProfile) async throws { try await wrapped.upsertSpeakerProfile(profile) }
+
+    func replaceCallSpeakers(callID: UUID, speakers: [CallSpeaker]) async throws {
+        try await wrapped.replaceCallSpeakers(callID: callID, speakers: speakers)
+    }
+
+    func fetchCallSpeakers(callID: UUID) async throws -> [CallSpeaker] {
+        try await wrapped.fetchCallSpeakers(callID: callID)
+    }
+
+    func insertSpeakerSample(profileID: UUID, embedding: [Float], embeddingModel: String, callID: UUID?, positive: Bool) async throws {
+        try await wrapped.insertSpeakerSample(
+            profileID: profileID,
+            embedding: embedding,
+            embeddingModel: embeddingModel,
+            callID: callID,
+            positive: positive
+        )
+    }
+
+    func upsertNotes(_ record: NotesRecord) async throws { try await wrapped.upsertNotes(record) }
+    func fetchNotes(callID: UUID) async throws -> [NotesRecord] { try await wrapped.fetchNotes(callID: callID) }
 }
 
 /// `URLAuthenticationChallenge` requires a sender; the delegate under test

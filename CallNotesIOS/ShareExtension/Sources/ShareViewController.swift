@@ -111,8 +111,9 @@ final class ShareViewController: UIViewController {
         dateRow.spacing = 12
         let send = sendButton
         send.configuration = .filled()
-        send.configuration?.title = "Send to Mac"
+        send.configuration?.title = "Preparing recording…"
         send.configuration?.image = UIImage(systemName: "arrow.up.circle.fill")
+        send.isEnabled = false
         send.addTarget(self, action: #selector(sendToMac), for: .touchUpInside)
         send.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
         send.accessibilityLabel = "Send shared recording to Mac"
@@ -155,6 +156,8 @@ final class ShareViewController: UIViewController {
                 }
                 self.sharedAudioURL = staged.audioURL
                 self.sharedAudioLease = staged
+                self.sendButton.configuration?.title = "Send to Mac"
+                self.sendButton.isEnabled = true
                 let metadata = ExtensionRecordingTitleParser.parse(suggestedName ?? "")
                 self.nameField.text = metadata?.counterpartyName
                 if let startedAt = metadata?.startedAt {
@@ -169,7 +172,7 @@ final class ShareViewController: UIViewController {
     /// the job the first tap already enqueued.
     @objc private func sendToMac() {
         guard !isSending else { return }
-        guard let sharedAudioURL else { showError("This share item is not an audio file."); return }
+        guard let sharedAudioURL else { showError("This recording is still being prepared. Try again in a moment."); return }
         let counterpartyName = nameField.text
         let startedAt = datePicker.date
         isSending = true
@@ -178,7 +181,7 @@ final class ShareViewController: UIViewController {
         Task {
             defer {
                 self.isSending = false
-                self.sendButton.isEnabled = true
+                self.sendButton.isEnabled = self.sharedAudioURL != nil
                 self.cancelButton?.isEnabled = true
                 if self.didDisappear { self.discardUnsentStaging() }
             }

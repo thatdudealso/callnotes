@@ -4,18 +4,58 @@ import Observation
 import SwiftData
 import SwiftUI
 
+/// The mirror is a cache of the Mac's history, so a store that cannot be opened
+/// must never take the app down with it: the phone is the only process that can
+/// drain the upload queue, and recordings already stopped and queued would be
+/// stranded behind a launch crash.
 @main
 struct CallNotesIOSApp: App {
     @UIApplicationDelegateAdaptor(PhoneAppDelegate.self) private var appDelegate
-    private let container: ModelContainer
+    private let container: ModelContainer?
+    private let storeMessage: String?
 
     init() {
-        container = try! ModelContainer(for: MirroredCall.self, MirroredSegment.self, MirroredNote.self)
+        do {
+            container = try ModelContainer(for: MirroredCall.self, MirroredSegment.self, MirroredNote.self)
+            storeMessage = nil
+        } catch {
+            let rebuilt = try? ModelContainer(
+                for: MirroredCall.self, MirroredSegment.self, MirroredNote.self,
+                configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+            )
+            container = rebuilt
+            storeMessage = rebuilt == nil
+                ? "Call history is unavailable on this iPhone. Queued recordings still upload to your Mac."
+                : "Call history could not be opened, so it is being rebuilt from your Mac. Uploads are unaffected."
+        }
     }
 
     var body: some Scene {
-        WindowGroup { RootTabView() }
-            .modelContainer(container)
+        WindowGroup {
+            if let container {
+                RootTabView(storeMessage: storeMessage).modelContainer(container)
+            } else {
+                MirrorUnavailableView(message: storeMessage)
+            }
+        }
+    }
+}
+
+/// The mirror could not be opened even in memory, so `@Query` has no container
+/// to read. Uploads still drain: that is the part the user cannot redo.
+struct MirrorUnavailableView: View {
+    let message: String?
+    @State private var model = PhoneAppModel()
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("Call history unavailable", systemImage: "exclamationmark.triangle")
+        } description: {
+            Text(message ?? "Call history is unavailable on this iPhone.")
+        } actions: {
+            if let status = model.uploadStatus { Text(status).font(.footnote).foregroundStyle(.secondary) }
+        }
+        .task { await model.resumePendingUploads() }
     }
 }
 
@@ -30,8 +70,12 @@ final class PhoneAppDelegate: NSObject, UIApplicationDelegate {
 }
 
 struct RootTabView: View {
-    @State private var model = PhoneAppModel()
+    @State private var model: PhoneAppModel
     @Environment(\.scenePhase) private var scenePhase
+
+    init(storeMessage: String? = nil) {
+        _model = State(initialValue: PhoneAppModel(storeMessage: storeMessage))
+    }
 
     var body: some View {
         TabView {
@@ -85,71 +129,125 @@ struct RootTabView: View {
 
 /// SwiftData backing for `MirrorReconciler`. It only performs the writes the
 /// reconciler asks for, so the cascade rules stay in one tested place.
-struct SwiftDataMirrorWriter: MirrorWriting {
-    let context: ModelContext
+///
+/// The whole mirror is read once into identifier maps and every lookup is served
+/// from them: `apply` runs on the main actor and touches every segment of every
+/// call, so a fetch per row would hang the Calls tab for seconds on a normal
+/// history.
+final class SwiftDataMirrorWriter: MirrorWriting {
+    private let context: ModelContext
+    private var calls: [UUID: MirroredCall]
+    private var segments: [String: MirroredSegment]
+    private var segmentIDsByCall: [UUID: Set<String>]
+    private var notes: [UUID: MirroredNote]
+
+    init(context: ModelContext) throws {
+        self.context = context
+        calls = Dictionary(
+            try context.fetch(FetchDescriptor<MirroredCall>()).map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let storedSegments = try context.fetch(FetchDescriptor<MirroredSegment>())
+        segments = Dictionary(storedSegments.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        segmentIDsByCall = storedSegments.reduce(into: [:]) { index, segment in
+            index[segment.callID, default: []].insert(segment.id)
+        }
+        notes = Dictionary(
+            try context.fetch(FetchDescriptor<MirroredNote>()).map { ($0.callID, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+    }
 
     func localCallIDs() throws -> [UUID] {
-        try context.fetch(FetchDescriptor<MirroredCall>()).map(\.id)
+        Array(calls.keys)
     }
 
     func localSegmentIDs(callID: UUID) throws -> [String] {
-        try context.fetch(FetchDescriptor<MirroredSegment>(predicate: #Predicate { $0.callID == callID })).map(\.id)
+        Array(segmentIDsByCall[callID] ?? [])
     }
 
     func removeSegment(id: String) throws {
-        for segment in try context.fetch(FetchDescriptor<MirroredSegment>(predicate: #Predicate { $0.id == id })) {
-            context.delete(segment)
-        }
+        guard let segment = segments.removeValue(forKey: id) else { return }
+        segmentIDsByCall[segment.callID]?.remove(id)
+        context.delete(segment)
     }
 
     func removeSegments(callID: UUID) throws {
-        for segment in try context.fetch(FetchDescriptor<MirroredSegment>(predicate: #Predicate { $0.callID == callID })) {
-            context.delete(segment)
+        for id in segmentIDsByCall.removeValue(forKey: callID) ?? [] {
+            if let segment = segments.removeValue(forKey: id) { context.delete(segment) }
         }
     }
 
     func removeNote(callID: UUID) throws {
-        for note in try context.fetch(FetchDescriptor<MirroredNote>(predicate: #Predicate { $0.callID == callID })) {
-            context.delete(note)
-        }
+        guard let note = notes.removeValue(forKey: callID) else { return }
+        context.delete(note)
     }
 
     func removeCall(id: UUID) throws {
-        for call in try context.fetch(FetchDescriptor<MirroredCall>(predicate: #Predicate { $0.id == id })) {
-            context.delete(call)
-        }
+        guard let call = calls.removeValue(forKey: id) else { return }
+        context.delete(call)
     }
 
     func upsertCall(_ remote: SyncDTO.MirroredCall) throws {
-        let id = remote.id
-        let call = try context.fetch(FetchDescriptor<MirroredCall>(predicate: #Predicate { $0.id == id })).first
-            ?? MirroredCall(id: id, title: remote.title, summary: remote.summary, startedAt: remote.startedAt, source: remote.source, status: remote.status)
+        guard let call = calls[remote.id] else {
+            let call = MirroredCall(
+                id: remote.id,
+                title: remote.title,
+                summary: remote.summary,
+                startedAt: remote.startedAt,
+                source: remote.source,
+                status: remote.status
+            )
+            calls[remote.id] = call
+            context.insert(call)
+            return
+        }
         call.title = remote.title
         call.summary = remote.summary
         call.startedAt = remote.startedAt
         call.source = remote.source
         call.status = remote.status
-        if call.modelContext == nil { context.insert(call) }
     }
 
     func upsertSegment(_ remote: SyncDTO.MirroredSegment, callID: UUID) throws {
-        let id = remote.id
-        let segment = try context.fetch(FetchDescriptor<MirroredSegment>(predicate: #Predicate { $0.id == id })).first
-            ?? MirroredSegment(id: id, callID: callID, speaker: remote.speaker, text: remote.text, startSec: remote.startSec)
+        guard let segment = segments[remote.id] else {
+            let segment = MirroredSegment(
+                id: remote.id,
+                callID: callID,
+                speaker: remote.speaker,
+                text: remote.text,
+                startSec: remote.startSec
+            )
+            segments[remote.id] = segment
+            segmentIDsByCall[callID, default: []].insert(remote.id)
+            context.insert(segment)
+            return
+        }
+        if segment.callID != callID {
+            segmentIDsByCall[segment.callID]?.remove(remote.id)
+            segmentIDsByCall[callID, default: []].insert(remote.id)
+        }
         segment.callID = callID
         segment.speaker = remote.speaker
         segment.text = remote.text
         segment.startSec = remote.startSec
-        if segment.modelContext == nil { context.insert(segment) }
     }
 
     func upsertNote(_ remote: SyncDTO.MirroredNote, callID: UUID) throws {
-        let note = try context.fetch(FetchDescriptor<MirroredNote>(predicate: #Predicate { $0.callID == callID })).first
-            ?? MirroredNote(callID: callID, summary: remote.summary, decisions: remote.decisions, actionItems: remote.actionItems)
+        guard let note = notes[callID] else {
+            let note = MirroredNote(
+                callID: callID,
+                summary: remote.summary,
+                decisions: remote.decisions,
+                actionItems: remote.actionItems
+            )
+            notes[callID] = note
+            context.insert(note)
+            return
+        }
         note.summary = remote.summary
         note.decisions = remote.decisions
         note.actionItems = remote.actionItems
-        if note.modelContext == nil { context.insert(note) }
     }
 
     func commit() throws {
@@ -162,10 +260,12 @@ final class PhoneAppModel {
     var isPaired = false
     var pairedMacName = "Your Mac"
     var uploadStatus: String?
+    var storeMessage: String?
     var recorder = InPersonRecorder()
     @ObservationIgnored nonisolated(unsafe) private var pairingInvalidatedObserver: NSObjectProtocol?
 
-    init() {
+    init(storeMessage: String? = nil) {
+        self.storeMessage = storeMessage
         isPaired = PhonePairingStore.load() != nil
         pairingInvalidatedObserver = NotificationCenter.default.addObserver(
             forName: PhonePairingStore.pairingInvalidatedNotification,
@@ -359,6 +459,11 @@ struct PhoneSettingsView: View {
                 }
                 Section("Retention") { LabeledContent("Shared recording files", value: "Until uploaded") }
                 if let status = model.uploadStatus { Section("Uploads") { Text(status).foregroundStyle(.secondary) } }
+                if let storeMessage = model.storeMessage {
+                    Section("Call history") {
+                        Label(storeMessage, systemImage: "exclamationmark.triangle").foregroundStyle(.secondary)
+                    }
+                }
             }.navigationTitle("Settings")
             .onAppear { model.refreshPairingState() }
             .sheet(isPresented: $showingScanner) { QRScannerSheet { code in

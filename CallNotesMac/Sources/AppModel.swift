@@ -268,10 +268,10 @@ final class AppModel {
         guard let server = syncServer else { return }
         do {
             try await server.revoke(deviceID: id)
-            pairedDevices = await server.pairedDevices()
         } catch {
             statusMessage = error.localizedDescription
         }
+        pairedDevices = await server.pairedDevices()
     }
 
     /// The one owner of which engine an import runs on. Both the inbox and the

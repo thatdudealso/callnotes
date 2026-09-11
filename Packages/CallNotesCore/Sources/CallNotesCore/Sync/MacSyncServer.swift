@@ -309,6 +309,7 @@ public actor MacSyncServer {
 
     private static func mirror(store: any CallStore) async throws -> SyncDTO.Mirror {
         let calls = try await store.fetchCalls()
+        let profiles = try await store.fetchSpeakerProfiles()
         var mirrored: [SyncDTO.MirroredCall] = []
         for call in calls {
             let note = try await store.fetchPreferredNotes(callID: call.id)
@@ -320,7 +321,7 @@ public actor MacSyncServer {
                 startedAt: call.startedAt,
                 source: call.source.rawValue,
                 status: call.status.rawValue,
-                segments: try await mirroredSegments(segments, callID: call.id, store: store),
+                segments: try await mirroredSegments(segments, callID: call.id, profiles: profiles, store: store),
                 note: note.map { .init(summary: $0.body.summary, decisions: $0.body.decisions, actionItems: $0.body.actionItems.map(\.text)) }
             ))
         }
@@ -337,9 +338,13 @@ public actor MacSyncServer {
         }
     }
 
-    private static func mirroredSegments(_ segments: [Segment], callID: UUID, store: any CallStore) async throws -> [SyncDTO.MirroredSegment] {
+    private static func mirroredSegments(
+        _ segments: [Segment],
+        callID: UUID,
+        profiles: [SpeakerProfile],
+        store: any CallStore
+    ) async throws -> [SyncDTO.MirroredSegment] {
         let speakers = try await store.fetchCallSpeakers(callID: callID)
-        let profiles = try await store.fetchSpeakerProfiles()
         let turns = TurnAttributor.fromStored(segments: segments, speakers: speakers, profiles: profiles)
         return zip(segments, turns).map { segment, turn in
             .init(id: "\(callID.uuidString)-\(segment.seq)", speaker: turn.speakerName, text: segment.text, startSec: segment.startSec)
