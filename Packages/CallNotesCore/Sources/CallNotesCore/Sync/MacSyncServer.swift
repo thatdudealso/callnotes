@@ -96,27 +96,19 @@ public actor MacSyncServer {
             guard let boundary = contentType.split(separator: "boundary=").last.map(String.init), contentType.contains("multipart/form-data") else {
                 throw HTTPError(.badRequest, message: "Expected multipart audio upload.")
             }
-            guard await self.reserve(uploadID) else {
-                throw HTTPError(.conflict, message: "This recording is still being accepted.")
-            }
-            if let settled = await self.settleExistingUpload(uploadID) {
-                await self.release(uploadID)
-                return Response(status: Self.responseStatus(for: settled))
-            }
-            do {
-                try FileManager.default.createDirectory(at: self.receivedUploadsDirectory, withIntermediateDirectories: true)
+            let outcome = try await self.acceptUpload(uploadID: uploadID) {
                 guard let upload = try await MultipartCallUpload.stream(
                     request.body,
                     boundary: boundary,
                     directory: self.receivedUploadsDirectory,
                     uploadID: uploadID
                 ) else { throw HTTPError(.badRequest, message: "Malformed audio upload.") }
-                let outcome = try await self.acceptReserved(uploadID: uploadID, metadata: upload.metadata, audioURL: upload.audioURL)
-                return Response(status: Self.responseStatus(for: outcome))
-            } catch {
-                await self.release(uploadID)
-                throw error
+                return (upload.metadata, upload.audioURL)
             }
+            guard outcome != .inProgress else {
+                throw HTTPError(.conflict, message: "This recording is still being accepted.")
+            }
+            return Response(status: Self.responseStatus(for: outcome))
         }
         let certificate = try NIOSSLCertificate(bytes: Array(identity.certificateDER), format: .der)
         let key = try NIOSSLPrivateKey(bytes: Array(identity.privateKeyPEM.utf8), format: .pem)
@@ -157,6 +149,21 @@ public actor MacSyncServer {
     /// overwrites an already processed one.
     func accept(uploadID: UUID, metadata: CallUploadMetadata, audio: Data, fileExtension: String) async throws -> UploadOutcome {
         guard !audio.isEmpty else { throw HTTPError(.badRequest, message: "Audio upload is empty.") }
+        return try await acceptUpload(uploadID: uploadID) {
+            let audioURL = self.receivedUploadsDirectory
+                .appendingPathComponent("\(uploadID.uuidString).\(MultipartCallUpload.safeAudioExtension(fileExtension))")
+            try audio.write(to: audioURL, options: .atomic)
+            return (metadata, audioURL)
+        }
+    }
+
+    /// The one reserve -> settle -> stage -> accept -> unwind path. The route and
+    /// the in-memory entry point differ only in how the audio reaches the staging
+    /// directory, so the ordering the tests pin is the ordering the phone hits.
+    private func acceptUpload(
+        uploadID: UUID,
+        stage: () async throws -> (metadata: CallUploadMetadata, audioURL: URL)
+    ) async throws -> UploadOutcome {
         guard reserve(uploadID) else { return .inProgress }
         do {
             if let settled = await settleExistingUpload(uploadID) {
@@ -164,9 +171,8 @@ public actor MacSyncServer {
                 return settled
             }
             try FileManager.default.createDirectory(at: receivedUploadsDirectory, withIntermediateDirectories: true)
-            let audioURL = receivedUploadsDirectory.appendingPathComponent("\(uploadID.uuidString).\(MultipartCallUpload.safeAudioExtension(fileExtension))")
-            try audio.write(to: audioURL, options: .atomic)
-            return try await acceptReserved(uploadID: uploadID, metadata: metadata, audioURL: audioURL)
+            let staged = try await stage()
+            return try await acceptReserved(uploadID: uploadID, metadata: staged.metadata, audioURL: staged.audioURL)
         } catch {
             release(uploadID)
             throw error

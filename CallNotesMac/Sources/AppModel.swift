@@ -82,7 +82,7 @@ final class AppModel {
     private var syncActivity: NSObjectProtocol?
     var pairingQRPayload: String?
     var pairedDevices: [PairedDevice] = []
-    var pairedDevicesWarning: String?
+    var unsavedRevocations: [UUID: String] = [:]
 
     var selectedCall: Call? {
         calls.first { $0.id == selectedCallID }
@@ -266,19 +266,35 @@ final class AppModel {
     }
 
     /// A revoke that could not be written is blocked in memory but comes back on
-    /// the next launch, so the pane the user acted in has to say so: the row
-    /// alone reads like a finished revocation.
+    /// the next launch, so the pane the user acted in has to say so. The failure
+    /// is kept per device: the row it belongs to is the one that reads wrong, and
+    /// revoking a different phone must not clear a warning that is still true.
     func revokePairedDevice(_ id: UUID) async {
         guard let server = syncServer else { return }
-        let name = pairedDevices.first { $0.id == id }?.name ?? "This iPhone"
-        pairedDevicesWarning = nil
         do {
             try await server.revoke(deviceID: id)
+            unsavedRevocations[id] = nil
         } catch {
             statusMessage = error.localizedDescription
-            pairedDevicesWarning = "\(name) is blocked now, but the change could not be saved (\(error.localizedDescription)). Revoke it again once the disk is writable, or it is active again after a restart."
+            unsavedRevocations[id] = error.localizedDescription
         }
         pairedDevices = await server.pairedDevices()
+    }
+
+    /// The content-hash index is what keeps a re-shared recording from becoming a
+    /// second call, so it is resolved from Application Support here rather than
+    /// as a side effect of the inbox watcher, which the phone path never starts.
+    /// An index that cannot be persisted is reported, never silently substituted.
+    private func resolvedImportDuplicates() -> InboxDuplicateIndex {
+        if let importDuplicates { return importDuplicates }
+        do {
+            let index = InboxDuplicateIndex(storageURL: try InboxPaths.seenIndexURL())
+            importDuplicates = index
+            return index
+        } catch {
+            statusMessage = "Duplicate recordings cannot be detected: \(error.localizedDescription)"
+            return InboxDuplicateIndex()
+        }
     }
 
     /// The one owner of which engine an import runs on. Both the inbox and the
@@ -310,7 +326,7 @@ final class AppModel {
                 meta: meta
             ),
             notes: notesSpine,
-            duplicates: importDuplicates ?? InboxDuplicateIndex(),
+            duplicates: resolvedImportDuplicates(),
             onProgress: { [weak self] update in
                 Task { @MainActor in
                     self?.upsertImportJob(update)
@@ -817,9 +833,7 @@ final class AppModel {
         do {
             let directory = try InboxPaths.resolvedInbox()
             inboxURL = directory
-            let seen = try InboxPaths.seenIndexURL()
-            let duplicates = InboxDuplicateIndex(storageURL: seen)
-            importDuplicates = duplicates
+            _ = resolvedImportDuplicates()
             let iCloud = InboxPaths.iCloudDriveInbox()?.standardizedFileURL
             let source: CallSource =
                 iCloud == directory.standardizedFileURL ? .iphoneRecording : .fileImport

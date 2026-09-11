@@ -32,12 +32,6 @@ struct DevicesSettingsView: View {
             }
 
             Section("Paired phones") {
-                if let warning = appModel.pairedDevicesWarning {
-                    Label(warning, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .accessibilityLabel("Revocation was not saved: \(warning)")
-                }
                 if appModel.pairedDevices.isEmpty {
                     Text("No iPhones are paired.")
                         .foregroundStyle(.secondary)
@@ -46,9 +40,17 @@ struct DevicesSettingsView: View {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(device.name)
-                                Text(device.revokedAt == nil ? "Active" : "Revoked")
+                                Text(Self.status(of: device, unsaved: appModel.unsavedRevocations[device.id] != nil))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
+                                if let failure = appModel.unsavedRevocations[device.id] {
+                                    Label(
+                                        "The paired-device file could not be written (\(failure)). \(device.name) is blocked while CallNotes stays open, and is paired again after a restart until the write succeeds.",
+                                        systemImage: "exclamationmark.triangle.fill"
+                                    )
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                                }
                             }
                             Spacer()
                             if device.revokedAt == nil {
@@ -67,6 +69,11 @@ struct DevicesSettingsView: View {
         .padding()
         .frame(minWidth: 520, minHeight: 430)
         .task { await appModel.refreshPairingTicket() }
+    }
+
+    private static func status(of device: PairedDevice, unsaved: Bool) -> String {
+        if device.revokedAt == nil { return "Active" }
+        return unsaved ? "Revoked, not saved" : "Revoked"
     }
 
     private static func qrImage(payload: String) -> Image? {

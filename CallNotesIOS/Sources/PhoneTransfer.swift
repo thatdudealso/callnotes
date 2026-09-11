@@ -70,14 +70,39 @@ enum PhonePairingStore {
     private static let defaultsKey = "paired_mac"
     static let pairingInvalidatedNotification = Notification.Name("CallNotesPhonePairingInvalidated")
 
+    /// The replacement token is written first and the superseded ones are removed
+    /// only once it is durable: a keychain failure part-way through re-pairing
+    /// must leave the Mac this phone is already paired with, not no Mac at all.
     static func save(_ configuration: PhonePairingConfiguration, token: String) throws {
-        var query = PairingKeychain.itemQuery(account: configuration.deviceID.uuidString)
-        SecItemDelete(PairingKeychain.serviceQuery() as CFDictionary)
+        let account = configuration.deviceID.uuidString
+        let encoded = try JSONEncoder().encode(configuration)
+        let superseded = pairedAccounts().filter { $0 != account }
+        var query = PairingKeychain.itemQuery(account: account)
         query[kSecValueData] = Data(token.utf8)
         query[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        let status = SecItemAdd(query as CFDictionary, nil)
+        var status = SecItemAdd(query as CFDictionary, nil)
+        if status == errSecDuplicateItem {
+            status = SecItemUpdate(
+                PairingKeychain.itemQuery(account: account) as CFDictionary,
+                [kSecValueData: Data(token.utf8)] as CFDictionary
+            )
+        }
         guard status == errSecSuccess else { throw PairingKeychain.failure(status) }
-        UserDefaults(suiteName: PhoneSharedContainer.appGroupIdentifier)?.set(try JSONEncoder().encode(configuration), forKey: defaultsKey)
+        UserDefaults(suiteName: PhoneSharedContainer.appGroupIdentifier)?.set(encoded, forKey: defaultsKey)
+        for account in superseded {
+            SecItemDelete(PairingKeychain.itemQuery(account: account) as CFDictionary)
+        }
+    }
+
+    private static func pairedAccounts() -> [String] {
+        var query = PairingKeychain.serviceQuery()
+        query[kSecMatchLimit] = kSecMatchLimitAll
+        query[kSecReturnAttributes] = true
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let items = result as? [[CFString: Any]]
+        else { return [] }
+        return items.compactMap { $0[kSecAttrAccount] as? String }
     }
 
     static func load() -> (PhonePairingConfiguration, String)? {
