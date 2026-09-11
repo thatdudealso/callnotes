@@ -206,7 +206,7 @@ public actor MacSyncServer {
     /// already finished is handed back untouched, so a re-send of a recording
     /// the Mac completed is acknowledged rather than refused.
     private func authorizedExistingCall(_ uploadID: UUID) async throws -> Call? {
-        guard let call = try? await store.fetchCall(id: uploadID) else { return nil }
+        guard let call = try await store.fetchCall(id: uploadID) else { return nil }
         let owned = Self.isPhoneUpload(call.source)
             && (isProcessed(call) || processingUploadIDs.contains(uploadID) || hasPhoneUploadReceipt(uploadID))
         guard owned else {

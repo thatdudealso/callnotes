@@ -35,12 +35,14 @@ final class PhoneSyncUITests: XCTestCase {
 
         app.tabBars.buttons["Calls"].tap()
         // A recording shared with an empty Contact field must read as "Call",
-        // never as a blank headline. A row reads as "<headline>, <status>", so
-        // the headline is matched rather than the whole label.
+        // never as a blank headline. A row speaks its headline, summary, and
+        // start time as one label, so the headline is matched rather than the
+        // whole label.
         let unnamed = callRow(in: app, headline: "Call")
         XCTAssertTrue(unnamed.waitForExistence(timeout: 20), "The mirrored call with no counterparty name never appeared.")
         XCTAssertTrue(callRow(in: app, headline: "Priya Shah").waitForExistence(timeout: 10))
-        // The status a row speaks is a phrase, never the wire token.
+        // The status a row carries as its accessibility value is a phrase,
+        // never the wire token.
         XCTAssertFalse(
             app.descendants(matching: .any)
                 .matching(NSPredicate(format: "label CONTAINS %@", "notes_ready"))

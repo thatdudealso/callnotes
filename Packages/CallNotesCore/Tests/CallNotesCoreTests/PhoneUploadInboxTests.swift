@@ -1411,6 +1411,46 @@ import Testing
         #expect(staged.isEmpty)
     }
 
+    /// A store this Mac cannot read is not an answer about who owns an upload
+    /// identifier. Collapsing a transient fetch failure into "no such call"
+    /// would refuse a legitimate resume with 403, and the phone treats 4xx as
+    /// terminal: it deletes the only copy of the recording.
+    @Test func anUnreadableStoreIsNotAnsweredAsARefusedUpload() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-store-blip-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let store = FlakyFetchStore(failingFetches: 1)
+        let uploadID = UUID()
+        let originalPath = "/tmp/\(uploadID.uuidString)-phone.m4a"
+        try await store.upsertCall(Call(
+            id: uploadID,
+            source: .iphoneRecording,
+            startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            counterpartyName: "Priya",
+            audioPath: originalPath,
+            sttProvider: .appleSpeech,
+            status: .failed
+        ))
+        try CallUploadMetadata(source: .iphoneRecording)
+            .writeSidecar(nextTo: root.appendingPathComponent("\(uploadID.uuidString).m4a"))
+        let server = MacSyncServer(store: store, receivedUploadsDirectory: root)
+
+        do {
+            _ = try await server.accept(
+                uploadID: uploadID,
+                metadata: CallUploadMetadata(source: .iphoneRecording),
+                audio: Data("recording".utf8),
+                fileExtension: "m4a"
+            )
+            Issue.record("an unreadable store should not settle the upload either way")
+        } catch {
+            #expect(error is StoreReadFailure)
+            #expect(!"\(error) \(error.localizedDescription)".contains("not a phone upload"))
+        }
+        #expect(try await store.fetchCall(id: uploadID)?.audioPath == originalPath)
+    }
+
     /// The iCloud Drive inbox stores its imports as `.iphoneRecording`, so the
     /// source alone does not make a call addressable: only a row this Mac wrote
     /// from an earlier phone POST, whose staging it still holds, may be resumed.
@@ -1733,6 +1773,74 @@ private struct RelaunchHarness {
 
 /// A `MemoryStore` that reports how often the mirror re-reads the global speaker
 /// profile table, which on Postgres is a full scan plus vector parsing per row.
+struct StoreReadFailure: Error {}
+
+/// A store whose first reads fail the way a Postgres connection blip does, so a
+/// transient failure can be told apart from "this call does not exist".
+private final class FlakyFetchStore: CallStore, @unchecked Sendable {
+    private let wrapped = MemoryStore()
+    private let lock = NSLock()
+    private var failingFetches: Int
+
+    init(failingFetches: Int) { self.failingFetches = failingFetches }
+
+    func fetchCall(id: UUID) async throws -> Call? {
+        let fails: Bool = lock.withLock {
+            guard failingFetches > 0 else { return false }
+            failingFetches -= 1
+            return true
+        }
+        if fails { throw StoreReadFailure() }
+        return try await wrapped.fetchCall(id: id)
+    }
+
+    func migrate() async throws { try await wrapped.migrate() }
+    func upsertCall(_ call: Call) async throws { try await wrapped.upsertCall(call) }
+    func deleteCall(id: UUID) async throws { try await wrapped.deleteCall(id: id) }
+    func fetchCalls() async throws -> [Call] { try await wrapped.fetchCalls() }
+    func dashboardChanges() async -> AsyncStream<Void> { await wrapped.dashboardChanges() }
+    func fetchSpeakerProfiles() async throws -> [SpeakerProfile] { try await wrapped.fetchSpeakerProfiles() }
+
+    func fetchPreferredNotesByCall() async throws -> [UUID: NotesRecord] {
+        try await wrapped.fetchPreferredNotesByCall()
+    }
+
+    func closeStrandedRecordings(excluding liveCallID: UUID?) async throws -> [Call] {
+        try await wrapped.closeStrandedRecordings(excluding: liveCallID)
+    }
+
+    func replaceSegments(callID: UUID, provider: STTProviderID, _ segments: [Segment]) async throws {
+        try await wrapped.replaceSegments(callID: callID, provider: provider, segments)
+    }
+
+    func fetchSegments(callID: UUID, provider: STTProviderID?) async throws -> [Segment] {
+        try await wrapped.fetchSegments(callID: callID, provider: provider)
+    }
+
+    func upsertSpeakerProfile(_ profile: SpeakerProfile) async throws { try await wrapped.upsertSpeakerProfile(profile) }
+
+    func replaceCallSpeakers(callID: UUID, speakers: [CallSpeaker]) async throws {
+        try await wrapped.replaceCallSpeakers(callID: callID, speakers: speakers)
+    }
+
+    func fetchCallSpeakers(callID: UUID) async throws -> [CallSpeaker] {
+        try await wrapped.fetchCallSpeakers(callID: callID)
+    }
+
+    func insertSpeakerSample(profileID: UUID, embedding: [Float], embeddingModel: String, callID: UUID?, positive: Bool) async throws {
+        try await wrapped.insertSpeakerSample(
+            profileID: profileID,
+            embedding: embedding,
+            embeddingModel: embeddingModel,
+            callID: callID,
+            positive: positive
+        )
+    }
+
+    func upsertNotes(_ record: NotesRecord) async throws { try await wrapped.upsertNotes(record) }
+    func fetchNotes(callID: UUID) async throws -> [NotesRecord] { try await wrapped.fetchNotes(callID: callID) }
+}
+
 private final class ProfileCountingStore: CallStore, @unchecked Sendable {
     private let wrapped = MemoryStore()
     private let lock = NSLock()

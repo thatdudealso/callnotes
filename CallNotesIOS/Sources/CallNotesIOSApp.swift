@@ -380,7 +380,7 @@ struct CallsView: View {
                                 Text(call.summary).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
                                 Text(call.startedAt.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.tertiary)
                             }.padding(.vertical, 4)
-                        }.accessibilityLabel("\(call.title), \(call.statusPhrase)")
+                        }.accessibilityValue(call.statusPhrase)
                     }.navigationDestination(for: UUID.self) { CallDetailView(callID: $0) }
                 }
             }
