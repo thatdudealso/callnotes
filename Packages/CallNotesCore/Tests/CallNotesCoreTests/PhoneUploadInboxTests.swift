@@ -22,6 +22,35 @@ import Testing
         #expect(components.minute == 30)
     }
 
+    /// A file-backed share hands over a filename, not a bare title, so the start
+    /// time must survive the extension the provider appends.
+    @Test func fileBackedShareNameStillPrefillsTheStartTime() throws {
+        let metadata = try #require(
+            SharedRecordingTitleParser.parse("Call with Priya Shah, Sep 10, 2026 at 1:30 PM.m4a")
+        )
+
+        #expect(metadata.counterpartyName == "Priya Shah")
+        let components = Calendar.current.dateComponents(
+            [.year, .month, .day, .hour, .minute],
+            from: try #require(metadata.startedAt)
+        )
+        #expect(components.year == 2026)
+        #expect(components.month == 9)
+        #expect(components.day == 10)
+        #expect(components.hour == 13)
+        #expect(components.minute == 30)
+    }
+
+    /// Only audio extensions are dropped; a surname after a period is not one.
+    @Test func aTitleEndingInAnAbbreviationKeepsItsCounterparty() throws {
+        let metadata = try #require(
+            SharedRecordingTitleParser.parse("Call with Smith Jr., Sep 10, 2026 at 1:30 PM")
+        )
+
+        #expect(metadata.counterpartyName == "Smith Jr.")
+        #expect(metadata.startedAt != nil)
+    }
+
     @Test func copiedUploadSurvivesANewProcessAndCanBeCompleted() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("callnotes-phone-upload-\(UUID().uuidString)", isDirectory: true)

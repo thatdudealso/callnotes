@@ -181,17 +181,14 @@ public actor PairingAuthority {
         return updated
     }
 
+    /// A failed write is reported to the caller but never un-revokes the device:
+    /// the phone the user just revoked must stop authorizing immediately, even
+    /// while `paired-devices.json` cannot be written.
     public func revoke(deviceID: UUID) throws {
         guard var stored = devices[deviceID] else { throw PairingError.unknownDevice }
-        let original = stored
         stored.device.revokedAt = now()
         devices[deviceID] = stored
-        do {
-            try persist()
-        } catch {
-            devices[deviceID] = original
-            throw error
-        }
+        try persist()
     }
 
     public func pairedDevices() -> [PairedDevice] {

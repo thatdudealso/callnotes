@@ -377,7 +377,15 @@ struct PhoneSettingsView: View {
     @ObservationIgnored private var recorder: AVAudioRecorder?
     @ObservationIgnored private var lease: SharedAudioStaging.Lease?
     @ObservationIgnored private var captureStartedAt: Date?
+    @ObservationIgnored private var isStarting = false
+
+    /// The Record button reads `isRecording`, which only flips once capture is
+    /// running, so a second tap during permission and session setup would start
+    /// a second recorder on the same route and strand the first one's lease.
     func start() async throws {
+        guard !isRecording, !isStarting else { return }
+        isStarting = true
+        defer { isStarting = false }
         guard await AVAudioApplication.requestRecordPermission() else {
             throw NSError(domain: "CallNotes.Recorder", code: 1, userInfo: [NSLocalizedDescriptionKey: "CallNotes needs microphone access to record."])
         }
@@ -410,7 +418,10 @@ struct PhoneSettingsView: View {
     /// 45 minutes late.
     func stop() throws -> (url: URL, startedAt: Date) {
         defer { Self.deactivateSession() }
-        guard let recorder, let captureStartedAt else { throw CocoaError(.fileNoSuchFile) }
+        guard let recorder, let captureStartedAt else {
+            isRecording = false
+            throw CocoaError(.fileNoSuchFile)
+        }
         recorder.stop()
         isRecording = false
         self.recorder = nil

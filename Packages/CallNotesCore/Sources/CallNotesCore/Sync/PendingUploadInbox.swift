@@ -295,7 +295,7 @@ public enum SharedAudioStaging {
 /// Unknown formats remain uploadable with no guessed metadata.
 public enum SharedRecordingTitleParser {
     public static func parse(_ title: String) -> CallUploadMetadata? {
-        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = droppingAudioExtension(title).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         let expression = #/^Call with (.+?),\s*(.+)$/#
         guard let match = trimmed.wholeMatch(of: expression) else { return nil }
@@ -306,6 +306,15 @@ public enum SharedRecordingTitleParser {
             startedAt: date(from: dateText),
             counterpartyName: name.isEmpty ? nil : name
         )
+    }
+
+    /// A file-backed share carries its filename, so the strict date format would
+    /// otherwise choke on the extension. Only known audio extensions are removed:
+    /// "Call with Dr. Smith" must keep its surname.
+    private static func droppingAudioExtension(_ title: String) -> String {
+        let candidate = URL(fileURLWithPath: title)
+        guard InboxPaths.audioExtensions.contains(candidate.pathExtension.lowercased()) else { return title }
+        return candidate.deletingPathExtension().lastPathComponent
     }
 
     private static func date(from text: String) -> Date? {

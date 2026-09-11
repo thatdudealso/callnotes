@@ -50,7 +50,9 @@ import Testing
         #expect(await afterRevoke.authorize(token: pair.token) == nil)
     }
 
-    @Test func revocationFailsWhenItsSnapshotCannotBePersisted() async throws {
+    /// Revoke reports the failed write, but the lost phone must stop authorizing
+    /// right away rather than waiting for a snapshot that never lands.
+    @Test func revocationHoldsAndStillReportsAFailedPersist() async throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("callnotes-paired-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: url) }
@@ -68,7 +70,8 @@ import Testing
         await #expect(throws: CocoaError.self) {
             try await failing.revoke(deviceID: pair.deviceID)
         }
-        #expect(await failing.authorize(token: pair.token)?.id == pair.deviceID)
+        #expect(await failing.authorize(token: pair.token) == nil)
+        #expect(await failing.pairedDevices().first(where: { $0.id == pair.deviceID })?.revokedAt != nil)
 
         let reloaded = PairingAuthority(persistenceURL: url)
         #expect(await reloaded.authorize(token: pair.token)?.id == pair.deviceID)
