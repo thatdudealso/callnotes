@@ -49,6 +49,29 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: job.audioURL.path))
     }
 
+    @Test func enqueueRollsBackItsCopiedFileWhenManifestPersistenceFails() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("recording.m4a")
+        try Data("recording".utf8).write(to: source)
+        let directory = root.appendingPathComponent("shared", isDirectory: true)
+        let inbox = try PendingUploadInbox(
+            directory: directory,
+            persistenceWriter: { _, _ in throw CocoaError(.fileWriteNoPermission) }
+        )
+
+        await #expect(throws: CocoaError.self) {
+            _ = try await inbox.enqueue(audioAt: source, metadata: .init(source: .iphoneRecording))
+        }
+        #expect(await inbox.pending().isEmpty)
+        let uploads = try FileManager.default.contentsOfDirectory(
+            at: directory.appendingPathComponent("uploads", isDirectory: true),
+            includingPropertiesForKeys: nil
+        )
+        #expect(uploads.isEmpty)
+    }
+
     @Test func failedRelaunchUploadRemainsQueuedForRetry() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

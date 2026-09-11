@@ -83,9 +83,13 @@ public actor PendingUploadInbox {
     private let uploadsDirectory: URL
     private let manifestURL: URL
     private let manifestLock: ManifestLock
+    private let persistenceWriter: @Sendable (URL, Data) throws -> Void
     private var entries: [PendingUpload]
 
-    public init(directory: URL) throws {
+    public init(
+        directory: URL,
+        persistenceWriter: (@Sendable (URL, Data) throws -> Void)? = nil
+    ) throws {
         let uploadsDirectory = directory.appendingPathComponent("uploads", isDirectory: true)
         let manifestURL = directory.appendingPathComponent("pending-uploads.json")
         let manifestLock = ManifestLock(url: directory.appendingPathComponent("pending-uploads.lock"))
@@ -95,6 +99,9 @@ public actor PendingUploadInbox {
         self.uploadsDirectory = uploadsDirectory
         self.manifestURL = manifestURL
         self.manifestLock = manifestLock
+        self.persistenceWriter = persistenceWriter ?? { url, data in
+            try data.write(to: url, options: .atomic)
+        }
         self.entries = entries
     }
 
@@ -107,9 +114,16 @@ public actor PendingUploadInbox {
             let suffix = sourceURL.pathExtension.isEmpty ? "m4a" : sourceURL.pathExtension
             let destination = uploadsDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension(suffix)
             try FileManager.default.copyItem(at: sourceURL, to: destination)
+            let previousEntries = entries
             let entry = PendingUpload(audioURL: destination, metadata: metadata)
             entries.append(entry)
-            try persist()
+            do {
+                try persist()
+            } catch {
+                entries = previousEntries
+                try? FileManager.default.removeItem(at: destination)
+                throw error
+            }
             return entry
         }
     }
@@ -174,7 +188,7 @@ public actor PendingUploadInbox {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(entries)
-        try data.write(to: manifestURL, options: .atomic)
+        try persistenceWriter(manifestURL, data)
     }
 
     private func withManifestLock<T>(_ operation: () throws -> T) throws -> T {
