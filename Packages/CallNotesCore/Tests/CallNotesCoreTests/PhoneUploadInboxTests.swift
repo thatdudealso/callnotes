@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Security
 import Testing
@@ -311,15 +312,122 @@ import Testing
         #expect(await reopened.pending(now: .distantFuture).map(\.id) == [job.id])
     }
 
-    @Test func clientErrorResponseDropsTheRejectedRecording() async throws {
+    /// The drop destroys the phone's only copy, so it cannot be silent: the
+    /// starter hears about it now, and a process that was not running when the
+    /// background session settled the task still finds it in the inbox.
+    @Test func clientErrorResponseDropsTheRejectedRecordingAndReportsIt() async throws {
+        let harness = try RelaunchHarness()
+        defer { harness.tearDown() }
+        let source = harness.root.appendingPathComponent("rejected.m4a")
+        try Data("recording".utf8).write(to: source)
+        let sharingProcess = try PendingUploadInbox(directory: harness.inboxDirectory)
+        let job = try await sharingProcess.enqueue(
+            audioAt: source,
+            metadata: .init(source: .iphoneRecording, counterpartyName: "Priya Shah")
+        )
+
+        await harness.coordinator.taskCompleted(uploadID: job.id, error: nil, statusCode: 400)
+
+        #expect(harness.scheduler.log.contains("rejected:400:\(job.id)"))
+        let reopened = try PendingUploadInbox(directory: harness.inboxDirectory)
+        #expect(await reopened.pending(now: .distantFuture).isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: job.audioURL.path))
+        let rejections = await reopened.takeRejections()
+        #expect(rejections.map(\.id) == [job.id])
+        #expect(rejections.first?.statusCode == 400)
+        let message = try #require(RejectedUpload.summary(of: rejections))
+        #expect(message.contains("Priya Shah"))
+        #expect(message.contains("400"))
+        #expect(await reopened.takeRejections().isEmpty)
+    }
+
+    /// The app and the Share Extension now POST bodies from one writer, and the
+    /// Mac is the only reader of that format: a body it cannot parse is answered
+    /// 400, which deletes the recording instead of retrying it.
+    @Test func theSharedMultipartBodyIsWhatTheMacsParserAccepts() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let audioURL = root.appendingPathComponent("recording.m4a")
+        let audio = Data((0..<200_000).map { UInt8($0 % 251) })
+        try audio.write(to: audioURL)
+        let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let job = PendingUpload(
+            audioURL: audioURL,
+            metadata: .init(source: .iphoneMeeting, startedAt: startedAt, counterpartyName: "Priya Shah")
+        )
+
+        let body = try MultipartUploadBody.make(job: job, directory: root.appendingPathComponent("requests", isDirectory: true))
+
+        let boundary = try #require(body.contentType.components(separatedBy: "boundary=").last)
+        let staging = root.appendingPathComponent("staging", isDirectory: true)
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+        var parser = try MultipartStreamParser(boundary: boundary, directory: staging, uploadID: job.id)
+        let encoded = try Data(contentsOf: body.url)
+        for chunk in stride(from: 0, to: encoded.count, by: 8192) {
+            try parser.append(encoded.subdata(in: chunk..<min(chunk + 8192, encoded.count)))
+        }
+        let staged = try #require(try parser.finish())
+
+        #expect(staged.metadata.source == .iphoneMeeting)
+        #expect(staged.metadata.startedAt == startedAt)
+        #expect(staged.metadata.counterpartyName == "Priya Shah")
+        #expect(try Data(contentsOf: staged.audioURL) == audio)
+    }
+
+    /// 409 and 401 keep the job, so neither may leave a drop report behind.
+    @Test func retainedResponsesNeverReportARejection() async throws {
         let harness = try RelaunchHarness()
         defer { harness.tearDown() }
         let job = try await harness.enqueueRecording()
 
-        await harness.coordinator.taskCompleted(uploadID: job.id, error: nil, statusCode: 400)
+        await harness.coordinator.taskCompleted(uploadID: job.id, error: nil, statusCode: 409)
+        await harness.coordinator.taskCompleted(uploadID: job.id, error: nil, statusCode: 401)
 
         let reopened = try PendingUploadInbox(directory: harness.inboxDirectory)
-        #expect(await reopened.pending(now: .distantFuture).isEmpty)
+        #expect(await reopened.pending().map(\.id) == [job.id])
+        #expect(await reopened.takeRejections().isEmpty)
+    }
+
+    /// The lock file is the only thing serializing the app against the Share
+    /// Extension. Replacing its inode - which `FileManager.createFile` does -
+    /// drops a lock another process is holding, so an operation must wait for a
+    /// foreign holder rather than walking straight into the critical section.
+    @Test func manifestLockWaitsForAHolderInAnotherProcess() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("recording.m4a")
+        try Data("recording".utf8).write(to: source)
+        let directory = root.appendingPathComponent("shared", isDirectory: true)
+        let inbox = try PendingUploadInbox(directory: directory)
+        let lockURL = directory.appendingPathComponent("pending-uploads.lock")
+
+        let held = open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        #expect(held >= 0)
+        #expect(flock(held, LOCK_EX) == 0)
+
+        let finished = FlagBox()
+        let enqueue = Task.detached {
+            let job = try await inbox.enqueue(audioAt: source, metadata: .init(source: .iphoneRecording))
+            finished.set()
+            return job
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(finished.isSet == false)
+
+        let contender = open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        #expect(contender >= 0)
+        #expect(flock(contender, LOCK_EX | LOCK_NB) == -1)
+        #expect(errno == EWOULDBLOCK)
+        close(contender)
+
+        #expect(flock(held, LOCK_UN) == 0)
+        close(held)
+        let job = try await enqueue.value
+
+        #expect(FileManager.default.fileExists(atPath: job.audioURL.path))
+        #expect(await inbox.pending().map(\.id) == [job.id])
     }
 
     /// 202 is the Mac resuming an upload it already holds, so the phone must
@@ -1167,6 +1275,17 @@ private final class RecordingScheduler: SessionUploadTaskStarting, @unchecked Se
     func start(_ job: PendingUpload) async { record("start:\(job.id)") }
     func discardRequestBody(for uploadID: UUID) async { record("discard:\(uploadID)") }
     func authorizationRejected() async { record("authorization-rejected") }
+    func uploadRejected(_ job: PendingUpload, statusCode: Int) async { record("rejected:\(statusCode):\(job.id)") }
+}
+
+/// A flag a detached task can set without the test having to await it, so a
+/// blocked operation can be observed as still blocked.
+private final class FlagBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    var isSet: Bool { lock.withLock { value } }
+    func set() { lock.withLock { value = true } }
 }
 
 /// A relaunched app: a real background `URLSession` wired to the production

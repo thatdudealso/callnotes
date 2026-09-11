@@ -391,6 +391,9 @@ private final class PhoneBonjourResolver: NSObject, NetServiceBrowserDelegate, N
 /// asks for. It owns no durable state: the Core coordinator decides when a job
 /// is completed, retried, or backed off.
 final class PhoneUploadScheduler: SessionUploadTaskStarting, @unchecked Sendable {
+    static let uploadRejectedNotification = Notification.Name("CallNotesUploadRejected")
+    static let uploadRejectionMessageKey = "message"
+
     private let lock = NSLock()
     private var sessionProvider: (@Sendable () -> URLSession)?
 
@@ -425,6 +428,22 @@ final class PhoneUploadScheduler: SessionUploadTaskStarting, @unchecked Sendable
         NotificationCenter.default.post(name: PhonePairingStore.pairingInvalidatedNotification, object: nil)
     }
 
+    /// The queued copy is already gone by the time this runs, so a foreground
+    /// app hears about the drop now; `PendingUploadInbox` keeps the record for
+    /// a launch that happens after the background session settled it.
+    func uploadRejected(_ job: PendingUpload, statusCode: Int) async {
+        NotificationCenter.default.post(
+            name: Self.uploadRejectedNotification,
+            object: nil,
+            userInfo: [
+                Self.uploadRejectionMessageKey: UploadRejectedError(
+                    statusCode: statusCode,
+                    counterpartyName: job.metadata.counterpartyName
+                ).localizedDescription
+            ]
+        )
+    }
+
     func discardRequestBody(for uploadID: UUID) async {
         guard let directory = try? PhoneSharedContainer.requestBodiesDirectory() else { return }
         try? FileManager.default.removeItem(at: directory.appendingPathComponent(uploadID.uuidString).appendingPathExtension("multipart"))
@@ -435,14 +454,13 @@ final class PhoneUploadScheduler: SessionUploadTaskStarting, @unchecked Sendable
     }
 
     static func schedule(_ job: PendingUpload, connection: PhonePairingConfiguration, token: String, session: URLSession) throws {
-        let body = try MultipartUploadBody.make(job: job, directory: PhoneSharedContainer.requestBodiesDirectory())
-        var request = URLRequest(url: connection.serverURL.appendingPathComponent("calls").appendingPathComponent(job.id.uuidString))
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue(body.contentType, forHTTPHeaderField: "Content-Type")
-        let task = session.uploadTask(with: request, fromFile: body.url)
-        task.taskDescription = job.id.uuidString
-        task.resume()
+        try PhoneUploadRequest.start(
+            job: job,
+            serverURL: connection.serverURL,
+            token: token,
+            session: session,
+            requestBodiesDirectory: PhoneSharedContainer.requestBodiesDirectory()
+        )
     }
 }
 
@@ -500,41 +518,24 @@ final class BackgroundUploadCoordinator: @unchecked Sendable {
         try await coordinator.enqueue(audioAt: url, metadata: metadata)
     }
 
+    /// A recording the Mac refused was deleted from the queue, so that report
+    /// outranks the queue's own status - but it never replaces the work, or a
+    /// single drop would hold back every other pending upload for a cycle.
     func resume() async -> String {
         await coordinator?.sweepOrphanedUploads()
+        var rejection: String?
+        if let coordinator { rejection = RejectedUpload.summary(of: await coordinator.takeRejections()) }
         guard PhonePairingStore.load() != nil else {
-            return "Pair with your Mac to send pending recordings."
+            return rejection ?? "Pair with your Mac to send pending recordings."
         }
-        guard let coordinator else { return "Shared storage for recordings is unavailable." }
+        guard let coordinator else { return rejection ?? "Shared storage for recordings is unavailable." }
         await coordinator.resume(skipping: await activeTaskIDs())
-        return "Pending recordings will upload in the background."
+        return rejection ?? "Pending recordings will upload in the background."
     }
 
     private func activeTaskIDs() async -> Set<UUID> {
         let phoneTasks = await session.allTasks
         let shareTasks = await shareSession.allTasks
         return Set((phoneTasks + shareTasks).compactMap { $0.taskDescription.flatMap(UUID.init(uuidString:)) })
-    }
-}
-
-enum MultipartUploadBody {
-    struct Body { var url: URL; var contentType: String }
-
-    static func make(job: PendingUpload, directory: URL) throws -> Body {
-        let boundary = "CallNotes-\(UUID().uuidString)"
-        let url = directory.appendingPathComponent(job.id.uuidString).appendingPathExtension("multipart")
-        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
-        try? FileManager.default.removeItem(at: url)
-        FileManager.default.createFile(atPath: url.path, contents: nil)
-        let output = try FileHandle(forWritingTo: url)
-        defer { try? output.close() }
-        try output.write(contentsOf: "--\(boundary)\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n".data(using: .utf8)!)
-        try output.write(contentsOf: encoder.encode(job.metadata))
-        try output.write(contentsOf: "\r\n--\(boundary)\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"\(job.audioURL.lastPathComponent)\"\r\nContent-Type: audio/mp4\r\n\r\n".data(using: .utf8)!)
-        let input = try FileHandle(forReadingFrom: job.audioURL)
-        defer { try? input.close() }
-        while let chunk = try input.read(upToCount: 64 * 1024), !chunk.isEmpty { try output.write(contentsOf: chunk) }
-        try output.write(contentsOf: "\r\n--\(boundary)--\r\n".data(using: .utf8)!)
-        return Body(url: url, contentType: "multipart/form-data; boundary=\(boundary)")
     }
 }

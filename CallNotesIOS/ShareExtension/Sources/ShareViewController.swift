@@ -334,17 +334,24 @@ private final class ExtensionUploadScheduler: SessionUploadTaskStarting, @unchec
         Self.removePairing()
     }
 
+    /// A rejection that lands while this process is still alive belongs in the
+    /// share sheet's alert; one that lands later is drained from the inbox's
+    /// rejection log the next time the containing app resumes.
+    func uploadRejected(_ job: PendingUpload, statusCode: Int) async {
+        let rejection = UploadRejectedError(statusCode: statusCode, counterpartyName: job.metadata.counterpartyName)
+        lock.withLock { failure = rejection }
+    }
+
     private func schedule(job: PendingUpload) throws {
         let (configuration, token) = try requirePairing()
         guard let session = lock.withLock({ self.session }) else { throw CocoaError(.fileNoSuchFile) }
-        let body = try ExtensionMultipartBody.make(job: job, directory: container.appendingPathComponent(SyncConstants.uploadRequestsDirectoryName, isDirectory: true))
-        var request = URLRequest(url: configuration.serverURL.appendingPathComponent("calls").appendingPathComponent(job.id.uuidString))
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue(body.contentType, forHTTPHeaderField: "Content-Type")
-        let task = session.uploadTask(with: request, fromFile: body.url)
-        task.taskDescription = job.id.uuidString
-        task.resume()
+        try PhoneUploadRequest.start(
+            job: job,
+            serverURL: configuration.serverURL,
+            token: token,
+            session: session,
+            requestBodiesDirectory: container.appendingPathComponent(SyncConstants.uploadRequestsDirectoryName, isDirectory: true)
+        )
     }
 
     private static func configuration() -> ExtensionPairingConfiguration? {
@@ -370,27 +377,5 @@ private final class ExtensionUploadScheduler: SessionUploadTaskStarting, @unchec
 }
 
 private struct ExtensionPairingConfiguration: Codable { var serverURL: URL; var deviceID: UUID; var certificateFingerprint: String }
-
-private enum ExtensionMultipartBody {
-    struct Body { var url: URL; var contentType: String }
-    static func make(job: PendingUpload, directory: URL) throws -> Body {
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let boundary = "CallNotes-\(UUID().uuidString)"
-        let url = directory.appendingPathComponent(job.id.uuidString).appendingPathExtension("multipart")
-        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
-        try? FileManager.default.removeItem(at: url)
-        FileManager.default.createFile(atPath: url.path, contents: nil)
-        let output = try FileHandle(forWritingTo: url)
-        defer { try? output.close() }
-        try output.write(contentsOf: "--\(boundary)\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n".data(using: .utf8)!)
-        try output.write(contentsOf: encoder.encode(job.metadata))
-        try output.write(contentsOf: "\r\n--\(boundary)\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"\(job.audioURL.lastPathComponent)\"\r\nContent-Type: audio/mp4\r\n\r\n".data(using: .utf8)!)
-        let input = try FileHandle(forReadingFrom: job.audioURL)
-        defer { try? input.close() }
-        while let chunk = try input.read(upToCount: 64 * 1024), !chunk.isEmpty { try output.write(contentsOf: chunk) }
-        try output.write(contentsOf: "\r\n--\(boundary)--\r\n".data(using: .utf8)!)
-        return Body(url: url, contentType: "multipart/form-data; boundary=\(boundary)")
-    }
-}
 
 private enum ExtensionRecordingTitleParser { static func parse(_ title: String) -> CallUploadMetadata? { SharedRecordingTitleParser.parse(title) } }

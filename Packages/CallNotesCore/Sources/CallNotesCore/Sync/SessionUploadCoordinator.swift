@@ -12,12 +12,16 @@ public protocol SessionUploadTaskStarting: Sendable {
     /// The paired Mac rejected this device's token, so no other endpoint or
     /// backoff will help until the user pairs again.
     func authorizationRejected() async
+    /// The Mac permanently refused this recording and the queued copy is gone,
+    /// so the drop has to reach the user rather than reading as still pending.
+    func uploadRejected(_ job: PendingUpload, statusCode: Int) async
 }
 
 public extension SessionUploadTaskStarting {
     func retry(_ job: PendingUpload) async -> Bool { false }
     func discardRequestBody(for uploadID: UUID) async {}
     func authorizationRejected() async {}
+    func uploadRejected(_ job: PendingUpload, statusCode: Int) async {}
 }
 
 /// The system's background-relaunch completion handlers. UIKit delivers
@@ -65,6 +69,12 @@ public actor SessionUploadCoordinator {
         await inbox.sweepOrphans()
     }
 
+    /// The recordings the Mac refused since the last time anyone asked. Drained
+    /// on read so a drop is reported once rather than on every launch.
+    public func takeRejections() async -> [RejectedUpload] {
+        await inbox.takeRejections()
+    }
+
     public func resume(skipping active: Set<UUID> = []) async {
         for job in await inbox.pending() where !active.contains(job.id) {
             await starter.start(job)
@@ -97,7 +107,9 @@ public actor SessionUploadCoordinator {
             return
         }
         if let statusCode, (400..<500).contains(statusCode) {
-            try? await inbox.markCompleted(uploadID)
+            if let job = try? await inbox.markRejected(uploadID, statusCode: statusCode) {
+                await starter.uploadRejected(job, statusCode: statusCode)
+            }
             await starter.discardRequestBody(for: uploadID)
             return
         }

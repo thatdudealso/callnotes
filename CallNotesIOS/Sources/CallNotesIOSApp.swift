@@ -264,6 +264,7 @@ final class PhoneAppModel {
     var storeMessage: String?
     var recorder = InPersonRecorder()
     @ObservationIgnored nonisolated(unsafe) private var pairingInvalidatedObserver: NSObjectProtocol?
+    @ObservationIgnored nonisolated(unsafe) private var uploadRejectedObserver: NSObjectProtocol?
 
     init(storeMessage: String? = nil) {
         self.storeMessage = storeMessage
@@ -277,11 +278,25 @@ final class PhoneAppModel {
                 self?.showUnpairedState()
             }
         }
+        uploadRejectedObserver = NotificationCenter.default.addObserver(
+            forName: PhoneUploadScheduler.uploadRejectedNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let message = notification.userInfo?[PhoneUploadScheduler.uploadRejectionMessageKey] as? String
+            Task { @MainActor [weak self] in
+                guard let message else { return }
+                self?.uploadStatus = message
+            }
+        }
     }
 
     deinit {
         if let pairingInvalidatedObserver {
             NotificationCenter.default.removeObserver(pairingInvalidatedObserver)
+        }
+        if let uploadRejectedObserver {
+            NotificationCenter.default.removeObserver(uploadRejectedObserver)
         }
     }
 

@@ -61,6 +61,51 @@ public struct PendingUpload: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+/// A job the paired Mac permanently refused. The queued copy was the phone's
+/// only one, so the drop is recorded durably instead of being announced to
+/// whichever process happened to observe the response.
+public struct RejectedUpload: Codable, Sendable, Equatable, Identifiable {
+    public var id: UUID
+    public var statusCode: Int
+    public var counterpartyName: String?
+    public var rejectedAt: Date
+
+    public init(id: UUID, statusCode: Int, counterpartyName: String? = nil, rejectedAt: Date = Date()) {
+        self.id = id
+        self.statusCode = statusCode
+        self.counterpartyName = counterpartyName
+        self.rejectedAt = rejectedAt
+    }
+
+    /// One sentence for every surface that reports a drop, so the share sheet
+    /// and the app's Uploads section cannot drift apart.
+    public static func summary(of rejections: [RejectedUpload]) -> String? {
+        guard let first = rejections.first else { return nil }
+        guard rejections.count > 1 else {
+            return UploadRejectedError(statusCode: first.statusCode, counterpartyName: first.counterpartyName)
+                .localizedDescription
+        }
+        return "Your Mac refused \(rejections.count) recordings, so they were removed from the upload queue."
+    }
+}
+
+/// The Mac answered with a status no retry can change. Surfaced instead of the
+/// transport error a caller would otherwise report for the same response.
+public struct UploadRejectedError: Error, LocalizedError, Equatable {
+    public let statusCode: Int
+    public let counterpartyName: String?
+
+    public init(statusCode: Int, counterpartyName: String? = nil) {
+        self.statusCode = statusCode
+        self.counterpartyName = counterpartyName
+    }
+
+    public var errorDescription: String? {
+        let subject = counterpartyName.map { "the recording of your call with \($0)" } ?? "this recording"
+        return "Your Mac refused \(subject) (HTTP \(statusCode)), so it was removed from the upload queue."
+    }
+}
+
 public enum PendingUploadInboxError: Error, LocalizedError, Equatable {
     case sourceFileMissing
     case unknownUpload
@@ -79,9 +124,12 @@ public enum PendingUploadInboxError: Error, LocalizedError, Equatable {
 /// atomically recorded its manifest. A newly launched app can therefore resume
 /// a background transfer after the sharing process has been terminated.
 public actor PendingUploadInbox {
+    private static let rejectionLogLimit = 20
+
     private let directory: URL
     private let uploadsDirectory: URL
     private let manifestURL: URL
+    private let rejectionsURL: URL
     private let manifestLock: ManifestLock
     private let persistenceWriter: @Sendable (URL, Data) throws -> Void
     private var entries: [PendingUpload]
@@ -98,6 +146,7 @@ public actor PendingUploadInbox {
         self.directory = directory
         self.uploadsDirectory = uploadsDirectory
         self.manifestURL = manifestURL
+        self.rejectionsURL = directory.appendingPathComponent("rejected-uploads.json")
         self.manifestLock = manifestLock
         self.persistenceWriter = persistenceWriter ?? { url, data in
             try data.write(to: url, options: .atomic)
@@ -183,6 +232,49 @@ public actor PendingUploadInbox {
         }
     }
 
+    /// A status no retry can change: the job is dropped rather than backed off
+    /// forever. Dropping it destroys the phone's only copy, so the rejection is
+    /// logged under the same lock for whichever process next drains it.
+    @discardableResult
+    public func markRejected(_ id: UUID, statusCode: Int, at date: Date = Date()) throws -> PendingUpload {
+        try withManifestLock {
+            reload()
+            guard let index = entries.firstIndex(where: { $0.id == id }) else {
+                throw PendingUploadInboxError.unknownUpload
+            }
+            let previousEntries = entries
+            let entry = entries.remove(at: index)
+            do {
+                try persist()
+            } catch {
+                entries = previousEntries
+                throw error
+            }
+            var log = Self.loadRejections(at: rejectionsURL)
+            log.append(
+                RejectedUpload(
+                    id: entry.id,
+                    statusCode: statusCode,
+                    counterpartyName: entry.metadata.counterpartyName,
+                    rejectedAt: date
+                )
+            )
+            persistRejections(Array(log.suffix(Self.rejectionLogLimit)))
+            try? FileManager.default.removeItem(at: entry.audioURL)
+            return entry
+        }
+    }
+
+    /// Drains the rejection log: a drop the user has been told about must not be
+    /// reported again on every later launch.
+    public func takeRejections() -> [RejectedUpload] {
+        (try? withManifestLock {
+            let log = Self.loadRejections(at: rejectionsURL)
+            if !log.isEmpty { persistRejections([]) }
+            return log
+        }) ?? []
+    }
+
     /// Every write to `uploads/` happens under the manifest lock, so a file that
     /// has no entry while the lock is held belongs to a process that died
     /// mid-copy or to a completion whose delete failed. Nothing can reach it
@@ -218,6 +310,20 @@ public actor PendingUploadInbox {
 
     private func withManifestLock<T>(_ operation: () throws -> T) throws -> T {
         try manifestLock.withExclusiveLock(operation)
+    }
+
+    private func persistRejections(_ log: [RejectedUpload]) {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(log) else { return }
+        try? data.write(to: rejectionsURL, options: .atomic)
+    }
+
+    private static func loadRejections(at url: URL) -> [RejectedUpload] {
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return (try? decoder.decode([RejectedUpload].self, from: data)) ?? []
     }
 
     private static func loadManifest(at url: URL) throws -> [PendingUpload] {
