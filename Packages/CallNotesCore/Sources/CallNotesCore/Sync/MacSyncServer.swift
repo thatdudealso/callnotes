@@ -174,26 +174,68 @@ public actor MacSyncServer {
     ) async throws -> UploadOutcome {
         guard reserve(uploadID) else { return .inProgress }
         do {
-            if let settled = try await settleExistingUpload(uploadID) {
+            let owned = try await authorizedExistingCall(uploadID)
+            if let settled = settleExistingUpload(uploadID, call: owned) {
                 release(uploadID)
                 return settled
             }
             try FileManager.default.createDirectory(at: receivedUploadsDirectory, withIntermediateDirectories: true)
             let staged = try await stage()
-            return try await acceptReserved(uploadID: uploadID, metadata: staged.metadata, audioURL: staged.audioURL)
+            do {
+                return try await acceptReserved(
+                    uploadID: uploadID,
+                    metadata: staged.metadata,
+                    audioURL: staged.audioURL,
+                    resuming: owned != nil
+                )
+            } catch {
+                discardStaged(staged.audioURL)
+                throw error
+            }
         } catch {
             release(uploadID)
             throw error
         }
     }
 
-    private func acceptReserved(uploadID: UUID, metadata: CallUploadMetadata, audioURL: URL) async throws -> UploadOutcome {
+    /// The rows a phone POST may touch are the ones this Mac itself created from
+    /// an earlier phone POST and still holds staging for. A Mac capture is
+    /// refused, and so is an inbox import that merely carries a phone
+    /// `CallSource` - `iphone_recording` is what the iCloud Drive inbox stores.
+    /// This runs before a single byte of the body is staged. A call that is
+    /// already finished is handed back untouched, so a re-send of a recording
+    /// the Mac completed is acknowledged rather than refused.
+    private func authorizedExistingCall(_ uploadID: UUID) async throws -> Call? {
+        guard let call = try? await store.fetchCall(id: uploadID) else { return nil }
+        let owned = Self.isPhoneUpload(call.source)
+            && (isProcessed(call) || processingUploadIDs.contains(uploadID) || hasPhoneUploadReceipt(uploadID))
+        guard owned else {
+            throw HTTPError(.forbidden, message: "That recording is not a phone upload.")
+        }
+        return call
+    }
+
+    /// The durable record that this Mac already accepted a phone POST for this
+    /// identifier: the staging audio it retained, or the metadata sidecar it
+    /// wrote beside it.
+    private func hasPhoneUploadReceipt(_ uploadID: UUID) -> Bool {
+        let sidecar = receivedUploadsDirectory
+            .appendingPathComponent(uploadID.uuidString)
+            .appendingPathExtension("json")
+        return FileManager.default.fileExists(atPath: sidecar.path) || stagedAudioURL(for: uploadID) != nil
+    }
+
+    private func acceptReserved(
+        uploadID: UUID,
+        metadata: CallUploadMetadata,
+        audioURL: URL,
+        resuming: Bool
+    ) async throws -> UploadOutcome {
         defer { acceptingUploadIDs.remove(uploadID) }
         guard let existing = try await store.fetchCall(id: uploadID) else {
             return try await storeAccepted(uploadID: uploadID, metadata: metadata, audioURL: audioURL)
         }
-        guard Self.isPhoneUpload(existing.source) else {
-            discardStaged(audioURL)
+        guard resuming, Self.isPhoneUpload(existing.source) else {
             throw HTTPError(.forbidden, message: "That recording is not a phone upload.")
         }
         if isProcessed(existing) {
@@ -233,18 +275,12 @@ public actor MacSyncServer {
         return .created
     }
 
-    /// Decides what an upload identifier that the Mac has already seen deserves.
+    /// Decides what an upload identifier the Mac has already authorized deserves.
     /// A finished call is acknowledged untouched; an accepted-but-unprocessed one
     /// resumes from its retained staging audio, so a 201 whose processing failed
     /// never leaves the recording stuck. `nil` means the bytes are still needed.
-    ///
-    /// A call this Mac captured itself is refused here, before the request body
-    /// is streamed, so a refused upload never writes audio into staging.
-    private func settleExistingUpload(_ uploadID: UUID) async throws -> UploadOutcome? {
-        guard let call = try? await store.fetchCall(id: uploadID) else { return nil }
-        guard Self.isPhoneUpload(call.source) else {
-            throw HTTPError(.forbidden, message: "That recording is not a phone upload.")
-        }
+    private func settleExistingUpload(_ uploadID: UUID, call: Call?) -> UploadOutcome? {
+        guard let call else { return nil }
         if isProcessed(call) { return .alreadyStored }
         if processingUploadIDs.contains(uploadID) { return .inProgress }
         guard let staged = stagedAudioURL(for: uploadID) else { return nil }

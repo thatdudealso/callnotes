@@ -453,6 +453,51 @@ import Testing
         #expect(try await store.fetchCalls().count == 1)
     }
 
+    /// The iCloud Drive inbox stores its imports as `.iphoneRecording`, so the
+    /// "a retry of this call ID is not a duplicate of itself" rule cannot be
+    /// keyed on the source. The only first attempt is the fresh `.uploaded`
+    /// placeholder a phone POST writes.
+    @Test func emptyTranscriptRetryOfTheSameCallIDIsNotADuplicateForAPhoneSource() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-empty-dup-phone-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("silent.wav")
+        try ImportFixtureWriter.writeWAV(to: file, seconds: 0.3)
+
+        let store = MemoryStore()
+        let duplicates = InboxDuplicateIndex()
+        let firstID = UUID()
+        func pipeline() -> ImportPipeline {
+            ImportPipeline(
+                store: store,
+                spine: FileTranscriptionSpine(
+                    speech: ScriptedPCMTranscriber(near: [], far: []),
+                    diarizer: ScriptedDiarizer(clusters: []),
+                    store: store
+                ),
+                duplicates: duplicates,
+                audioRoot: root.appendingPathComponent("audio", isDirectory: true)
+            )
+        }
+        func importFile(callID: UUID) async throws -> ProcessedCall {
+            try await pipeline().`import`(
+                file,
+                engine: .appleSpeech,
+                source: .iphoneRecording,
+                job: ImportJob(fileName: file.lastPathComponent, sourceURL: file, callID: callID)
+            )
+        }
+
+        await #expect(throws: FileImportError.emptyTranscript) { try await importFile(callID: firstID) }
+        #expect(try await store.fetchCall(id: firstID)?.source == .iphoneRecording)
+
+        await #expect(throws: FileImportError.duplicate) { try await importFile(callID: UUID()) }
+        await #expect(throws: FileImportError.emptyTranscript) { try await importFile(callID: firstID) }
+
+        #expect(try await store.fetchCalls().count == 1)
+    }
+
     /// A phone upload reaches the pipeline with its Call row already written by
     /// `MacSyncServer.storeAccepted`, so an existing Call must not exempt the
     /// first processing attempt from the content-hash check.

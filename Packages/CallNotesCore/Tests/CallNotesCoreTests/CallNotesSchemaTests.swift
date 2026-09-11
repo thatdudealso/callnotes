@@ -27,6 +27,9 @@ import Testing
     @Test func everyCallStatusHasAHumanPhraseForItsWireToken() {
         #expect(CallStatus(rawValue: "notes_ready")?.displayName == "Notes ready")
         #expect(CallStatus.failed.displayName == "Could not finish")
+        #expect(CallStatus.recording.displayName == "Recording")
+        #expect(CallStatus.uploaded.displayName == "Processing")
+        #expect(CallStatus.transcribing.displayName == "Processing")
         for status in CallStatus.allCases {
             #expect(!status.displayName.isEmpty)
             #expect(!status.displayName.contains("_"))

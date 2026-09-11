@@ -27,7 +27,8 @@ public enum CallStatus: String, Codable, Sendable, CaseIterable {
         case .notesReady: "Notes ready"
         case .transcribed: "Writing notes"
         case .failed: "Could not finish"
-        case .recording, .uploaded, .transcribing: "Processing"
+        case .recording: "Recording"
+        case .uploaded, .transcribing: "Processing"
         }
     }
 }

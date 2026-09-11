@@ -66,12 +66,13 @@ public struct ImportPipeline: Sendable {
         }()
         let hash = try await duplicates.fingerprint(of: hashSource)
         if await duplicates.contains(hash) {
-            // A brand-new inbox drop (no Call row) and a first-time phone
-            // upload (Call row written by storeAccepted, no segments yet)
-            // must still hit the hash. Retrying the same inbox call ID after
-            // empty-transcript is not a duplicate of itself.
-            let isInboxRetry = existingCall?.source == .fileImport
-            if !alreadyTranscribed && !isInboxRetry {
+            // A brand-new drop (no Call row) and a first-time phone upload
+            // (the `.uploaded` placeholder `storeAccepted` writes, no segments
+            // yet) must still hit the hash. Any other row already under this
+            // call ID is this import's own earlier attempt - it reached at
+            // least `.transcribing` - and is not a duplicate of itself.
+            let isRetryOfThisCall = existingCall.map { $0.status != .uploaded } ?? false
+            if !alreadyTranscribed && !isRetryOfThisCall {
                 try? FileManager.default.removeItem(at: storedURL)
                 progress.stage = .duplicate
                 progress.fractionComplete = 1

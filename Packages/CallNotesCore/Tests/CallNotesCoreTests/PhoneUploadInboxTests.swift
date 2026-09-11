@@ -1411,6 +1411,47 @@ import Testing
         #expect(staged.isEmpty)
     }
 
+    /// The iCloud Drive inbox stores its imports as `.iphoneRecording`, so the
+    /// source alone does not make a call addressable: only a row this Mac wrote
+    /// from an earlier phone POST, whose staging it still holds, may be resumed.
+    @Test func phoneUploadCannotReplaceAnInboxImportCarryingAPhoneSource() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-inbox-id-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let store = MemoryStore()
+        let callID = UUID()
+        let originalPath = "/tmp/\(callID.uuidString)-inbox.wav"
+        try await store.upsertCall(Call(
+            id: callID,
+            source: .iphoneRecording,
+            startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            counterpartyName: "Podcast",
+            audioPath: originalPath,
+            sttProvider: .appleSpeech,
+            status: .failed
+        ))
+        let server = MacSyncServer(store: store, receivedUploadsDirectory: root)
+
+        do {
+            _ = try await server.accept(
+                uploadID: callID,
+                metadata: CallUploadMetadata(source: .iphoneRecording),
+                audio: Data("recording".utf8),
+                fileExtension: "m4a"
+            )
+            Issue.record("phone upload of an inbox-imported call id should be rejected")
+        } catch {
+            let text = "\(error) \(error.localizedDescription)"
+            #expect(text.contains("not a phone upload"))
+        }
+        let stored = try #require(try await store.fetchCall(id: callID))
+        #expect(stored.audioPath == originalPath)
+        #expect(stored.status == .failed)
+        let staged = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+        #expect(staged.isEmpty)
+    }
+
     /// The stored source decides which later uploads may resume an identifier,
     /// and whether the import pipeline treats the first attempt as an inbox
     /// retry that skips the content-hash duplicate check. A client does not get
