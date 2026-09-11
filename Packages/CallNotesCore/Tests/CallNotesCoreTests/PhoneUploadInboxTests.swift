@@ -341,6 +341,67 @@ import Testing
         #expect(await reopened.takeRejections().isEmpty)
     }
 
+    /// A blank Contact field in the share sheet means the user named nobody. An
+    /// empty string is not that: it is non-nil, so every `?? "Call"` /
+    /// `?? "Untitled call"` / `Speaker N` fallback keeps it and renders blank.
+    @Test func aBlankShareSheetNameNeverReachesTheMacAsAnEmptyCounterparty() throws {
+        #expect(CallUploadMetadata(source: .iphoneRecording, counterpartyName: "").counterpartyName == nil)
+        #expect(CallUploadMetadata(source: .iphoneRecording, counterpartyName: "   ").counterpartyName == nil)
+        #expect(CallUploadMetadata(source: .iphoneRecording, counterpartyName: nil).counterpartyName == nil)
+        #expect(
+            CallUploadMetadata(source: .iphoneRecording, counterpartyName: "  Priya Shah  ").counterpartyName
+                == "Priya Shah"
+        )
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let audioURL = root.appendingPathComponent("New Recording 3.m4a")
+        try Data("recording".utf8).write(to: audioURL)
+        let job = PendingUpload(
+            audioURL: audioURL,
+            metadata: .init(source: .iphoneRecording, startedAt: Date(timeIntervalSince1970: 1_700_000_000), counterpartyName: "")
+        )
+
+        let body = try MultipartUploadBody.make(job: job, directory: root.appendingPathComponent("requests", isDirectory: true))
+        let boundary = try #require(body.contentType.components(separatedBy: "boundary=").last)
+        let staging = root.appendingPathComponent("staging", isDirectory: true)
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+        var parser = try MultipartStreamParser(boundary: boundary, directory: staging, uploadID: job.id)
+        try parser.append(try Data(contentsOf: body.url))
+        let staged = try #require(try parser.finish())
+
+        #expect(staged.metadata.counterpartyName == nil)
+    }
+
+    /// One `SessionUploadDelegate` backs both background sessions. A drain that
+    /// the share session triggers must not retire the phone session's durable
+    /// transition, or the phone session reports "done" to iOS while its own
+    /// `markCompleted` is still running and can be suspended mid-write.
+    @Test func eachBackgroundSessionDrainsOnlyItsOwnTransitions() async throws {
+        let harness = try TwoSessionHarness()
+        defer { harness.tearDown() }
+        let job = try await harness.enqueueRecording()
+        let task = harness.uploadTask(for: job.id, on: harness.phoneSession)
+
+        harness.coordinator.handleBackgroundEvents(identifier: harness.phoneIdentifier) {
+            harness.scheduler.record("released-phone-handler")
+        }
+        harness.delegate.urlSession(harness.phoneSession, task: task, didCompleteWithError: nil)
+        harness.delegate.urlSessionDidFinishEvents(forBackgroundURLSession: harness.shareSession)
+        harness.delegate.urlSessionDidFinishEvents(forBackgroundURLSession: harness.phoneSession)
+        try await Task.sleep(for: .milliseconds(250))
+
+        #expect(harness.scheduler.log == [])
+
+        harness.scheduler.openGate()
+        try await harness.waitFor("released-phone-handler")
+
+        #expect(harness.scheduler.log == ["discard:\(job.id)", "released-phone-handler"])
+        let reopened = try PendingUploadInbox(directory: harness.inboxDirectory)
+        #expect(await reopened.pending(now: .distantFuture).isEmpty)
+    }
+
     /// The app and the Share Extension now POST bodies from one writer, and the
     /// Mac is the only reader of that format: a body it cannot parse is answered
     /// 400, which deletes the recording instead of retrying it.
@@ -1276,6 +1337,101 @@ private final class RecordingScheduler: SessionUploadTaskStarting, @unchecked Se
     func discardRequestBody(for uploadID: UUID) async { record("discard:\(uploadID)") }
     func authorizationRejected() async { record("authorization-rejected") }
     func uploadRejected(_ job: PendingUpload, statusCode: Int) async { record("rejected:\(statusCode):\(job.id)") }
+}
+
+/// Holds each upload's durable transition open until the test releases it, so a
+/// relaunch handler released too early is observable rather than a race.
+private final class GatedScheduler: SessionUploadTaskStarting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [String] = []
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    var log: [String] { lock.withLock { events } }
+    func record(_ event: String) { lock.withLock { events.append(event) } }
+    func start(_ job: PendingUpload) async { record("start:\(job.id)") }
+    func authorizationRejected() async { record("authorization-rejected") }
+
+    func discardRequestBody(for uploadID: UUID) async {
+        await withCheckedContinuation { continuation in
+            let resume: Bool = lock.withLock {
+                if isOpen { return true }
+                waiters.append(continuation)
+                return false
+            }
+            if resume { continuation.resume() }
+        }
+        record("discard:\(uploadID)")
+    }
+
+    func openGate() {
+        let pending: [CheckedContinuation<Void, Never>] = lock.withLock {
+            isOpen = true
+            let all = waiters
+            waiters = []
+            return all
+        }
+        for continuation in pending { continuation.resume() }
+    }
+}
+
+/// A relaunched app with both of its background sessions restored behind the one
+/// delegate the production `BackgroundUploadCoordinator` builds.
+private struct TwoSessionHarness {
+    let root: URL
+    let inboxDirectory: URL
+    let phoneIdentifier: String
+    let shareIdentifier: String
+    let scheduler = GatedScheduler()
+    let coordinator: SessionUploadCoordinator
+    let delegate: SessionUploadDelegate
+    let phoneSession: URLSession
+    let shareSession: URLSession
+
+    init() throws {
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("callnotes-two-session-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        inboxDirectory = root.appendingPathComponent("shared", isDirectory: true)
+        phoneIdentifier = "callnotes.test.phone-upload.\(UUID().uuidString)"
+        shareIdentifier = "callnotes.test.share-upload.\(UUID().uuidString)"
+        coordinator = try SessionUploadCoordinator(directory: inboxDirectory, starter: scheduler)
+        delegate = SessionUploadDelegate(
+            coordinator: coordinator,
+            pinnedFingerprint: { nil },
+            statusCodeForTask: { _ in 201 }
+        )
+        phoneSession = SharedUploadSession.make(identifier: phoneIdentifier, appGroupIdentifier: "", delegate: delegate)
+        shareSession = SharedUploadSession.make(identifier: shareIdentifier, appGroupIdentifier: "", delegate: delegate)
+    }
+
+    func enqueueRecording() async throws -> PendingUpload {
+        let source = root.appendingPathComponent("recording.m4a")
+        try Data("recording".utf8).write(to: source)
+        let sharingProcess = try PendingUploadInbox(directory: inboxDirectory)
+        return try await sharingProcess.enqueue(audioAt: source, metadata: .init(source: .iphoneRecording))
+    }
+
+    func uploadTask(for uploadID: UUID, on session: URLSession) -> URLSessionTask {
+        let body = root.appendingPathComponent("\(uploadID.uuidString).multipart")
+        try? Data("body".utf8).write(to: body)
+        var request = URLRequest(url: URL(string: "https://127.0.0.1:\(SyncConstants.serverPort)/calls/\(uploadID.uuidString)")!)
+        request.httpMethod = "POST"
+        let task = session.uploadTask(with: request, fromFile: body)
+        task.taskDescription = uploadID.uuidString
+        return task
+    }
+
+    func waitFor(_ event: String) async throws {
+        for _ in 0..<200 where !scheduler.log.contains(event) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    func tearDown() {
+        phoneSession.invalidateAndCancel()
+        shareSession.invalidateAndCancel()
+        try? FileManager.default.removeItem(at: root)
+    }
 }
 
 /// A flag a detached task can set without the test having to await it, so a

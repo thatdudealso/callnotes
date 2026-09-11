@@ -11,10 +11,14 @@ public struct CallUploadMetadata: Codable, Sendable, Equatable {
     public var startedAt: Date?
     public var counterpartyName: String?
 
+    /// A blank name is an absent counterparty, not an empty one: every consumer
+    /// falls back through `?? "Call"` / `?? "Untitled call"` / `Speaker N`, and
+    /// an empty string satisfies none of them.
     public init(source: CallSource, startedAt: Date? = nil, counterpartyName: String? = nil) {
+        let name = counterpartyName?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.source = source
         self.startedAt = startedAt
-        self.counterpartyName = counterpartyName
+        self.counterpartyName = (name?.isEmpty ?? true) ? nil : name
     }
 
     public static func sidecarURL(nextTo audioURL: URL) -> URL {

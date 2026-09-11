@@ -130,12 +130,22 @@ public actor SessionUploadCoordinator {
 /// records each terminal task event before returning, so
 /// `urlSessionDidFinishEvents` can drain them and only then release the
 /// system's relaunch completion handler.
+///
+/// One instance backs both of the app's background sessions, so every recorded
+/// transition carries the session that produced it: a drain must release only
+/// its own relaunch handler, and must never retire work another session still
+/// has to wait for.
 public final class SessionUploadDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private struct TransitionKey: Hashable {
+        let sessionIdentifier: String
+        let id: UUID
+    }
+
     private let coordinator: SessionUploadCoordinator
     private let pinnedFingerprint: @Sendable () -> String?
     private let statusCodeForTask: (URLSessionTask) -> Int?
     private let lock = NSLock()
-    private var transitions: [UUID: Task<Void, Never>] = [:]
+    private var transitions: [TransitionKey: Task<Void, Never>] = [:]
 
     public init(
         coordinator: SessionUploadCoordinator,
@@ -151,23 +161,23 @@ public final class SessionUploadDelegate: NSObject, URLSessionDataDelegate, @unc
         guard let uploadID = task.taskDescription.flatMap(UUID.init(uuidString:)) else { return }
         let statusCode = statusCodeForTask(task)
         let coordinator = self.coordinator
-        let transitionID = UUID()
+        let key = TransitionKey(sessionIdentifier: Self.identifier(of: session), id: UUID())
         let gate = TransitionGate()
         let transition = Task {
             await gate.wait()
             await coordinator.taskCompleted(uploadID: uploadID, error: error, statusCode: statusCode)
-            self.removeTransition(id: transitionID)
+            self.removeTransition(key)
         }
-        lock.withLock { transitions[transitionID] = transition }
+        lock.withLock { transitions[key] = transition }
         gate.open()
     }
 
     public func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
-        let identifier = session.configuration.identifier ?? ""
-        let pending = lock.withLock {
-            let snapshot = Array(transitions.values)
-            transitions.removeAll()
-            return snapshot
+        let identifier = Self.identifier(of: session)
+        let pending = lock.withLock { () -> [Task<Void, Never>] in
+            let owned = transitions.filter { $0.key.sessionIdentifier == identifier }
+            for key in owned.keys { transitions.removeValue(forKey: key) }
+            return Array(owned.values)
         }
         let coordinator = self.coordinator
         Task {
@@ -176,9 +186,13 @@ public final class SessionUploadDelegate: NSObject, URLSessionDataDelegate, @unc
         }
     }
 
-    private func removeTransition(id: UUID) {
+    private static func identifier(of session: URLSession) -> String {
+        session.configuration.identifier ?? ""
+    }
+
+    private func removeTransition(_ key: TransitionKey) {
         _ = lock.withLock {
-            transitions.removeValue(forKey: id)
+            transitions.removeValue(forKey: key)
         }
     }
 
