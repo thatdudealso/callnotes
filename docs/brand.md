@@ -22,6 +22,8 @@ identifiers and strings.
   heavy rings each, asymmetric spacing so they read as two people talking).
   The menu bar uses the same mark: idle is outline, armed is filled,
   recording layers a red dot, processing layers a spinner.
+  Mac and iPhone share the catalog in `Resources/Assets.xcassets`.
+  `Scripts/render-app-icon-concepts.swift` is the raster source.
 - Accent palette:
   - Primary: deep teal `#0E7C7B`
   - Recording red: `#D64545`
