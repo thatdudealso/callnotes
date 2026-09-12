@@ -8,6 +8,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REAL_HOME="${HOME}"
 REAL_LOGIN="${REAL_HOME}/Library/Keychains/login.keychain-db"
 failures=0
+runtime_build_dir=""
+runtime_pid=""
 pass() { printf 'PASS: %s\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*"; failures=$((failures + 1)); }
 
@@ -17,7 +19,15 @@ fail() { printf 'FAIL: %s\n' "$*"; failures=$((failures + 1)); }
 pin_user_keychains() {
   security list-keychains -d user -s "$REAL_LOGIN" >/dev/null
 }
-trap pin_user_keychains EXIT
+cleanup() {
+  if [[ -n "$runtime_pid" ]] && kill -0 "$runtime_pid" 2>/dev/null; then
+    kill -TERM "$runtime_pid" 2>/dev/null || true
+    wait "$runtime_pid" 2>/dev/null || true
+  fi
+  [[ -z "$runtime_build_dir" ]] || rm -rf "$runtime_build_dir"
+  pin_user_keychains
+}
+trap cleanup EXIT
 pin_user_keychains
 
 assert_real_identity_present() {
@@ -58,12 +68,63 @@ fi
 rm -rf "$wrap_empty"
 
 out="$("$ROOT/Scripts/sync-local-signing.sh")"
-if [[ "$out" == *'applying "CallNotes Local Signing"'* ]] && grep -q 'CODE_SIGN_IDENTITY = CallNotes Local Signing' "$overlay"; then
-  pass "present identity writes overlay"
+if [[ "$out" == *'applying "CallNotes Local Signing"'* ]] \
+  && grep -q 'CODE_SIGN_IDENTITY = CallNotes Local Signing' "$overlay" \
+  && grep -q 'ENABLE_HARDENED_RUNTIME = NO' "$overlay"; then
+  pass "present identity writes overlay (identity + hardened runtime off)"
 else
-  fail "present-identity overlay: $out"
+  fail "present-identity overlay: $out overlay=$(cat "$overlay" 2>/dev/null || true)"
 fi
 assert_real_identity_present
+
+runtime_build_dir="$(mktemp -d "$ROOT/.local-signing-runtime.XXXXXX")"
+if (cd "$ROOT" && xcodegen generate >/dev/null) \
+  && xcodebuild -project "$ROOT/CallNotes.xcodeproj" -scheme CallNotesMac \
+    -configuration Debug -destination 'platform=macOS,arch=arm64' \
+    -derivedDataPath "$runtime_build_dir/DerivedData" build >/dev/null; then
+  app="$runtime_build_dir/DerivedData/Build/Products/Debug/CallNotes.app"
+  binary="$app/Contents/MacOS/CallNotes"
+  if [[ -x "$binary" ]]; then
+    codesign_details="$(codesign -dvvv "$binary" 2>&1)"
+    code_directory="$(printf '%s\n' "$codesign_details" | awk '/^CodeDirectory / { print; exit }')"
+    if [[ -n "$code_directory" && "$code_directory" != *runtime* ]]; then
+      pass "local-signed binary has no hardened-runtime flag"
+    else
+      fail "local-signed binary has hardened-runtime flag: $code_directory"
+    fi
+
+    shopt -s nullglob
+    reports_before=("$REAL_HOME"/Library/Logs/DiagnosticReports/CallNotes*.ips)
+    "$binary" >/dev/null 2>&1 &
+    runtime_pid=$!
+    sleep 5
+    if kill -0 "$runtime_pid" 2>/dev/null; then
+      pass "local-signed app remains running"
+    else
+      fail "local-signed app exited before launch check"
+    fi
+    reports_after=("$REAL_HOME"/Library/Logs/DiagnosticReports/CallNotes*.ips)
+    for report in "${reports_after[@]}"; do
+      found=0
+      for prior_report in "${reports_before[@]}"; do
+        if [[ "$report" == "$prior_report" ]]; then
+          found=1
+          break
+        fi
+      done
+      if [[ "$found" == 0 ]]; then
+        fail "local-signed app created crash report: $report"
+      fi
+    done
+    if [[ "$failures" == 0 ]]; then
+      pass "local-signed app adds no crash report"
+    fi
+  else
+    fail "local-signed app binary missing: $binary"
+  fi
+else
+  fail "could not build local-signed CallNotesMac app"
+fi
 
 # --- create_local_signing_identity against a throwaway keychain --------------
 

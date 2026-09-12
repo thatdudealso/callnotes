@@ -46,6 +46,13 @@ CODE_SIGN_STYLE = Manual
 CODE_SIGN_IDENTITY = $CALLNOTES_LOCAL_SIGNING_NAME
 DEVELOPMENT_TEAM =
 OTHER_CODE_SIGN_FLAGS = --timestamp=none
+// Hardened runtime enforces library validation, which requires a Team ID on
+// the process and every library it loads. This identity has none
+// (TeamIdentifier=not set), so the app's own embedded SPM dylib fails the
+// match and dyld aborts before main. Xcode already disables hardened runtime
+// for ad-hoc signing; do the same here. Release/notarization signing is
+// Scripts/release/build-dmg.sh (--options runtime), not this overlay.
+ENABLE_HARDENED_RUNTIME = NO
 EOF
 }
 
