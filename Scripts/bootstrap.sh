@@ -62,10 +62,18 @@ create_local_signing_identity() {
   local work keychain p12_pass
   keychain="$(login_keychain_path)" || exit 1
   work="$(mktemp -d)"
+  CALLNOTES_ROLLBACK_IMPORTED_IDENTITY=0
 
-  # Always delete the temp key material, including on `set -e` abort.
+  # Temp key material always. After import, also roll back the login-keychain
+  # identity on interrupt/`set -e` abort until trust and presence both succeed.
   # shellcheck disable=SC2064
-  trap 'rm -rf "'"$work"'"' EXIT
+  trap '
+    if [[ "${CALLNOTES_ROLLBACK_IMPORTED_IDENTITY:-0}" == 1 ]]; then
+      security delete-identity -c "'"$CALLNOTES_LOCAL_SIGNING_NAME"'" "'"$keychain"'" >/dev/null 2>&1 || true
+    fi
+    rm -rf "'"$work"'"
+  ' EXIT
+  trap 'exit 1' INT TERM
 
   cat > "$work/openssl.cnf" <<CNF
 [ req ]
@@ -100,23 +108,25 @@ CNF
   security import "$work/identity.p12" \
     -k "$keychain" \
     -P "$p12_pass" -T /usr/bin/codesign -T /usr/bin/security
+  CALLNOTES_ROLLBACK_IMPORTED_IDENTITY=1
 
   if ! security add-trusted-cert \
     -p codeSign -r trustRoot \
     -k "$keychain" \
     "$work/cert.pem"; then
-    security delete-identity -c "$CALLNOTES_LOCAL_SIGNING_NAME" "$keychain" >/dev/null 2>&1 || true
     say "FAILED: could not trust '$CALLNOTES_LOCAL_SIGNING_NAME' for code signing"
     exit 1
   fi
-
-  rm -rf "$work"
-  trap - EXIT
 
   if ! callnotes_local_signing_identity_present; then
     say "FAILED: identity '$CALLNOTES_LOCAL_SIGNING_NAME' is not visible to codesign"
     exit 1
   fi
+
+  CALLNOTES_ROLLBACK_IMPORTED_IDENTITY=0
+  trap - EXIT INT TERM
+  unset CALLNOTES_ROLLBACK_IMPORTED_IDENTITY
+  rm -rf "$work"
 }
 
 ensure_local_signing_identity() {
