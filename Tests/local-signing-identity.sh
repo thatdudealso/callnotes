@@ -58,12 +58,60 @@ fi
 rm -rf "$wrap_empty"
 
 out="$("$ROOT/Scripts/sync-local-signing.sh")"
-if [[ "$out" == *'applying "CallNotes Local Signing"'* ]] && grep -q 'CODE_SIGN_IDENTITY = CallNotes Local Signing' "$overlay"; then
-  pass "present identity writes overlay"
+if [[ "$out" == *'applying "CallNotes Local Signing"'* ]] \
+  && grep -q 'CODE_SIGN_IDENTITY = CallNotes Local Signing' "$overlay" \
+  && grep -q 'ENABLE_HARDENED_RUNTIME = NO' "$overlay"; then
+  pass "present identity writes overlay (identity + hardened runtime off)"
 else
-  fail "present-identity overlay: $out"
+  fail "present-identity overlay: $out overlay=$(cat "$overlay" 2>/dev/null || true)"
 fi
 assert_real_identity_present
+
+# Target-level ENABLE_HARDENED_RUNTIME in the pbxproj beats xcconfig, which is
+# how a signed build kept library validation and died at launch. After generate,
+# overlay-signed targets must not stamp that flag.
+if command -v xcodegen >/dev/null; then
+  (cd "$ROOT" && xcodegen generate >/dev/null)
+  pbx="$ROOT/CallNotes.xcodeproj/project.pbxproj"
+  if python3 - "$pbx" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+text = Path(sys.argv[1]).read_text()
+configs = []
+pos = 0
+while True:
+    i = text.find("isa = XCBuildConfiguration;", pos)
+    if i < 0:
+        break
+    configs.append(i)
+    pos = i + 1
+errors = []
+for idx, start in enumerate(configs):
+    end = configs[idx + 1] if idx + 1 < len(configs) else len(text)
+    chunk = text[start:end]
+    match = re.search(r"PRODUCT_BUNDLE_IDENTIFIER = ([^;]+);", chunk)
+    if not match:
+        continue
+    bundle_id = match.group(1).strip().strip('"')
+    if bundle_id in (
+        "com.thatdudealso.callnotes",
+        "com.thatdudealso.callnotes.capture-harness",
+    ) and "ENABLE_HARDENED_RUNTIME" in chunk:
+        errors.append(bundle_id)
+if errors:
+    print("stamped ENABLE_HARDENED_RUNTIME on: " + ", ".join(sorted(set(errors))))
+    sys.exit(1)
+PY
+  then
+    pass "xcodegen leaves hardened runtime to the signing xcconfig overlay"
+  else
+    fail "xcodegen stamped ENABLE_HARDENED_RUNTIME onto an overlay-signed target"
+  fi
+else
+  pass "xcodegen not installed; skipped pbxproj hardened-runtime ownership check"
+fi
 
 # --- create_local_signing_identity against a throwaway keychain --------------
 

@@ -120,10 +120,19 @@ keychain (idempotent). `xcodegen generate` then writes a gitignored overlay so
 survive rebuilds.
 
 This identity is local-development only. It is not an Apple Developer
-certificate and cannot notarize or distribute. CI and any clone without the
-certificate keep the previous ad-hoc behavior. Set
-`CALLNOTES_LOCAL_SIGNING=0` before `xcodegen generate` to force that fallback
-on a machine that has the identity.
+certificate and cannot notarize or distribute. The overlay also sets `ENABLE_HARDENED_RUNTIME = NO`. Hardened runtime's
+library validation requires a Team ID; this identity has none, so the app
+would otherwise die at launch loading its own embedded SPM dylib. That
+flag lives in `Configs/signing.xcconfig` (default YES) so the overlay can
+override it - a target setting in `project.yml` would stamp the pbxproj
+and beat the overlay. This matches what Xcode already does for ad-hoc
+signing. Release/notarization signing is `Scripts/release/build-dmg.sh`
+(`--options runtime`) and is unchanged; there is no separate release
+signing path in the Xcode project.
+
+CI and any clone without the certificate keep the previous ad-hoc
+behavior. Set `CALLNOTES_LOCAL_SIGNING=0` before `xcodegen generate` to
+force that fallback on a machine that has the identity.
 
 ## License and attribution
 
