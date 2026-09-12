@@ -23,6 +23,13 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Import speakers no diarized cluster claims keep the provider tag when there is one, else `TurnAttributor.unassignedClusterKey`; both get a `CallSpeaker` row so per-call `Speaker N` labels survive a reload.
 - Synthetic import audio: `Scripts/generate-import-fixture.sh` (macOS `say`, never personal recordings).
 
+## iPhone sync (Phase 6)
+
+- Pairing, TLS identity, Hummingbird server, and phone upload types live in `CallNotesCore/Sync`. The Mac keeps the server in `AppModel`; Settings -> Devices shows the QR payload and Revoke. Device tokens persist at Application Support `CallNotes/Sync/paired-devices.json` (SHA-256 digests only).
+- Phone uploads are not dropped into the Inbox watcher. They land in Application Support `CallNotes/PhoneUploads` with a `{callID}.json` sidecar and keep that call ID through `ImportPipeline.import`. That sidecar, or the staging audio beside it, is also the receipt that lets a later `POST /calls/{id}` touch an existing row, so an accept that fails midway must leave an earlier upload's receipt in place; a Mac capture, or an inbox import that merely carries `.iphoneRecording`, is refused. Staging keeps at most one audio file per upload id: writing a new body deletes any other `{callID}.*` sibling except the sidecar, so a retry that changes file extension cannot leave stale bytes to resume from.
+- The Share Extension copies into the App Group (`group.com.thatdudealso.callnotes`) and schedules a background `URLSession` with `sharedContainerIdentifier` set. Pairing tickets are ISO-8601 JSON (`PairingTicket.qrPayload()`). App Group subdirectory names come from `SyncConstants`, and both targets POST through `PhoneUploadRequest.start` / `MultipartUploadBody` rather than repeating the literals or the body format in the extension; the device token lives in the `$(AppIdentifierPrefix)group.com.thatdudealso.callnotes` keychain group both targets are entitled to.
+- The phone's queue is the App Group manifest in `PendingUploadInbox` (`pending-uploads.json`, plus the `rejected-uploads.json` drop log the app drains into `uploadStatus`). Mac responses decide the job's fate in `SessionUploadCoordinator.taskCompleted`: 200/201/202 complete it, 409 leaves it alone, 401 unpairs and clears backoff, and every other 4xx is terminal - the queued copy is dropped and reported rather than retried.
+
 ## Mac capture (Phase 1)
 
 - Shared audio math lives in `Packages/CallNotesCore/Sources/CallNotesCore/Audio`. Mac hardware (process tap, mic, detector, coordinator) lives in `CallNotesMac/Sources/Capture`.

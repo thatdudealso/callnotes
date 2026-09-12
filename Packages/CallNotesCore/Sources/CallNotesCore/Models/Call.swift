@@ -19,6 +19,18 @@ public enum CallStatus: String, Codable, Sendable, CaseIterable {
     case transcribed
     case notesReady = "notes_ready"
     case failed
+
+    /// The phrase a person reads or hears for this state. Raw values are wire
+    /// and column tokens, so no surface speaks them.
+    public var displayName: String {
+        switch self {
+        case .notesReady: "Notes ready"
+        case .transcribed: "Writing notes"
+        case .failed: "Could not finish"
+        case .recording: "Recording"
+        case .uploaded, .transcribing: "Processing"
+        }
+    }
 }
 
 /// A single captured call and its processing state.

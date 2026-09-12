@@ -12,7 +12,7 @@ Workflow: `.github/workflows/ci.yml`, running on every push to `main` and every 
 
 - GitHub's hosted `macos-26` (Apple silicon) image is available and ships Xcode 26.x, which is required: CallNotesCore compiles against SpeechAnalyzer and FoundationModels APIs that only exist in the macOS 26 / iOS 26 SDKs. The "Select newest Xcode 26" step pins the newest Xcode 26 on the image so a default-Xcode bump to a future major does not silently change the SDK.
 - Unit tests in CI are hardware-independent by design (merge/normalize logic, threshold math, schema validation, engine-default resolution, dictionary/tidier logic, notes schema/map-reduce/fallback). Anything needing real audio hardware, the ANE, Postgres, Ollama, or the billed Meta API runs locally via the opt-in gates (`CALLNOTES_HARNESS=1`, `CALLNOTES_OLLAMA=1`, `CALLNOTES_META=1`), not in hosted CI.
-- iOS targets are not built in CI yet; they are Phase 0 stubs. An iOS Simulator build job can be added once the targets carry real code.
+- iOS targets are not built in CI yet, although the Phase 6 app and Share Extension now carry real code. An iOS Simulator build job (`-scheme CallNotesIOS -destination 'generic/platform=iOS Simulator' ARCHS=arm64`, code signing disabled, Apple silicon only because FluidAudio ships no x86_64 simulator slice) still needs to be added; until then the phone targets are only built locally, and the Phase 6 sync logic that CI does cover is the part that lives in `CallNotesCore` (pairing, the upload inbox, mirror reconciliation).
 
 ## Local equivalent
 

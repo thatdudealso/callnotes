@@ -346,6 +346,269 @@ import Testing
         #expect(jobs.value.last?.stage == .completed)
     }
 
+    /// A run that failed in the notes stage never claimed the content, so the
+    /// retry that finishes it must not be rejected as a duplicate of itself and
+    /// take the transcript the first run produced down with it.
+    @Test func retryAfterANotesFailureIsNotADuplicateOfItself() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-notes-retry-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("call.wav")
+        try ImportFixtureWriter.writeWAV(to: file, seconds: 0.3)
+
+        let store = MemoryStore()
+        let duplicates = InboxDuplicateIndex()
+        let callID = UUID()
+        let notesBody = CallNotes(title: "Pilot ship", summary: "Ship the pilot next week.")
+        func pipeline(notesAreUsable: Bool) -> ImportPipeline {
+            let health: ProviderHealth = notesAreUsable ? .healthy : .unavailable(reason: "ollama is down")
+            return ImportPipeline(
+                store: store,
+                spine: FileTranscriptionSpine(
+                    speech: ScriptedPCMTranscriber(
+                        near: [RawSegment(start: 0, end: 1, text: "We will ship the pilot next week.", channel: .mixed)],
+                        far: []
+                    ),
+                    diarizer: ScriptedDiarizer(clusters: []),
+                    store: store
+                ),
+                notes: NotesGenerationSpine(
+                    instant: ScriptedNotesProvider(id: .appleFM, health: .unavailable(reason: "test"), outputs: []),
+                    deep: ScriptedNotesProvider(id: .glimmer, health: health, outputs: [.success(notesBody)]),
+                    fallback: ScriptedNotesProvider(id: .fallbackInstruct, health: health, outputs: [.success(notesBody)]),
+                    store: store
+                ),
+                duplicates: duplicates,
+                audioRoot: root.appendingPathComponent("audio", isDirectory: true)
+            )
+        }
+        func job() -> ImportJob {
+            ImportJob(fileName: file.lastPathComponent, sourceURL: file, callID: callID)
+        }
+
+        await #expect(throws: Error.self) {
+            try await pipeline(notesAreUsable: false).`import`(file, engine: .appleSpeech, job: job())
+        }
+        let transcribed = try await store.fetchSegments(callID: callID, provider: .appleSpeech)
+        #expect(!transcribed.isEmpty)
+
+        let processed = try await pipeline(notesAreUsable: true).`import`(file, engine: .appleSpeech, job: job())
+
+        #expect(processed.call.id == callID)
+        #expect(processed.call.status == .notesReady)
+        #expect(try await store.fetchCalls().count == 1)
+        #expect(try await store.fetchSegments(callID: callID, provider: .appleSpeech).map(\.text) == transcribed.map(\.text))
+        #expect(FileManager.default.fileExists(atPath: processed.call.audioPath))
+    }
+
+    /// A silent inbox file still claims its content hash, so a later drop of
+    /// the same bytes under a new call ID is a duplicate. Retrying the same
+    /// call ID is not.
+    @Test func emptyTranscriptNewCallStillRejectsASecondDropOfTheSameBytes() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-empty-dup-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("silent.wav")
+        try ImportFixtureWriter.writeWAV(to: file, seconds: 0.3)
+
+        let store = MemoryStore()
+        let duplicates = InboxDuplicateIndex()
+        let firstID = UUID()
+        func pipeline() -> ImportPipeline {
+            ImportPipeline(
+                store: store,
+                spine: FileTranscriptionSpine(
+                    speech: ScriptedPCMTranscriber(near: [], far: []),
+                    diarizer: ScriptedDiarizer(clusters: []),
+                    store: store
+                ),
+                duplicates: duplicates,
+                audioRoot: root.appendingPathComponent("audio", isDirectory: true)
+            )
+        }
+
+        await #expect(throws: FileImportError.emptyTranscript) {
+            try await pipeline().`import`(
+                file,
+                engine: .appleSpeech,
+                job: ImportJob(fileName: file.lastPathComponent, sourceURL: file, callID: firstID)
+            )
+        }
+        await #expect(throws: FileImportError.duplicate) {
+            try await pipeline().`import`(
+                file,
+                engine: .appleSpeech,
+                job: ImportJob(fileName: file.lastPathComponent, sourceURL: file, callID: UUID())
+            )
+        }
+        await #expect(throws: FileImportError.emptyTranscript) {
+            try await pipeline().`import`(
+                file,
+                engine: .appleSpeech,
+                job: ImportJob(fileName: file.lastPathComponent, sourceURL: file, callID: firstID)
+            )
+        }
+        #expect(try await store.fetchCalls().count == 1)
+    }
+
+    /// The iCloud Drive inbox stores its imports as `.iphoneRecording`, so the
+    /// "a retry of this call ID is not a duplicate of itself" rule cannot be
+    /// keyed on the source. The only first attempt is the fresh `.uploaded`
+    /// placeholder a phone POST writes.
+    @Test func emptyTranscriptRetryOfTheSameCallIDIsNotADuplicateForAPhoneSource() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-empty-dup-phone-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("silent.wav")
+        try ImportFixtureWriter.writeWAV(to: file, seconds: 0.3)
+
+        let store = MemoryStore()
+        let duplicates = InboxDuplicateIndex()
+        let firstID = UUID()
+        func pipeline() -> ImportPipeline {
+            ImportPipeline(
+                store: store,
+                spine: FileTranscriptionSpine(
+                    speech: ScriptedPCMTranscriber(near: [], far: []),
+                    diarizer: ScriptedDiarizer(clusters: []),
+                    store: store
+                ),
+                duplicates: duplicates,
+                audioRoot: root.appendingPathComponent("audio", isDirectory: true)
+            )
+        }
+        func importFile(callID: UUID) async throws -> ProcessedCall {
+            try await pipeline().`import`(
+                file,
+                engine: .appleSpeech,
+                source: .iphoneRecording,
+                job: ImportJob(fileName: file.lastPathComponent, sourceURL: file, callID: callID)
+            )
+        }
+
+        await #expect(throws: FileImportError.emptyTranscript) { try await importFile(callID: firstID) }
+        #expect(try await store.fetchCall(id: firstID)?.source == .iphoneRecording)
+
+        await #expect(throws: FileImportError.duplicate) { try await importFile(callID: UUID()) }
+        await #expect(throws: FileImportError.emptyTranscript) { try await importFile(callID: firstID) }
+
+        #expect(try await store.fetchCalls().count == 1)
+    }
+
+    /// A phone upload reaches the pipeline with its Call row already written by
+    /// `MacSyncServer.storeAccepted`, so an existing Call must not exempt the
+    /// first processing attempt from the content-hash check.
+    @Test func phoneUploadOfAlreadyImportedBytesIsADuplicate() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-phone-dup-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("call.wav")
+        try ImportFixtureWriter.writeWAV(to: file, seconds: 0.3)
+
+        let store = MemoryStore()
+        let duplicates = InboxDuplicateIndex()
+        let notesBody = CallNotes(title: "Pilot ship", summary: "Ship the pilot next week.")
+        func pipeline() -> ImportPipeline {
+            ImportPipeline(
+                store: store,
+                spine: FileTranscriptionSpine(
+                    speech: ScriptedPCMTranscriber(
+                        near: [RawSegment(start: 0, end: 1, text: "We will ship the pilot next week.", channel: .mixed)],
+                        far: []
+                    ),
+                    diarizer: ScriptedDiarizer(clusters: []),
+                    store: store
+                ),
+                notes: NotesGenerationSpine(
+                    instant: ScriptedNotesProvider(id: .appleFM, health: .unavailable(reason: "test"), outputs: []),
+                    deep: ScriptedNotesProvider(id: .glimmer, health: .healthy, outputs: [.success(notesBody)]),
+                    fallback: ScriptedNotesProvider(id: .fallbackInstruct, health: .healthy, outputs: [.success(notesBody)]),
+                    store: store
+                ),
+                duplicates: duplicates,
+                audioRoot: root.appendingPathComponent("audio", isDirectory: true)
+            )
+        }
+
+        let imported = try await pipeline().`import`(
+            file,
+            engine: .appleSpeech,
+            job: ImportJob(fileName: file.lastPathComponent, sourceURL: file, callID: UUID())
+        )
+        #expect(imported.call.status == .notesReady)
+
+        // What MacSyncServer.storeAccepted does before it hands the staged audio
+        // to the pipeline: the Call row exists with no segments yet.
+        let uploadID = UUID()
+        try await store.upsertCall(
+            Call(
+                id: uploadID,
+                source: .iphoneRecording,
+                startedAt: Date(),
+                audioPath: file.path,
+                sttProvider: .appleSpeech,
+                status: .uploaded
+            )
+        )
+
+        await #expect(throws: FileImportError.duplicate) {
+            try await pipeline().`import`(
+                file,
+                engine: .appleSpeech,
+                source: .iphoneRecording,
+                job: ImportJob(fileName: file.lastPathComponent, sourceURL: file, callID: uploadID)
+            )
+        }
+        #expect(try await store.fetchSegments(callID: uploadID, provider: .appleSpeech).isEmpty)
+    }
+
+    /// Notes failing after transcription still claims the content hash, so a
+    /// later drop of the same inbox file (a new call ID) is a duplicate.
+    @Test func notesFailureStillRejectsASecondInboxDropOfTheSameBytes() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-notes-fail-dup-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("call.wav")
+        try ImportFixtureWriter.writeWAV(to: file, seconds: 0.3)
+
+        let store = MemoryStore()
+        let duplicates = InboxDuplicateIndex()
+        func pipeline() -> ImportPipeline {
+            ImportPipeline(
+                store: store,
+                spine: FileTranscriptionSpine(
+                    speech: ScriptedPCMTranscriber(
+                        near: [RawSegment(start: 0, end: 1, text: "We will ship the pilot next week.", channel: .mixed)],
+                        far: []
+                    ),
+                    diarizer: ScriptedDiarizer(clusters: []),
+                    store: store
+                ),
+                notes: NotesGenerationSpine(
+                    instant: ScriptedNotesProvider(id: .appleFM, health: .unavailable(reason: "test"), outputs: []),
+                    deep: ScriptedNotesProvider(id: .glimmer, health: .unavailable(reason: "ollama is down"), outputs: []),
+                    fallback: ScriptedNotesProvider(id: .fallbackInstruct, health: .unavailable(reason: "ollama is down"), outputs: []),
+                    store: store
+                ),
+                duplicates: duplicates,
+                audioRoot: root.appendingPathComponent("audio", isDirectory: true)
+            )
+        }
+
+        await #expect(throws: Error.self) {
+            try await pipeline().`import`(file, engine: .appleSpeech, job: ImportJob(fileName: file.lastPathComponent, sourceURL: file, callID: UUID()))
+        }
+        await #expect(throws: FileImportError.duplicate) {
+            try await pipeline().`import`(file, engine: .appleSpeech, job: ImportJob(fileName: file.lastPathComponent, sourceURL: file, callID: UUID()))
+        }
+        #expect(try await store.fetchCalls().count == 1)
+    }
+
     @Test func secondDropOfTheSameBytesIsADuplicate() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("callnotes-dup-pipe-\(UUID().uuidString)", isDirectory: true)
@@ -466,6 +729,64 @@ import Testing
         )
         #expect(reloaded.map(\.speakerID) == [owner.id])
         #expect(!requested.value.isEmpty)
+    }
+
+    /// A phone upload reaches the pipeline with a Call row `MacSyncServer`
+    /// already wrote under a placeholder provider, so the engine the caller
+    /// resolved has to win before the spine picks its path.
+    @Test func phoneUploadHonorsTheSelectedEngineOverThePlaceholderOnItsCallRow() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-upload-engine-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("upload.wav")
+        try ImportFixtureWriter.writeWAV(to: file, seconds: 0.4)
+
+        let store = MemoryStore()
+        let uploadID = UUID()
+        try await store.upsertCall(
+            Call(
+                id: uploadID,
+                source: .iphoneRecording,
+                startedAt: Date(),
+                audioPath: file.path,
+                sttProvider: .appleSpeech,
+                status: .uploaded
+            )
+        )
+
+        let pipeline = ImportPipeline(
+            store: store,
+            spine: FileTranscriptionSpine(
+                speech: ScriptedPCMTranscriber(
+                    near: [RawSegment(start: 0, end: 1, text: "Local Apple transcript.", channel: .mixed)],
+                    far: []
+                ),
+                diarizer: ScriptedDiarizer(clusters: []),
+                store: store,
+                meta: SimulatedMetaFileProvider(
+                    segments: [
+                        RawSegment(start: 0, end: 1, text: "Cloud transcript of the upload.", speakerTag: "speaker_0", channel: .mixed)
+                    ],
+                    billedSeconds: 24
+                )
+            ),
+            duplicates: InboxDuplicateIndex(),
+            audioRoot: root.appendingPathComponent("audio", isDirectory: true)
+        )
+
+        let processed = try await pipeline.`import`(
+            file,
+            engine: .metaMuse,
+            source: .iphoneRecording,
+            job: ImportJob(fileName: file.lastPathComponent, sourceURL: file, callID: uploadID)
+        )
+
+        #expect(processed.call.id == uploadID)
+        #expect(processed.call.sttProvider == .metaMuse)
+        #expect(processed.call.metaBilledSec == 24)
+        #expect(processed.turns.map(\.text) == ["Cloud transcript of the upload."])
+        #expect(try await store.fetchCall(id: uploadID)?.sttProvider == .metaMuse)
     }
 
     @Test func failedMetaImportPersistsAccruedBilling() async throws {

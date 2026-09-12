@@ -75,6 +75,15 @@ final class AppModel {
         }
     }
 
+    private var syncServerTask: Task<Void, Never>?
+    private var syncBonjourService: NetService?
+    private var syncServer: MacSyncServer?
+    private var syncIdentity: MacTLSIdentity?
+    private var syncActivity: NSObjectProtocol?
+    var pairingQRPayload: String?
+    var pairedDevices: [PairedDevice] = []
+    var unsavedRevocations: [UUID: String] = [:]
+
     var selectedCall: Call? {
         calls.first { $0.id == selectedCallID }
     }
@@ -165,6 +174,7 @@ final class AppModel {
         isStoreInitialized = true
         observeDashboardChanges()
         notesSpine = NotesGenerationSpine(client: OllamaClient(), store: postgres)
+        startSyncServer(store: postgres)
         statusMessage = repairFailure
         startInboxWatcher()
     }
@@ -209,6 +219,211 @@ final class AppModel {
         } catch {
             statusMessage = error.localizedDescription
         }
+    }
+
+    private func startSyncServer(store: any CallStore) {
+        guard syncServerTask == nil else { return }
+        do {
+            let support = try FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent(CallAudioPaths.applicationSupportFolder, isDirectory: true)
+            let syncDirectory = support.appendingPathComponent("Sync", isDirectory: true)
+            let identity = try MacTLSIdentity(storageDirectory: syncDirectory)
+            let pairing = PairingAuthority(persistenceURL: syncDirectory.appendingPathComponent("paired-devices.json"))
+            let uploads = support.appendingPathComponent("PhoneUploads", isDirectory: true)
+            let server = MacSyncServer(
+                pairing: pairing,
+                store: store,
+                receivedUploadsDirectory: uploads,
+                onAccepted: { [weak self] callID, audioURL, metadata in
+                    try await self?.processPhoneUpload(callID: callID, audioURL: audioURL, metadata: metadata)
+                }
+            )
+            let service = NetService(domain: "local.", type: "\(SyncConstants.bonjourServiceType).", name: Host.current().localizedName ?? "CallNotes", port: Int32(SyncConstants.serverPort))
+            service.publish()
+            syncBonjourService = service
+            syncServer = server
+            syncIdentity = identity
+            let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "CallNotes phone sync")
+            syncActivity = activity
+            syncServerTask = Task {
+                defer { ProcessInfo.processInfo.endActivity(activity) }
+                do { try await server.run(host: "0.0.0.0", identity: identity) }
+                catch { self.statusMessage = "Phone sync stopped: \(error.localizedDescription)" }
+            }
+            Task { await refreshPairingTicket() }
+        } catch {
+            statusMessage = "Phone sync unavailable: \(error.localizedDescription)"
+        }
+    }
+
+    func refreshPairingTicket() async {
+        guard let server = syncServer, let identity = syncIdentity else { return }
+        let host = (Host.current().name ?? "localhost").trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        guard let serverURL = URL(string: "https://\(host):\(SyncConstants.serverPort)") else { return }
+        let ticket = await server.pairingTicket(serverURL: serverURL, identity: identity)
+        pairingQRPayload = try? ticket.qrPayload()
+        await refreshPairedDevices(from: server)
+    }
+
+    /// A revoke that could not be written is blocked in memory but comes back on
+    /// the next launch, so the pane the user acted in has to say so. Which ones
+    /// are still at risk is the authority's to answer: a phone pairing over
+    /// `POST /pair` writes the same whole-device snapshot without passing
+    /// through here, and that write makes an earlier failed revocation durable.
+    func revokePairedDevice(_ id: UUID) async {
+        guard let server = syncServer else { return }
+        do {
+            try await server.revoke(deviceID: id)
+        } catch {
+            statusMessage = error.localizedDescription
+            unsavedRevocations[id] = error.localizedDescription
+        }
+        await refreshPairedDevices(from: server)
+    }
+
+    private func refreshPairedDevices(from server: MacSyncServer) async {
+        pairedDevices = await server.pairedDevices()
+        let stillUnsaved = await server.unsavedRevocationIDs()
+        unsavedRevocations = unsavedRevocations.filter { stillUnsaved.contains($0.key) }
+    }
+
+    /// The content-hash index is what keeps a re-shared recording from becoming a
+    /// second call, so it is resolved from Application Support here rather than
+    /// as a side effect of the inbox watcher, which the phone path never starts.
+    /// An index that cannot be persisted is reported, never silently substituted.
+    private func resolvedImportDuplicates() -> InboxDuplicateIndex {
+        if let importDuplicates { return importDuplicates }
+        do {
+            let index = InboxDuplicateIndex(storageURL: try InboxPaths.seenIndexURL())
+            importDuplicates = index
+            return index
+        } catch {
+            statusMessage = "Duplicate recordings cannot be detected: \(error.localizedDescription)"
+            return InboxDuplicateIndex()
+        }
+    }
+
+    /// The one owner of which engine an import runs on. Both the inbox and the
+    /// phone-upload path go through here so the rule cannot drift between them.
+    private func makeImportPipeline() async -> (ImportPipeline, STTProviderID) {
+        let storedDefault = UserDefaults.standard.string(forKey: "default_engine")
+        let configuredDefault: STTProviderID? = storedDefault == "meta" ? .metaMuse : .appleSpeech
+        var meta: (any MetaFileTranscribing)?
+        if EngineSelection.resolve(override: nil, configuredDefault: configuredDefault) == .metaMuse {
+            do {
+                meta = MetaFileProvider(configuration: try metaConfiguration())
+            } catch {
+                statusMessage = "Meta is not configured. Importing with local transcription."
+            }
+        }
+        let engine = EngineSelection.resolveImport(
+            configuredDefault: configuredDefault,
+            metaIsConfigured: meta != nil,
+            parakeetIsUsable: await FluidParakeetProvider().healthCheck().isUsable
+        )
+        if engine != .metaMuse { meta = nil }
+        let speech: any PCMTranscriber = engine == .fluidParakeet ? FluidParakeetProvider() : self.speech
+        let pipeline = ImportPipeline(
+            store: store,
+            spine: FileTranscriptionSpine(
+                speech: speech,
+                diarizer: FluidDiarizer(),
+                store: store,
+                meta: meta
+            ),
+            notes: notesSpine,
+            duplicates: resolvedImportDuplicates(),
+            onProgress: { [weak self] update in
+                Task { @MainActor in
+                    self?.upsertImportJob(update)
+                }
+            }
+        )
+        return (pipeline, engine)
+    }
+
+    func processPhoneUpload(callID: UUID, audioURL: URL, metadata: CallUploadMetadata) async throws {
+        guard isStoreInitialized else { return }
+        if try await resumeNotes(callID: callID, audioURL: audioURL) { return }
+        var job = ImportJob(fileName: audioURL.lastPathComponent, sourceURL: audioURL, stage: .settling, callID: callID)
+        upsertImportJob(job)
+        let (pipeline, engine) = await makeImportPipeline()
+        do {
+            let processed = try await pipeline.`import`(
+                audioURL,
+                engine: engine,
+                source: metadata.source,
+                counterpartyName: metadata.counterpartyName,
+                startedAt: metadata.startedAt,
+                job: job
+            )
+            job.callID = processed.call.id
+            job.stage = .completed
+            job.fractionComplete = 1
+            upsertImportJob(job)
+            turnsByCall[processed.call.id] = processed.turns
+            selectedCallID = processed.call.id
+            removePhoneUploadStaging(audioURL)
+            try await refresh()
+            statusMessage = "Imported iPhone recording."
+        } catch FileImportError.duplicate {
+            try? await store.deleteCall(id: callID)
+            removePhoneUploadStaging(audioURL)
+            job.stage = .duplicate
+            job.fractionComplete = 1
+            upsertImportJob(job)
+        } catch {
+            job.stage = .failed
+            job.error = error.localizedDescription
+            upsertImportJob(job)
+            statusMessage = error.localizedDescription
+            throw error
+        }
+    }
+
+    /// A retried upload whose transcript already landed only needs its notes.
+    /// Re-importing the same bytes would fingerprint the recording as a
+    /// duplicate of itself and delete the call this retry exists to finish.
+    private func resumeNotes(callID: UUID, audioURL: URL) async throws -> Bool {
+        guard let notesSpine, let call = try await store.fetchCall(id: callID) else { return false }
+        let segments = try await store.fetchSegments(callID: callID, provider: call.sttProvider)
+        guard !segments.isEmpty else { return false }
+        let speakers = try await store.fetchCallSpeakers(callID: callID)
+        let profiles = try await store.fetchSpeakerProfiles()
+        let turns = TurnAttributor.fromStored(segments: segments, speakers: speakers, profiles: profiles)
+        var job = ImportJob(fileName: audioURL.lastPathComponent, sourceURL: audioURL, stage: .notes, callID: callID)
+        job.fractionComplete = 0.92
+        upsertImportJob(job)
+        let transcript = Transcript(
+            callID: callID,
+            turns: turns,
+            provider: call.sttProvider,
+            counterpartyName: call.counterpartyName
+        )
+        do {
+            _ = try await notesSpine.generateInstant(transcript, call: call)
+            _ = try await notesSpine.generateDeep(transcript, call: call)
+        } catch {
+            job.stage = .failed
+            job.error = error.localizedDescription
+            upsertImportJob(job)
+            statusMessage = error.localizedDescription
+            throw error
+        }
+        job.stage = .completed
+        job.fractionComplete = 1
+        upsertImportJob(job)
+        turnsByCall[callID] = turns
+        selectedCallID = callID
+        removePhoneUploadStaging(audioURL)
+        try await refresh()
+        statusMessage = "Finished notes for iPhone recording."
+        return true
+    }
+
+    private func removePhoneUploadStaging(_ audioURL: URL) {
+        try? FileManager.default.removeItem(at: audioURL)
+        try? FileManager.default.removeItem(at: CallUploadMetadata.sidecarURL(nextTo: audioURL))
     }
 
     private func updateDashboardTicker() {
@@ -624,9 +839,7 @@ final class AppModel {
         do {
             let directory = try InboxPaths.resolvedInbox()
             inboxURL = directory
-            let seen = try InboxPaths.seenIndexURL()
-            let duplicates = InboxDuplicateIndex(storageURL: seen)
-            importDuplicates = duplicates
+            _ = resolvedImportDuplicates()
             let iCloud = InboxPaths.iCloudDriveInbox()?.standardizedFileURL
             let source: CallSource =
                 iCloud == directory.standardizedFileURL ? .iphoneRecording : .fileImport
@@ -662,41 +875,7 @@ final class AppModel {
         guard isStoreInitialized else { return }
         var job = ImportJob(fileName: url.lastPathComponent, sourceURL: url, stage: .settling)
         upsertImportJob(job)
-        let storedDefault = UserDefaults.standard.string(forKey: "default_engine")
-        let configuredDefault: STTProviderID? = storedDefault == "meta" ? .metaMuse : .appleSpeech
-        let duplicates = importDuplicates ?? InboxDuplicateIndex()
-        var meta: (any MetaFileTranscribing)?
-        if EngineSelection.resolve(override: nil, configuredDefault: configuredDefault) == .metaMuse {
-            do {
-                meta = MetaFileProvider(configuration: try metaConfiguration())
-            } catch {
-                statusMessage = "Meta is not configured. Importing with local transcription."
-            }
-        }
-        let engine = EngineSelection.resolveImport(
-            configuredDefault: configuredDefault,
-            metaIsConfigured: meta != nil,
-            parakeetIsUsable: await FluidParakeetProvider().healthCheck().isUsable
-        )
-        if engine != .metaMuse { meta = nil }
-        let speech: any PCMTranscriber = engine == .fluidParakeet ? FluidParakeetProvider() : self.speech
-        let spine = FileTranscriptionSpine(
-            speech: speech,
-            diarizer: FluidDiarizer(),
-            store: store,
-            meta: meta
-        )
-        let pipeline = ImportPipeline(
-            store: store,
-            spine: spine,
-            notes: notesSpine,
-            duplicates: duplicates,
-            onProgress: { [weak self] update in
-                Task { @MainActor in
-                    self?.upsertImportJob(update)
-                }
-            }
-        )
+        let (pipeline, engine) = await makeImportPipeline()
         do {
             let processed = try await pipeline.`import`(url, engine: engine, source: source)
             job.callID = processed.call.id

@@ -32,6 +32,7 @@ public struct ImportPipeline: Sendable {
         engine: STTProviderID,
         source: CallSource = .fileImport,
         counterpartyName: String? = nil,
+        startedAt: Date? = nil,
         job: ImportJob? = nil
     ) async throws -> ProcessedCall {
         var progress = job ?? ImportJob(fileName: url.lastPathComponent, sourceURL: url)
@@ -44,30 +45,58 @@ public struct ImportPipeline: Sendable {
 
         let callID = progress.callID ?? UUID()
         let storedURL = try storedAudioURL(callID: callID, sourceExtension: url.pathExtension)
-        if FileManager.default.fileExists(atPath: storedURL.path) {
-            try FileManager.default.removeItem(at: storedURL)
+        let existingCall = try await store.fetchCall(id: callID)
+        let existingSegments = existingCall == nil
+            ? []
+            : try await store.fetchSegments(callID: callID, provider: existingCall?.sttProvider ?? engine)
+        let alreadyTranscribed = !existingSegments.isEmpty
+
+        if !alreadyTranscribed {
+            if FileManager.default.fileExists(atPath: storedURL.path) {
+                try FileManager.default.removeItem(at: storedURL)
+            }
+            try FileManager.default.copyItem(at: url, to: storedURL)
         }
-        try FileManager.default.copyItem(at: url, to: storedURL)
-        let hash = try await duplicates.fingerprint(of: storedURL)
+        let hashSource: URL = {
+            if alreadyTranscribed, let path = existingCall?.audioPath {
+                let stored = URL(fileURLWithPath: path)
+                if FileManager.default.fileExists(atPath: stored.path) { return stored }
+            }
+            return storedURL
+        }()
+        let hash = try await duplicates.fingerprint(of: hashSource)
         if await duplicates.contains(hash) {
-            try? FileManager.default.removeItem(at: storedURL)
-            progress.stage = .duplicate
-            progress.fractionComplete = 1
-            emit(progress)
-            throw FileImportError.duplicate
+            // A brand-new drop (no Call row) and a first-time phone upload
+            // (the `.uploaded` placeholder `storeAccepted` writes, no segments
+            // yet) must still hit the hash. Any other row already under this
+            // call ID is this import's own earlier attempt - it reached at
+            // least `.transcribing` - and is not a duplicate of itself.
+            let isRetryOfThisCall = existingCall.map { $0.status != .uploaded } ?? false
+            if !alreadyTranscribed && !isRetryOfThisCall {
+                try? FileManager.default.removeItem(at: storedURL)
+                progress.stage = .duplicate
+                progress.fractionComplete = 1
+                emit(progress)
+                throw FileImportError.duplicate
+            }
         }
 
-        var call = Call(
+        var call = existingCall ?? Call(
             id: callID,
             source: source,
-            startedAt: Date(),
+            startedAt: startedAt ?? Date(),
             counterpartyName: counterpartyName,
             audioPath: storedURL.path,
             audioChannels: 1,
             sttProvider: engine,
             status: .transcribing
         )
-        try await store.upsertCall(call)
+        if !alreadyTranscribed {
+            call.audioPath = storedURL.path
+            call.sttProvider = engine
+            call.status = .transcribing
+            try await store.upsertCall(call)
+        }
         progress.callID = callID
         progress.stage = .transcribing
         progress.fractionComplete = 0.1
@@ -83,14 +112,46 @@ public struct ImportPipeline: Sendable {
             merged.sourceURL = url
             self.emit(merged)
         }
-        let processed = try await reportingSpine.process(
-            fileURL: storedURL,
-            call: call,
-            profiles: profiles,
-            job: progress
-        )
+        let processed: ProcessedCall
+        if alreadyTranscribed, let existingCall {
+            let speakers = try await store.fetchCallSpeakers(callID: callID)
+            processed = ProcessedCall(
+                call: existingCall,
+                turns: TurnAttributor.fromStored(
+                    segments: existingSegments,
+                    speakers: speakers,
+                    profiles: profiles
+                ),
+                clusters: [],
+                dualInstanceMode: .nearLiveFarBatch
+            )
+        } else {
+            do {
+                processed = try await reportingSpine.process(
+                    fileURL: storedURL,
+                    call: call,
+                    profiles: profiles,
+                    job: progress
+                )
+            } catch FileImportError.emptyTranscript {
+                if existingCall == nil {
+                    _ = await duplicates.register(hash)
+                }
+                throw FileImportError.emptyTranscript
+            }
+        }
         call = processed.call
-        _ = await duplicates.register(hash)
+        // Claim the bytes as soon as a transcript exists so a second drop of the
+        // same recording is rejected even if notes later fail. Only a callID
+        // that already owns segments is exempt above; a phone upload arrives
+        // with its Call row already written, so its first attempt is checked.
+        // A run that reused an existing call row and produced no turns stored
+        // no segments, so it cannot take that exemption on its retry and must
+        // not claim the hash either. A brand-new call row never had that
+        // exemption to lose, so it always claims the bytes it owns.
+        if existingCall == nil || !processed.turns.isEmpty {
+            _ = await duplicates.register(hash)
+        }
 
         if let notes {
             progress.stage = .notes

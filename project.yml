@@ -41,6 +41,7 @@ targets:
         INFOPLIST_KEY_NSAudioCaptureUsageDescription: CallNotes captures the other side of your calls from system audio so it can transcribe them locally. Audio never leaves this Mac unless you enable the cloud engine.
         INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription: CallNotes optionally looks at calendar events with a phone or FaceTime link so it can start recording as the call begins.
         INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: CallNotes transcribes your calls on this Mac using on-device speech recognition. Audio stays on this device unless you enable the cloud engine.
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: CallNotes talks only to your paired iPhone on your local network to sync calls and notes.
         ENABLE_HARDENED_RUNTIME: true
         # Process taps and local Postgres sockets rule out the App Sandbox
         # (plan section 12); hardened runtime stays on.
@@ -77,7 +78,24 @@ targets:
         GENERATE_INFOPLIST_FILE: true
         INFOPLIST_KEY_UILaunchScreen_Generation: true
         INFOPLIST_KEY_NSMicrophoneUsageDescription: CallNotes records in-person meetings you start and uploads them to your Mac for transcription.
+        INFOPLIST_KEY_NSCameraUsageDescription: CallNotes scans the pairing QR code shown on your Mac so it can pin that Mac’s certificate.
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: CallNotes talks only to your own Mac on your local network to sync calls and notes.
+        INFOPLIST_KEY_NSBonjourServices: [_callnotes._tcp]
+        INFOPLIST_KEY_UIBackgroundModes: [audio]
+        CODE_SIGN_ENTITLEMENTS: CallNotesIOS/CallNotesIOS.entitlements
+
+  CallNotesIOSUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - CallNotesIOS/UITests
+    dependencies:
+      - target: CallNotesIOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.thatdudealso.callnotes.ios.UITests
+        GENERATE_INFOPLIST_FILE: true
+        TEST_TARGET_NAME: CallNotesIOS
 
   CallNotesCaptureHarness:
     type: tool
@@ -124,6 +142,8 @@ targets:
     platform: iOS
     sources:
       - CallNotesIOS/ShareExtension/Sources
+    dependencies:
+      - package: CallNotesCore
     info:
       path: CallNotesIOS/ShareExtension/Info.plist
       properties:
@@ -134,12 +154,12 @@ targets:
           NSExtensionPointIdentifier: com.apple.share-services
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
           NSExtensionAttributes:
-            NSExtensionActivationRule:
-              NSExtensionActivationSupportsFileWithMaxCount: 1
+            NSExtensionActivationRule: 'SUBQUERY(extensionItems, $extensionItem, SUBQUERY($extensionItem.attachments, $attachment, ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.audio").@count == 1).@count == 1'
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.thatdudealso.callnotes.ios.ShareExtension
         MARKETING_VERSION: 0.1.0
+        CODE_SIGN_ENTITLEMENTS: CallNotesIOS/ShareExtension/CallNotesShareExtension.entitlements
 
 schemes:
   CallNotesMac:
@@ -152,8 +172,13 @@ schemes:
     build:
       targets:
         CallNotesIOS: all
+        CallNotesIOSUITests: [test]
     run:
       config: Debug
+    test:
+      config: Debug
+      targets:
+        - CallNotesIOSUITests
   CallNotesCaptureHarness:
     build:
       targets:

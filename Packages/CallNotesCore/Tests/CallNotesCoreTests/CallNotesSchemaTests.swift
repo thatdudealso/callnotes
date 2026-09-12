@@ -22,6 +22,21 @@ import Testing
         #expect(notes.entities.companies == ["Acme"])
     }
 
+    /// The phone mirrors `status` as its raw wire token and speaks the phrase
+    /// for it, so every state has to have one that reads as English.
+    @Test func everyCallStatusHasAHumanPhraseForItsWireToken() {
+        #expect(CallStatus(rawValue: "notes_ready")?.displayName == "Notes ready")
+        #expect(CallStatus.failed.displayName == "Could not finish")
+        #expect(CallStatus.recording.displayName == "Recording")
+        #expect(CallStatus.uploaded.displayName == "Processing")
+        #expect(CallStatus.transcribing.displayName == "Processing")
+        for status in CallStatus.allCases {
+            #expect(!status.displayName.isEmpty)
+            #expect(!status.displayName.contains("_"))
+            #expect(status.displayName.first?.isUppercase == true)
+        }
+    }
+
     @Test func decodesInstantTitleAndSummary() throws {
         let json = """
             {"title":"Priya call","summary":"Confirmed the meeting time."}

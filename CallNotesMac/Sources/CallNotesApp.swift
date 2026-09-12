@@ -33,6 +33,8 @@ struct CallNotesApp: App {
             TabView {
                 MetaEngineSettingsView(appModel: model)
                     .tabItem { Label("Engines", systemImage: "cpu") }
+                DevicesSettingsView(appModel: model)
+                    .tabItem { Label("Devices", systemImage: "iphone") }
             }
         }
     }

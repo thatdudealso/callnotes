@@ -96,7 +96,7 @@ struct HistoryRow: View {
                 }
                 Text(providerLabel(call.sttProvider))
                     .foregroundStyle(CallNotesStyle.primary)
-                Text(call.status.rawValue.replacingOccurrences(of: "_", with: " "))
+                Text(call.status.displayName)
                     .foregroundStyle(.secondary)
             }
             .font(.caption)

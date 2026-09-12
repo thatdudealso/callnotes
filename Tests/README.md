@@ -15,6 +15,10 @@ Cross-target test harnesses land here as the phases that need them arrive
 - Meta live API integration tests (Phase 4) live in the package instead, as
   `MetaLiveIntegrationTests` (opt-in `CALLNOTES_META=1`; see `AGENTS.md`),
 - live Ollama notes generation for both pinned models (`CALLNOTES_OLLAMA=1`),
+- the iPhone sync device test (Phase 6) lives with its target, as
+  `CallNotesIOS/UITests/PhoneSyncUITests.swift`. It drives the shipping app
+  against a Mac that is serving, so it is skipped unless
+  `CALLNOTES_SYNC_TICKET` carries that Mac's QR pairing payload,
 - backup/restore and failure-injection scenarios (Phase 7).
 
 Unit tests for pure logic live inside the package:
