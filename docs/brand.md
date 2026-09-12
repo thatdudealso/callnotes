@@ -15,11 +15,15 @@ identifiers and strings.
 - Log subsystem: `com.thatdudealso.callnotes`.
 - Bonjour service: `_callnotes._tcp`.
 
-## Placeholder visual identity (Phase 0)
+## Visual identity
 
-Final art comes later; until then:
-
-- Icon: SF Symbol `phone.badge.waveform` on a deep-teal rounded rectangle.
+- Icon: original **diary-facing-voices** mark - a closed cream diary on teal
+  with spine and page edges, and two facing voice-prints on the cover (two
+  heavy rings each, asymmetric spacing so they read as two people talking).
+  The menu bar uses the same mark: idle is outline, armed is filled,
+  recording layers a red dot, processing layers a spinner.
+  Mac and iPhone share the catalog in `Resources/Assets.xcassets`.
+  `Scripts/render-app-icon-concepts.swift` is the raster source.
 - Accent palette:
   - Primary: deep teal `#0E7C7B`
   - Recording red: `#D64545`

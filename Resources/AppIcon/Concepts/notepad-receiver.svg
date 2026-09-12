@@ -1,0 +1,20 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<svg xmlns='http://www.w3.org/2000/svg' width='1024' height='1024' viewBox='0 0 1024 1024'>
+<defs>
+  <linearGradient id='bg' x1='20%' y1='0%' x2='80%' y2='100%'>
+    <stop offset='0%' stop-color='#129492'/>
+    <stop offset='100%' stop-color='#094E4D'/>
+  </linearGradient>
+</defs>
+<rect width='1024' height='1024' fill='url(#bg)'/>
+<rect x='196' y='360' width='632' height='508' rx='56' fill='#F7F1E4'/>
+<g fill='#0C2626'><rect x='236.00' y='259.36' width='176.64' height='176.64' rx='84.79'/><rect x='611.36' y='259.36' width='176.64' height='176.64' rx='84.79'/><rect x='292.52' y='168.00' width='438.95' height='150.08' rx='72.04'/></g>
+<circle cx='330' cy='456' r='15' fill='#094E4D'/>
+<circle cx='421' cy='456' r='15' fill='#094E4D'/>
+<circle cx='512' cy='456' r='15' fill='#094E4D'/>
+<circle cx='603' cy='456' r='15' fill='#094E4D'/>
+<circle cx='694' cy='456' r='15' fill='#094E4D'/>
+<rect x='276' y='520' width='472' height='22' rx='11' fill='#305C5B'/>
+<rect x='276' y='620' width='472' height='22' rx='11' fill='#305C5B'/>
+<rect x='276' y='720' width='300' height='22' rx='11' fill='#305C5B'/>
+</svg>

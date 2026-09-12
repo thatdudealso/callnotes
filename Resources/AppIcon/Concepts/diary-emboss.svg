@@ -1,0 +1,22 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<svg xmlns='http://www.w3.org/2000/svg' width='1024' height='1024' viewBox='0 0 1024 1024'>
+<defs>
+  <linearGradient id='bg' x1='20%' y1='0%' x2='80%' y2='100%'>
+    <stop offset='0%' stop-color='#129492'/>
+    <stop offset='100%' stop-color='#094E4D'/>
+  </linearGradient>
+</defs>
+<rect width='1024' height='1024' fill='url(#bg)'/>
+<rect x='196' y='156' width='600' height='712' rx='52' fill='#F7F1E4'/>
+<path d='M248 156 H284 V868 H248 C218 868 196 846 196 816 V208 C196 178 218 156 248 156 Z' fill='#BAA684'/>
+<rect x='210' y='300' width='60' height='8' rx='3' fill='#A08C6C'/>
+<rect x='210' y='500' width='60' height='8' rx='3' fill='#A08C6C'/>
+<rect x='210' y='700' width='60' height='8' rx='3' fill='#A08C6C'/>
+<rect x='808' y='176' width='16' height='672' rx='6' fill='#FFFCF5'/>
+<rect x='828' y='182' width='16' height='660' rx='6' fill='#FFFCF5'/>
+<rect x='848' y='188' width='16' height='648' rx='6' fill='#FFFCF5'/>
+<g fill='#0C2626'><rect x='360.00' y='348.80' width='115.20' height='115.20' rx='55.30'/><rect x='604.80' y='348.80' width='115.20' height='115.20' rx='55.30'/><rect x='396.86' y='268.00' width='286.27' height='109.76' rx='52.68'/></g>
+<rect x='360' y='520' width='300' height='22' rx='11' fill='#305C5B'/>
+<rect x='360' y='600' width='300' height='22' rx='11' fill='#305C5B'/>
+<rect x='360' y='680' width='200' height='22' rx='11' fill='#305C5B'/>
+</svg>
