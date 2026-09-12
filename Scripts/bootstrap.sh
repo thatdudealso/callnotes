@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Provision the local services CallNotes will use on a development Mac.
+# Provision the local services CallNotes will use on a development Mac,
+# including the self-signed CallNotes Local Signing identity.
 # Run with --check to inspect every operation without changing the machine.
 # Phase 2's original PostgreSQL 16 decision was superseded by dedicated PostgreSQL 18.
 

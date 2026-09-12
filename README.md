@@ -115,8 +115,9 @@ macOS stores Microphone and Screen & System Audio Recording grants against an
 app's designated requirement. An ad-hoc signature's requirement is the
 cdhash, which changes on every rebuild, so those prompts return. Bootstrap
 creates a self-signed identity named `CallNotes Local Signing` in the login
-keychain (idempotent). `xcodegen generate` then signs `CallNotesMac` and
-`CallNotesCaptureHarness` with it so the grants survive rebuilds.
+keychain (idempotent). `xcodegen generate` then writes a gitignored overlay so
+`CallNotesMac` and `CallNotesCaptureHarness` sign with it and the grants
+survive rebuilds.
 
 This identity is local-development only. It is not an Apple Developer
 certificate and cannot notarize or distribute. CI and any clone without the
