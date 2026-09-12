@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Provision the local services CallNotes will use on a development Mac.
+# Provision the local services CallNotes will use on a development Mac,
+# including the self-signed CallNotes Local Signing identity.
 # Run with --check to inspect every operation without changing the machine.
 # Phase 2's original PostgreSQL 16 decision was superseded by dedicated PostgreSQL 18.
 
@@ -24,6 +25,10 @@ POSTGRES_PLIST="$LAUNCH_AGENTS_DIR/com.thatdudealso.callnotes.postgresql.plist"
 OLLAMA_PLIST="$LAUNCH_AGENTS_DIR/com.thatdudealso.callnotes.ollama.plist"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CALLNOTES_OLLAMA_HOST="127.0.0.1:11434"
+LOCAL_SIGNING_SYNC="$ROOT/Scripts/sync-local-signing.sh"
+# Shared identity name and presence check live in sync-local-signing.sh.
+# shellcheck disable=SC1090,SC1091
+source "$LOCAL_SIGNING_SYNC"
 
 say() { printf '%s\n' "$*"; }
 
@@ -33,6 +38,118 @@ run() {
   else
     "$@"
   fi
+}
+
+login_keychain_path() {
+  local keychain="$HOME/Library/Keychains/login.keychain-db"
+  if [[ -f "$keychain" ]]; then
+    printf '%s\n' "$keychain"
+    return 0
+  fi
+  keychain="$HOME/Library/Keychains/login.keychain"
+  if [[ -f "$keychain" ]]; then
+    printf '%s\n' "$keychain"
+    return 0
+  fi
+  say "login keychain not found" >&2
+  return 1
+}
+
+# Self-signed identity so macOS TCC grants (Microphone, Screen & System Audio)
+# survive rebuilds. Ad-hoc signatures bind the designated requirement to the
+# cdhash, which changes every build. A certificate leaf does not. Local
+# development only: cannot notarize or distribute.
+create_local_signing_identity() {
+  local work keychain p12_pass
+  keychain="$(login_keychain_path)" || exit 1
+  work="$(mktemp -d)"
+  CALLNOTES_ROLLBACK_IMPORTED_IDENTITY=0
+
+  # Temp key material always. After import, also roll back the login-keychain
+  # identity on interrupt/`set -e` abort until trust and presence both succeed.
+  # shellcheck disable=SC2064
+  trap '
+    if [[ "${CALLNOTES_ROLLBACK_IMPORTED_IDENTITY:-0}" == 1 ]]; then
+      security delete-identity -c "'"$CALLNOTES_LOCAL_SIGNING_NAME"'" "'"$keychain"'" >/dev/null 2>&1 || true
+    fi
+    rm -rf "'"$work"'"
+  ' EXIT
+  trap 'exit 1' INT TERM
+
+  cat > "$work/openssl.cnf" <<CNF
+[ req ]
+distinguished_name = dn
+x509_extensions    = v3
+prompt             = no
+
+[ dn ]
+CN = $CALLNOTES_LOCAL_SIGNING_NAME
+
+[ v3 ]
+basicConstraints       = critical,CA:false
+keyUsage               = critical,digitalSignature
+extendedKeyUsage       = critical,codeSigning
+subjectKeyIdentifier   = hash
+CNF
+
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$work/key.pem" -out "$work/cert.pem" \
+    -days 3650 -config "$work/openssl.cnf"
+
+  # macOS Security.framework cannot read OpenSSL 3's default PKCS12 encoding
+  # (AES-256-CBC + SHA-256 MAC) and fails with "MAC verification failed".
+  # SHA1/3DES is what `security import` accepts.
+  p12_pass="$(openssl rand -base64 24)"
+  openssl pkcs12 -export \
+    -inkey "$work/key.pem" -in "$work/cert.pem" \
+    -name "$CALLNOTES_LOCAL_SIGNING_NAME" -out "$work/identity.p12" \
+    -macalg sha1 -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES \
+    -passout "pass:$p12_pass"
+
+  security import "$work/identity.p12" \
+    -k "$keychain" \
+    -P "$p12_pass" -T /usr/bin/codesign -T /usr/bin/security
+  CALLNOTES_ROLLBACK_IMPORTED_IDENTITY=1
+
+  if ! security add-trusted-cert \
+    -p codeSign -r trustRoot \
+    -k "$keychain" \
+    "$work/cert.pem"; then
+    say "FAILED: could not trust '$CALLNOTES_LOCAL_SIGNING_NAME' for code signing"
+    exit 1
+  fi
+
+  if ! callnotes_local_signing_identity_present; then
+    say "FAILED: identity '$CALLNOTES_LOCAL_SIGNING_NAME' is not visible to codesign"
+    exit 1
+  fi
+
+  CALLNOTES_ROLLBACK_IMPORTED_IDENTITY=0
+  trap - EXIT INT TERM
+  unset CALLNOTES_ROLLBACK_IMPORTED_IDENTITY
+  rm -rf "$work"
+}
+
+ensure_local_signing_identity() {
+  if callnotes_local_signing_identity_present; then
+    say "local signing identity '$CALLNOTES_LOCAL_SIGNING_NAME': present"
+    if "$CHECK_ONLY"; then
+      say "would write Configs/signing.local.xcconfig"
+      return
+    fi
+    "$LOCAL_SIGNING_SYNC"
+    return
+  fi
+
+  say "local signing identity '$CALLNOTES_LOCAL_SIGNING_NAME': absent"
+  if "$CHECK_ONLY"; then
+    say "would create identity '$CALLNOTES_LOCAL_SIGNING_NAME' and write Configs/signing.local.xcconfig"
+    return
+  fi
+
+  say "Creating local development code-signing identity '$CALLNOTES_LOCAL_SIGNING_NAME'"
+  create_local_signing_identity
+  "$LOCAL_SIGNING_SYNC"
 }
 
 write_ollama_plist() {
@@ -165,6 +282,8 @@ if ! command -v brew >/dev/null 2>&1; then
   say "Homebrew is required: https://brew.sh"
   exit 1
 fi
+
+ensure_local_signing_identity
 
 say "Installing or updating dedicated PostgreSQL 18 dependencies"
 run brew install postgresql@18 pgvector
