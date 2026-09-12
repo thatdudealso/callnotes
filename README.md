@@ -79,11 +79,15 @@ swift build --package-path Packages/CallNotesCore
 swift test --package-path Packages/CallNotesCore
 xcodegen generate
 xcodebuild -project CallNotes.xcodeproj -scheme CallNotesMac \
-  -destination 'platform=macOS,arch=arm64' build CODE_SIGNING_ALLOWED=NO
+  -destination 'platform=macOS,arch=arm64' build
 xcodebuild -project CallNotes.xcodeproj -scheme CallNotesIOS \
   -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO \
   ARCHS=arm64
 ```
+
+Local Mac builds sign with the stable identity so macOS permission grants
+survive a rebuild. CI keeps `CODE_SIGNING_ALLOWED=NO`; see
+[docs/ci.md](docs/ci.md).
 
 The `CallNotesIOS` scheme builds the iPhone app and embeds its Share
 Extension. The simulator build is Apple silicon only: FluidAudio vendors
