@@ -1,7 +1,9 @@
 #!/usr/bin/env swift
-/// Rasterize the three CallNotes app-icon concepts and their menu-bar marks.
-/// Source of truth is the SVG written next to each PNG; this file draws both
-/// from the same geometry so 16pt proofs match the vector art.
+/// Rasterize CallNotes app-icon concepts and their menu-bar marks.
+/// Classic concepts write a 1024 app-icon SVG plus a separate menu-bar SVG.
+/// Voice variants have no 1024 vector source: Concepts/<slug>-menubar.svg is
+/// the menu-bar glyph only. The shipped app-icon raster is drawn by
+/// `drawFacingVoices` / `drawVoiceVariant`, not from SVG.
 ///
 /// Usage:
 ///   swift Scripts/render-app-icon-concepts.swift \
@@ -559,28 +561,37 @@ func drawFacingArcs(
     ctx.restoreGState()
 }
 
+/// Shared facing-voices layout so the 1024 app icon and 18pt menu mark stay one identity.
+/// Inner-to-outer centreline gap is sized to stay larger than the menu-bar stroke at 18px and 36px.
+/// The far (right) origin sits inboard so outer arc + half-stroke stays inside the cover.
+func facingVoicesLayout(in box: CGRect) -> (leftOrigin: CGPoint, rightOrigin: CGPoint, leftRadii: [CGFloat], rightRadii: [CGFloat]) {
+    let span = box.width * 0.28
+    let leftOrigin = CGPoint(x: box.minX + box.width * 0.24, y: box.midY)
+    let rightOrigin = CGPoint(x: box.maxX - box.width * 0.15, y: box.midY)
+    return (
+        leftOrigin,
+        rightOrigin,
+        [span * 0.28, span * 0.82],
+        [span * 0.36, span * 0.90]
+    )
+}
+
 func drawFacingVoices(_ ctx: CGContext, size: CGFloat, detail: Detail) {
     let body = drawClosedDiaryBody(ctx, size: size, detail: detail)
     let box = body.content
-    // Two heavy rings per voice. Asymmetry is spacing + aperture, not ring count.
     let thick: CGFloat
     switch detail {
-    case .tiny: thick = max(2.3, size * 0.14)
-    case .small: thick = max(2.6, size * 0.085)
-    case .full: thick = max(12 / 1024 * size, size * 0.028)
+    case .tiny: thick = max(1.05, size * 0.06)
+    case .small: thick = max(1.15, size * 0.04)
+    case .full: thick = max(10 / 1024 * size, size * 0.022)
     }
-    let leftOrigin = CGPoint(x: box.minX + box.width * 0.10, y: box.midY)
-    let rightOrigin = CGPoint(x: box.maxX - box.width * 0.10, y: box.midY)
-    let span = box.width * (detail == .tiny ? 0.28 : 0.32)
-    // Left: compact pair. Right: larger outer ring and more air between rings.
-    let leftRadii = [span * 0.38, span * 0.82]
-    let rightRadii = [span * 0.50, span * 1.12]
+    let voices = facingVoicesLayout(in: box)
     if detail == .full {
-        fill(ctx, CGPath(ellipseIn: CGRect(x: leftOrigin.x - thick * 0.55, y: leftOrigin.y - thick * 0.55, width: thick * 1.1, height: thick * 1.1), transform: nil), Palette.tealInk)
-        fill(ctx, CGPath(ellipseIn: CGRect(x: rightOrigin.x - thick * 0.45, y: rightOrigin.y - thick * 0.45, width: thick * 0.9, height: thick * 0.9), transform: nil), Palette.line)
+        fill(ctx, CGPath(ellipseIn: CGRect(x: voices.leftOrigin.x - thick * 0.55, y: voices.leftOrigin.y - thick * 0.55, width: thick * 1.1, height: thick * 1.1), transform: nil), Palette.tealInk)
+        fill(ctx, CGPath(ellipseIn: CGRect(x: voices.rightOrigin.x - thick * 0.45, y: voices.rightOrigin.y - thick * 0.45, width: thick * 0.9, height: thick * 0.9), transform: nil), Palette.line)
     }
-    drawFacingArcs(ctx, origin: leftOrigin, radii: leftRadii, facingRight: true, color: Palette.tealInk, width: thick, openness: 0.36)
-    drawFacingArcs(ctx, origin: rightOrigin, radii: rightRadii, facingRight: false, color: Palette.line, width: thick * 0.88, openness: 0.48)
+    drawFacingArcs(ctx, origin: voices.leftOrigin, radii: voices.leftRadii, facingRight: true, color: Palette.tealInk, width: thick, openness: 0.36)
+    drawFacingArcs(ctx, origin: voices.rightOrigin, radii: voices.rightRadii, facingRight: false, color: Palette.line, width: thick * 0.85, openness: 0.48)
 }
 
 func drawVoiceVariant(_ variant: VoiceVariant, ctx: CGContext, size: CGFloat, clipSquircle: Bool) {
@@ -850,17 +861,17 @@ func drawVoiceMenuMark(_ variant: VoiceVariant, ctx: CGContext, size: CGFloat, c
         let cover = canvas.insetBy(dx: canvas.width * 0.10, dy: canvas.height * 0.06)
         let coverPath = roundedRect(cover, rx: cover.width * 0.12)
         let spineX = cover.minX + cover.width * 0.16
+        let voices = facingVoicesLayout(in: cover)
+        let leftW = max(0.90, waveW * 0.48)
+        let rightW = max(0.85, waveW * 0.42)
         if filled {
             fill(ctx, coverPath, color)
             ctx.saveGState()
             ctx.setBlendMode(.clear)
             let punch = CGRect(x: spineX - max(1.1, size * 0.04), y: cover.minY + cover.height * 0.08, width: max(1.1, size * 0.05), height: cover.height * 0.84)
             fill(ctx, roundedRect(punch, rx: punch.width / 2), RGB(0, 0, 0))
-            let leftO = CGPoint(x: cover.minX + cover.width * 0.30, y: cover.midY)
-            let rightO = CGPoint(x: cover.maxX - cover.width * 0.10, y: cover.midY)
-            let span = cover.width * 0.20
-            drawFacingArcs(ctx, origin: leftO, radii: [span * 0.38, span * 0.82], facingRight: true, color: RGB(0, 0, 0), width: max(2.2, waveW * 1.35), openness: 0.36)
-            drawFacingArcs(ctx, origin: rightO, radii: [span * 0.50, span * 1.12], facingRight: false, color: RGB(0, 0, 0), width: max(1.9, waveW * 1.15), openness: 0.48)
+            drawFacingArcs(ctx, origin: voices.leftOrigin, radii: voices.leftRadii, facingRight: true, color: RGB(0, 0, 0), width: leftW, openness: 0.36)
+            drawFacingArcs(ctx, origin: voices.rightOrigin, radii: voices.rightRadii, facingRight: false, color: RGB(0, 0, 0), width: rightW, openness: 0.48)
             ctx.restoreGState()
         } else {
             stroke(ctx, coverPath, color, width: lineW)
@@ -871,11 +882,8 @@ func drawVoiceMenuMark(_ variant: VoiceVariant, ctx: CGContext, size: CGFloat, c
             ctx.addLine(to: CGPoint(x: spineX, y: cover.maxY - lineW))
             ctx.strokePath()
             ctx.restoreGState()
-            let leftO = CGPoint(x: cover.minX + cover.width * 0.30, y: cover.midY)
-            let rightO = CGPoint(x: cover.maxX - cover.width * 0.10, y: cover.midY)
-            let span = cover.width * 0.20
-            drawFacingArcs(ctx, origin: leftO, radii: [span * 0.38, span * 0.82], facingRight: true, color: color, width: max(2.2, waveW * 1.35), openness: 0.36)
-            drawFacingArcs(ctx, origin: rightO, radii: [span * 0.50, span * 1.12], facingRight: false, color: color, width: max(1.9, waveW * 1.15), openness: 0.48)
+            drawFacingArcs(ctx, origin: voices.leftOrigin, radii: voices.leftRadii, facingRight: true, color: color, width: leftW, openness: 0.36)
+            drawFacingArcs(ctx, origin: voices.rightOrigin, radii: voices.rightRadii, facingRight: false, color: color, width: rightW, openness: 0.48)
         }
     }
 
@@ -1129,10 +1137,6 @@ func svgVoiceMark(_ variant: VoiceVariant) -> String {
         </svg>
         """
     }
-}
-
-func svgForVoice(_ variant: VoiceVariant) -> String {
-    svgVoiceMark(variant)
 }
 
 // MARK: - Raster
@@ -1513,6 +1517,7 @@ for concept in Concept.allCases {
     try! markSVG.write(to: markURL, atomically: true, encoding: .utf8)
 
     for size in sizes {
+        if size >= 1024 { continue }
         let png = renderAppIcon(concept, size: size, squircle: true)
         publish(png, name: "\(concept.slug)-\(size).png")
         let unmasked = renderAppIcon(concept, size: size, squircle: false)
@@ -1549,13 +1554,11 @@ publish(sheet, name: "concepts-contact-sheet.png")
 }
 
 for variant in VoiceVariant.allCases {
-    let svg = svgForVoice(variant)
-    let svgURL = args.outDir.appendingPathComponent("Concepts").appendingPathComponent("\(variant.slug).svg")
-    try! svg.write(to: svgURL, atomically: true, encoding: .utf8)
     let markURL = args.outDir.appendingPathComponent("Concepts").appendingPathComponent("\(variant.slug)-menubar.svg")
     try! svgVoiceMark(variant).write(to: markURL, atomically: true, encoding: .utf8)
 
     for size in sizes {
+        if size >= 1024 && variant != .facingVoices { continue }
         let png = renderVoiceIcon(variant, size: size, squircle: true)
         publish(png, name: "\(variant.slug)-\(size).png")
         let unmasked = renderVoiceIcon(variant, size: size, squircle: false)
