@@ -56,7 +56,7 @@ public enum PartialRecordingRecovery: Sendable {
             call.endedAt = call.startedAt.addingTimeInterval(duration)
             call.durationSec = Int(duration.rounded(.down))
             call.sampleRate = Int(channels.sampleRate.rounded())
-            if call.status == .recording || call.status == .failed {
+            if call.status == .recording || PipelineStage.resolved(call.errorStage) == .capture {
                 call.status = .uploaded
                 call.error = nil
                 call.errorStage = nil
@@ -80,10 +80,12 @@ public enum PartialRecordingRecovery: Sendable {
 
     public static func needsRecovery(_ call: Call) -> Bool {
         switch call.status {
-        case .recording, .failed, .uploaded:
+        case .recording, .uploaded:
             return true
+        case .failed:
+            return PipelineStage.resolved(call.errorStage) == .capture
         case .transcribing, .transcribed, .notesReady:
-            return call.audioPath.isEmpty
+            return false
         }
     }
 

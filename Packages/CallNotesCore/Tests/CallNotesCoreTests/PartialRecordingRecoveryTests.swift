@@ -112,4 +112,36 @@ import Testing
         #expect(recovered.isEmpty)
         #expect(try await store.fetchCall(id: callID)?.status == .notesReady)
     }
+
+    @Test func failedNotesCallsAreNotRequeued() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("callnotes-partial-failed-notes-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let callID = UUID()
+        let url = root.appendingPathComponent("\(callID.uuidString).caf")
+        let writer = try StereoCAFWriter(url: url, sampleRate: 16_000)
+        try writer.write(near: [Int16](repeating: 1, count: 1_600), far: [Int16](repeating: 0, count: 1_600))
+        writer.close()
+
+        let store = MemoryStore()
+        let call = Call(
+            id: callID,
+            source: .macManual,
+            startedAt: Date(),
+            audioPath: url.path,
+            sttProvider: .appleSpeech,
+            status: .failed,
+            error: "Notes generation failed",
+            errorStage: PipelineStage.notes.rawValue
+        )
+        try await store.upsertCall(call)
+
+        let recovered = try await PartialRecordingRecovery.recover(audioDirectory: root, store: store)
+        let persisted = try await store.fetchCall(id: callID)
+        #expect(recovered.isEmpty)
+        #expect(persisted?.status == .failed)
+        #expect(persisted?.error == "Notes generation failed")
+        #expect(persisted?.errorStage == PipelineStage.notes.rawValue)
+    }
 }
