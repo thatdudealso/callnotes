@@ -35,7 +35,7 @@ public enum DiagnosticLog: Sendable {
         let directory = root.appendingPathComponent(folderName, isDirectory: true)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = fileURL(root: root)
-        var encoder = JSONEncoder()
+        let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         var line = try encoder.encode(event)
         line.append(contentsOf: "\n".utf8)
@@ -55,6 +55,14 @@ public enum DiagnosticLog: Sendable {
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
         let lines = text.split(whereSeparator: \.isNewline).map(String.init)
         return Array(lines.suffix(limit))
+    }
+
+    public static func recentEvents(root: URL, limit: Int = maxLines) throws -> [DiagnosticEvent] {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try recentLines(root: root, limit: limit).compactMap { line in
+            try? decoder.decode(DiagnosticEvent.self, from: Data(line.utf8))
+        }
     }
 
     public static func redact(_ metadata: [String: String]) -> [String: String] {

@@ -10,7 +10,7 @@ public struct DiagnosticsSnapshot: Sendable, Equatable, Codable {
     public var retention: String
     public var dualInstanceMode: String?
     public var health: [String: String]
-    public var logLines: [String]
+    public var logLines: [DiagnosticEvent]
     public var exclusions: [String]
 
     public init(
@@ -23,7 +23,7 @@ public struct DiagnosticsSnapshot: Sendable, Equatable, Codable {
         retention: String,
         dualInstanceMode: String? = nil,
         health: [String: String],
-        logLines: [String],
+        logLines: [DiagnosticEvent],
         exclusions: [String] = DiagnosticsBundle.exclusions
     ) {
         self.createdAt = createdAt
@@ -35,7 +35,7 @@ public struct DiagnosticsSnapshot: Sendable, Equatable, Codable {
         self.retention = retention
         self.dualInstanceMode = dualInstanceMode
         self.health = health
-        self.logLines = logLines
+        self.logLines = logLines.filter(DiagnosticsBundle.isExportableLogEvent)
         self.exclusions = exclusions
     }
 }
@@ -56,9 +56,16 @@ public enum DiagnosticsBundle: Sendable {
     public static let snapshotFileName = "diagnostics.json"
     public static let exclusionsFileName = "EXCLUSIONS.txt"
 
+    static func isExportableLogEvent(_ event: DiagnosticEvent) -> Bool {
+        let transcriptFields: Set<String> = [
+            "text", "start", "startsec", "end", "endsec", "channel", "clusterkey", "words",
+        ]
+        return event.metadata.keys.allSatisfy { !transcriptFields.contains($0.lowercased()) }
+    }
+
     public static func export(_ snapshot: DiagnosticsSnapshot, to directory: URL) throws -> URL {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        var encoder = JSONEncoder()
+        let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         let json = try encoder.encode(snapshot)
@@ -97,9 +104,6 @@ public enum DiagnosticsBundle: Sendable {
             }
             guard let text = try? String(contentsOf: item, encoding: .utf8) else { continue }
             let lowered = text.lowercased()
-            if lowered.contains("\"text\":") && lowered.contains("\"startsec\"") {
-                return "transcript payload in \(item.lastPathComponent)"
-            }
             if lowered.contains("bearer ") || (lowered.contains("sk-") && !lowered.contains("<redacted>")) {
                 return "credential in \(item.lastPathComponent)"
             }

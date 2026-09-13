@@ -1338,7 +1338,7 @@ final class AppModel {
                     "postgres": storeBackendName,
                     "speech": speech.dualInstanceMode.rawValue,
                 ],
-                logLines: (try? DiagnosticLog.recentLines(root: root)) ?? []
+                logLines: (try? DiagnosticLog.recentEvents(root: root)) ?? []
             )
             _ = try DiagnosticsBundle.export(snapshot, to: bundleDir)
             if let forbidden = DiagnosticsBundle.containsForbiddenContent(in: bundleDir) {
