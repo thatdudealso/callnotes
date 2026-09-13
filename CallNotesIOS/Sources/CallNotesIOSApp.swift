@@ -356,6 +356,7 @@ final class PhoneAppModel {
         defer { recorder.releaseRecordingFile() }
         do {
             let capture = try recorder.stop()
+            var fallbackTranscript: OnDeviceFallbackTranscript?
             let reachable = await probeMacReachable()
             if OnDeviceFallback.shouldTranscribe(
                 isEnabled: onDeviceFallback,
@@ -369,6 +370,7 @@ final class PhoneAppModel {
                         startedAt: capture.startedAt
                     )
                     try OnDeviceFallbackStore.write(transcript, nextTo: capture.url)
+                    fallbackTranscript = transcript
                     uploadStatus = "Mac unreachable. Transcribed on this iPhone (\(transcript.segments.count) segments)."
                 } catch {
                     uploadStatus = "On-device transcription failed: \(error.localizedDescription)"
@@ -376,7 +378,11 @@ final class PhoneAppModel {
             }
             try await BackgroundUploadCoordinator.shared.enqueue(
                 audioAt: capture.url,
-                metadata: .init(source: .iphoneMeeting, startedAt: capture.startedAt)
+                metadata: .init(
+                    source: .iphoneMeeting,
+                    startedAt: capture.startedAt,
+                    fallbackTranscript: fallbackTranscript
+                )
             )
             let resume = await BackgroundUploadCoordinator.shared.resume(userInitiated: true)
             if uploadStatus == nil || uploadStatus?.contains("Transcribed on this iPhone") != true {

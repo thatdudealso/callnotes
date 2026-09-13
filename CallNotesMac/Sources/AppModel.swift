@@ -360,6 +360,15 @@ final class AppModel {
 
     func processPhoneUpload(callID: UUID, audioURL: URL, metadata: CallUploadMetadata) async throws {
         guard isStoreInitialized else { return }
+        if let fallbackTranscript = metadata.fallbackTranscript {
+            try await persistFallbackTranscript(fallbackTranscript, for: callID)
+            if try await resumeNotes(callID: callID, audioURL: audioURL) {
+                removePhoneUploadStaging(audioURL)
+                try await refresh()
+                statusMessage = "Imported iPhone fallback transcript."
+                return
+            }
+        }
         if try await resumeNotes(callID: callID, audioURL: audioURL) { return }
         var job = ImportJob(fileName: audioURL.lastPathComponent, sourceURL: audioURL, stage: .settling, callID: callID)
         upsertImportJob(job)
@@ -395,6 +404,29 @@ final class AppModel {
             statusMessage = error.localizedDescription
             throw error
         }
+    }
+
+    private func persistFallbackTranscript(_ transcript: OnDeviceFallbackTranscript, for callID: UUID) async throws {
+        guard var call = try await store.fetchCall(id: callID) else { return }
+        let segments = transcript.segments.enumerated().map { index, raw in
+            Segment(
+                callID: callID,
+                seq: index,
+                startSec: raw.start,
+                endSec: raw.end,
+                channel: raw.channel ?? .mixed,
+                clusterKey: raw.channel?.rawValue,
+                text: raw.text,
+                provider: transcript.provider
+            )
+        }
+        guard !segments.isEmpty else { return }
+        try await store.replaceSegments(callID: callID, provider: transcript.provider, segments)
+        call.sttProvider = transcript.provider
+        call.status = .transcribed
+        call.error = nil
+        call.errorStage = nil
+        try await store.upsertCall(call)
     }
 
     /// A retried upload whose transcript already landed only needs its notes.
@@ -768,12 +800,8 @@ final class AppModel {
     }
 
     func captureDidStart(callID: UUID, url: URL) async {
-        let injects = ConsentPolicy.resolved(
-            UserDefaults.standard.string(forKey: ConsentPolicy.defaultsKey)
-        ).injectsAnnouncement
         if var call = instantCallAtHangUp {
             call.audioPath = url.path
-            if injects { call.consentAnnounced = true }
             instantCallAtHangUp = call
             try? await store.upsertCall(call)
             return
@@ -784,8 +812,7 @@ final class AppModel {
             startedAt: Date(),
             audioPath: url.path,
             sttProvider: .appleSpeech,
-            status: .recording,
-            consentAnnounced: injects
+            status: .recording
         )
         try? await store.upsertCall(call)
         logDiagnostic(category: "capture", event: "started", metadata: ["call": callID.uuidString])
@@ -1204,6 +1231,8 @@ final class AppModel {
         switch presentation.action {
         case .recoverPartial, .retranscribe:
             await processSavedRecording(call)
+        case .retryPersistence:
+            await retryPersistence(for: call)
         case .regenerateNotes:
             await regenerateNotes()
         case .none:
@@ -1328,6 +1357,25 @@ final class AppModel {
             try await refresh()
             await generateDeepNotes(for: processed)
             statusMessage = "Processed saved recording."
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    private func retryPersistence(for failedCall: Call) async {
+        do {
+            let segments = try await store.fetchSegments(callID: failedCall.id, provider: failedCall.sttProvider)
+            guard !segments.isEmpty else {
+                await processSavedRecording(failedCall)
+                return
+            }
+            var call = failedCall
+            call.status = .transcribed
+            call.error = nil
+            call.errorStage = nil
+            try await store.upsertCall(call)
+            try await refresh()
+            statusMessage = "Saved transcript."
         } catch {
             statusMessage = error.localizedDescription
         }

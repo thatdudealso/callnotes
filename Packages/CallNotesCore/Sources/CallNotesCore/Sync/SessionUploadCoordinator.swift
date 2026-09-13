@@ -61,6 +61,7 @@ public actor SessionUploadCoordinator {
     public func enqueue(audioAt sourceURL: URL, metadata: CallUploadMetadata) async throws -> PendingUpload {
         let job = try await inbox.enqueue(audioAt: sourceURL, metadata: metadata)
         try? FileManager.default.removeItem(at: sourceURL)
+        try? FileManager.default.removeItem(at: OnDeviceFallbackStore.sidecarURL(for: sourceURL))
         await starter.start(job)
         return job
     }

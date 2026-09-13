@@ -34,8 +34,10 @@ public enum PipelineStage: String, Sendable, Codable, CaseIterable {
             "The file could not be read. Retry after CallNotes repairs the recording, or import it again."
         case .transcription:
             "Retry transcribes the saved audio. If Meta was selected, Retry falls back to local transcription."
-        case .stitching, .diarization, .attribution, .persistence:
+        case .stitching, .diarization, .attribution:
             "Retry runs this stage again from the saved audio. Nothing is recaptured."
+        case .persistence:
+            "Retry saves the transcript that was already prepared. If no saved transcript is available, it processes the saved audio again."
         case .notes:
             "Retry regenerates notes from the transcript already on disk."
         }
@@ -52,6 +54,7 @@ public enum PipelineStage: String, Sendable, Codable, CaseIterable {
     public var retryAction: FailureRetryAction {
         switch self {
         case .capture: .recoverPartial
+        case .persistence: .retryPersistence
         case .notes: .regenerateNotes
         default: .retranscribe
         }
@@ -67,6 +70,7 @@ public enum FailureRetryAction: String, Sendable, Equatable {
     case none
     case recoverPartial
     case retranscribe
+    case retryPersistence
     case regenerateNotes
 }
 

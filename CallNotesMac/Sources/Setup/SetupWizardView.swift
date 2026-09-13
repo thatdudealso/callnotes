@@ -455,7 +455,7 @@ struct SetupWizardView: View {
                     consentPolicy = "announce"
                 }
                 SetupChoiceRow(
-                    title: "Play announcement on the call",
+                    title: "Play local announcement and tone",
                     subtitle: ConsentPolicy.tone.guidance,
                     icon: "bell.fill",
                     isSelected: consentPolicy == "tone"

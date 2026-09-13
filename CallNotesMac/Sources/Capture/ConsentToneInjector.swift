@@ -3,9 +3,8 @@ import CallNotesCore
 import Foundation
 import os
 
-/// Plays the consent announcement into the default output (speakers / headset)
-/// and returns PCM to mix onto the capture mic path. FaceTime and Phone pick
-/// that up on speakerphone; headphones often stay local-only.
+/// Plays the consent announcement into the default output and returns its tone
+/// for inclusion in the captured recording.
 @MainActor
 final class ConsentToneInjector {
     private let logger = Logger(subsystem: "com.thatdudealso.callnotes", category: "Consent")

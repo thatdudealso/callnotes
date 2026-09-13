@@ -26,6 +26,16 @@ import Testing
         #expect(presentation.actionTitle == "Retry notes")
     }
 
+    @Test func persistenceFailureOffersPersistenceRetry() {
+        let presentation = FailurePresentation.make(
+            error: "Database unavailable",
+            errorStage: "persistence",
+            hasAudio: true
+        )
+        #expect(presentation.action == .retryPersistence)
+        #expect(presentation.actionTitle == "Retry saving")
+    }
+
     @Test func captureFailureWithoutAudioHasNoRetry() {
         let presentation = FailurePresentation.make(
             error: "Microphone was denied",

@@ -183,8 +183,7 @@ final class AudioCapture: @unchecked Sendable {
         isRunning = true
     }
 
-    /// Mixes consent-tone PCM onto the near (mic) channel so the announcement
-    /// is in the recording and in the signal the far-side mic can pick up.
+    /// Mixes consent-tone PCM onto the near channel in the saved recording.
     func enqueueConsentPCM(_ pcm: [Int16]) {
         consentMix.withLock { $0 = (pcm, 0) }
     }

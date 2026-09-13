@@ -32,7 +32,7 @@ public enum OnDeviceFallback: Sendable {
     }
 }
 
-public struct OnDeviceFallbackTranscript: Sendable, Equatable {
+public struct OnDeviceFallbackTranscript: Codable, Sendable, Equatable {
     public var callID: UUID
     public var startedAt: Date
     public var segments: [RawSegment]
