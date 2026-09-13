@@ -38,6 +38,18 @@ Uploads resume after a relaunch, a recording the Mac refuses is dropped from
 the queue and reported under Settings → Uploads instead of retried forever,
 and the phone mirrors the resulting calls, transcripts, and notes so they can
 be read without the Mac.
+Phase 7 hardens capture, storage, and recovery. Settings → Recording chooses
+how CallNotes announces a Mac call: announce verbally, play a local
+announcement plus tone through the Mac speakers (mixed into the saved near
+channel; far-side hearing still depends on speakerphone coupling), or off.
+Settings → Storage configures age-based deletion that unlinks recording files
+from disk (default: keep forever), backs up the dedicated local Postgres
+database with an optional verified restore, and exports a diagnostics bundle
+that excludes call audio, transcripts, notes, and credentials. A crash
+mid-call still yields a processable partial recording. When capture,
+transcription, or notes fail, history shows what failed and Retry for that
+stage. If the Mac is unreachable, the iPhone can transcribe on-device
+(Settings → Processing) and still upload the recording when the Mac returns.
 
 Some docs and code comments cite "plan section" numbers. These refer to the
 private implementation plan that maintainers keep locally at

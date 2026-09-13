@@ -25,9 +25,9 @@ public struct DashboardCall: Identifiable, Sendable, Equatable {
     public let counterpartyName: String
     public let engine: DashboardEngine
 
-    /// A call left mid-processing by a crash has no end and no duration. Crash
-    /// recovery is Phase 7, so until then it contributes no talk time and says so
-    /// rather than growing a total nobody can trace.
+    /// A call left mid-processing by a crash has no end and no duration. Until
+    /// launch recovery finishes it, it contributes no talk time rather than
+    /// growing a total nobody can trace.
     public let isIncomplete: Bool
 
     public var id: UUID { call.id }
