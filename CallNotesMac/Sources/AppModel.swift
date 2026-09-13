@@ -37,6 +37,7 @@ final class AppModel {
     private var liveSession: (any STTSession)?
     private var liveResultsTask: Task<Void, Never>?
     private var liveSegments: [RawSegment] = []
+    private var liveTranscriptionFailure: String?
     private var instantCallAtHangUp: Call?
     private var captureStopHandler: (@MainActor () async -> URL?)?
     private var isStartingLiveSession = false
@@ -623,6 +624,7 @@ final class AppModel {
             let engine = session is AppleSpeechSession ? STTProviderID.appleSpeech : provider.requestedID
             liveSession = session
             liveSegments = []
+            liveTranscriptionFailure = nil
             live.engine = engine
             live.isOffDevice = engine == .metaMuse
             if !forSamplePlayback {
@@ -661,7 +663,8 @@ final class AppModel {
                     }
                 } catch {
                     guard let self, !Task.isCancelled else { return }
-                    statusMessage = error.localizedDescription
+                    liveTranscriptionFailure = error.localizedDescription
+                    statusMessage = liveTranscriptionFailure
                 }
             }
             isStartingLiveSession = false
@@ -689,7 +692,8 @@ final class AppModel {
             await liveResultsTask?.value
         } catch {
             liveResultsTask?.cancel()
-            statusMessage = error.localizedDescription
+            liveTranscriptionFailure = error.localizedDescription
+            statusMessage = liveTranscriptionFailure
         }
         if var call = instantCallAtHangUp {
             instantCallAtHangUp = nil
@@ -700,10 +704,17 @@ final class AppModel {
             if let captureURL {
                 _ = try? CAFHeaderRepair.repairIfNeeded(captureURL)
                 call.audioPath = captureURL.path
-                call.status = .transcribed
             } else if let surviving = survivingRecordingURL(for: call) {
                 _ = try? CAFHeaderRepair.repairIfNeeded(surviving)
                 call.audioPath = surviving.path
+            }
+            if let liveTranscriptionFailure {
+                call.status = .failed
+                call.error = liveTranscriptionFailure
+                call.errorStage = PipelineStage.transcription.rawValue
+            } else if captureURL != nil {
+                call.status = .transcribed
+            } else if survivingRecordingURL(for: call) != nil {
                 call.status = .uploaded
             } else if call.source == .macManual {
                 call.status = .failed
@@ -733,6 +744,10 @@ final class AppModel {
                 try await store.upsertCall(call)
             } catch {
                 statusMessage = error.localizedDescription
+                return
+            }
+            if call.status == .failed, call.errorStage == PipelineStage.transcription.rawValue {
+                statusMessage = call.error
                 return
             }
             guard call.status == .transcribed || call.status == .uploaded else {
@@ -1363,22 +1378,7 @@ final class AppModel {
     }
 
     private func retryPersistence(for failedCall: Call) async {
-        do {
-            let segments = try await store.fetchSegments(callID: failedCall.id, provider: failedCall.sttProvider)
-            guard !segments.isEmpty else {
-                await processSavedRecording(failedCall)
-                return
-            }
-            var call = failedCall
-            call.status = .transcribed
-            call.error = nil
-            call.errorStage = nil
-            try await store.upsertCall(call)
-            try await refresh()
-            statusMessage = "Saved transcript."
-        } catch {
-            statusMessage = error.localizedDescription
-        }
+        await processSavedRecording(failedCall)
     }
 
     private func survivingRecordingURL(for call: Call) -> URL? {

@@ -37,7 +37,7 @@ public enum PipelineStage: String, Sendable, Codable, CaseIterable {
         case .stitching, .diarization, .attribution:
             "Retry runs this stage again from the saved audio. Nothing is recaptured."
         case .persistence:
-            "Retry saves the transcript that was already prepared. If no saved transcript is available, it processes the saved audio again."
+            "Retry reprocesses the saved audio because speaker mappings are not retained outside the persistence unit."
         case .notes:
             "Retry regenerates notes from the transcript already on disk."
         }
@@ -46,6 +46,7 @@ public enum PipelineStage: String, Sendable, Codable, CaseIterable {
     public var retryTitle: String {
         switch self {
         case .capture: "Process partial recording"
+        case .persistence: "Reprocess saved recording"
         case .notes: "Retry notes"
         default: "Retry \(displayName.lowercased())"
         }

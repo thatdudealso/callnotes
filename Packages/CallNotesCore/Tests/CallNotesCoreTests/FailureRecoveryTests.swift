@@ -33,7 +33,7 @@ import Testing
             hasAudio: true
         )
         #expect(presentation.action == .retryPersistence)
-        #expect(presentation.actionTitle == "Retry saving")
+        #expect(presentation.actionTitle == "Reprocess saved recording")
     }
 
     @Test func captureFailureWithoutAudioHasNoRetry() {
