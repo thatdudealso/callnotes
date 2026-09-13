@@ -185,7 +185,15 @@ final class AudioCapture: @unchecked Sendable {
 
     /// Mixes consent-tone PCM onto the near channel in the saved recording.
     func enqueueConsentPCM(_ pcm: [Int16]) {
-        consentMix.withLock { $0 = (pcm, 0) }
+        guard !pcm.isEmpty else { return }
+        consentMix.withLock { state in
+            if var current = state {
+                current.tone.append(contentsOf: pcm)
+                state = current
+            } else {
+                state = (pcm, 0)
+            }
+        }
     }
 
     /// Begin committing the ring + live samples to the CAF. Call this when

@@ -9,14 +9,16 @@ import os
 final class ConsentToneInjector {
     private let logger = Logger(subsystem: "com.thatdudealso.callnotes", category: "Consent")
     private let synthesizer = AVSpeechSynthesizer()
+    private let renderer = AVSpeechSynthesizer()
     private var player: AVAudioPlayer?
+    private var speechResampler: StreamingPCMResampler?
 
-    func play(_ policy: ConsentPolicy) -> [Int16]? {
-        guard let pcm = ConsentAnnouncement.injection(for: policy) else { return nil }
+    func play(_ policy: ConsentPolicy, injectPCM: @escaping @Sendable ([Int16]) -> Void) {
+        guard let tone = ConsentAnnouncement.injection(for: policy) else { return }
         speak(ConsentPolicy.spokenLine)
-        playTone(pcm)
+        render(ConsentPolicy.spokenLine, then: tone, injectPCM: injectPCM)
+        playTone(tone)
         logger.info("consent announcement injected policy=\(policy.rawValue, privacy: .public)")
-        return pcm
     }
 
     private func speak(_ line: String) {
@@ -25,6 +27,61 @@ final class ConsentToneInjector {
         utterance.volume = 1
         utterance.prefersAssistiveTechnologySettings = false
         synthesizer.speak(utterance)
+    }
+
+    private func render(
+        _ line: String,
+        then tone: [Int16],
+        injectPCM: @escaping @Sendable ([Int16]) -> Void
+    ) {
+        renderer.stopSpeaking(at: .immediate)
+        speechResampler = nil
+        let utterance = AVSpeechUtterance(string: line)
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+        utterance.volume = 1
+        utterance.prefersAssistiveTechnologySettings = false
+        renderer.write(utterance) { [weak self] buffer in
+            guard let pcmBuffer = buffer as? AVAudioPCMBuffer else { return }
+            let samples = Self.monoSamples(from: pcmBuffer)
+            let sampleRate = pcmBuffer.format.sampleRate
+            let finished = pcmBuffer.frameLength == 0
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if !samples.isEmpty {
+                    if self.speechResampler?.inputSampleRate != sampleRate {
+                        self.speechResampler = StreamingPCMResampler(inputSampleRate: sampleRate)
+                    }
+                    injectPCM(self.speechResampler?.resampleMonoToInt16(samples) ?? [])
+                }
+                if finished {
+                    injectPCM(tone)
+                    self.speechResampler = nil
+                }
+            }
+        }
+    }
+
+    private static func monoSamples(from buffer: AVAudioPCMBuffer) -> [Float] {
+        let frameCount = Int(buffer.frameLength)
+        let channelCount = Int(buffer.format.channelCount)
+        guard frameCount > 0, channelCount > 0 else { return [] }
+        var samples = [Float](repeating: 0, count: frameCount)
+        if let channels = buffer.floatChannelData {
+            for channel in 0..<channelCount {
+                for frame in 0..<frameCount {
+                    samples[frame] += channels[channel][frame] / Float(channelCount)
+                }
+            }
+            return samples
+        }
+        if let channels = buffer.int16ChannelData {
+            for channel in 0..<channelCount {
+                for frame in 0..<frameCount {
+                    samples[frame] += Float(channels[channel][frame]) / Float(Int16.max) / Float(channelCount)
+                }
+            }
+        }
+        return samples
     }
 
     private func playTone(_ pcm: [Int16]) {

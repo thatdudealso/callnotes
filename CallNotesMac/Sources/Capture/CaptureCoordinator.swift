@@ -133,7 +133,7 @@ final class CaptureCoordinator {
                 )
             )
             let policy = ConsentPolicy.resolved(UserDefaults.standard.string(forKey: ConsentPolicy.defaultsKey))
-            if let pcm = consentInjector.play(policy) {
+            consentInjector.play(policy) { [capture] pcm in
                 capture.enqueueConsentPCM(pcm)
             }
             lastFarSource = capture.farSource
