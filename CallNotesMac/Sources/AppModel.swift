@@ -84,6 +84,8 @@ final class AppModel {
     var pairedDevices: [PairedDevice] = []
     var unsavedRevocations: [UUID: String] = [:]
 
+    var liveCallID: UUID? { instantCallAtHangUp?.id }
+
     var selectedCall: Call? {
         calls.first { $0.id == selectedCallID }
     }
@@ -164,7 +166,14 @@ final class AppModel {
         // `postgres` becomes the published store: a call started while it is in
         // flight would otherwise land in the table it is about to close out.
         var repairFailure: String?
+        var recovered: [RecoveredRecording] = []
         do {
+            if let audioDir = try? CallAudioPaths.audioDirectory() {
+                recovered = try await PartialRecordingRecovery.recover(
+                    audioDirectory: audioDir,
+                    store: postgres
+                )
+            }
             _ = try await postgres.closeStrandedRecordings(excluding: instantCallAtHangUp?.id)
         } catch {
             repairFailure = error.localizedDescription
@@ -177,6 +186,13 @@ final class AppModel {
         startSyncServer(store: postgres)
         statusMessage = repairFailure
         startInboxWatcher()
+        let recoveredIDs = recovered.map(\.call.id)
+        Task { await self.processRecoveredRecordings(ids: recoveredIDs) }
+        Task { _ = await self.sweepRetention() }
+        logDiagnostic(category: "bootstrap", event: "store_ready", metadata: [
+            "backend": "postgres",
+            "recovered": String(recovered.count),
+        ])
     }
 
     func refresh() async throws {
@@ -579,12 +595,16 @@ final class AppModel {
             live.isOffDevice = engine == .metaMuse
             if !forSamplePlayback {
                 let counterpartyName = await suggestedCounterpartyName()
+                let callID = UUID()
+                let audioPath = (try? CallAudioPaths.cafURL(callID: callID).path) ?? ""
                 let call = Call(
+                    id: callID,
                     source: .macManual,
                     startedAt: Date(),
                     counterpartyName: counterpartyName,
-                    audioPath: "",
-                    sttProvider: engine
+                    audioPath: audioPath,
+                    sttProvider: engine,
+                    status: .recording
                 )
                 try await store.upsertCall(call)
                 instantCallAtHangUp = call
@@ -646,12 +666,17 @@ final class AppModel {
             call.endedAt = Date()
             call.durationSec = max(0, Int(call.endedAt!.timeIntervalSince(call.startedAt).rounded(.down)))
             if let captureURL {
+                _ = try? CAFHeaderRepair.repairIfNeeded(captureURL)
                 call.audioPath = captureURL.path
                 call.status = .transcribed
+            } else if let surviving = survivingRecordingURL(for: call) {
+                _ = try? CAFHeaderRepair.repairIfNeeded(surviving)
+                call.audioPath = surviving.path
+                call.status = .uploaded
             } else if call.source == .macManual {
                 call.status = .failed
                 call.error = "Audio capture did not produce a recording"
-                call.errorStage = "capture"
+                call.errorStage = PipelineStage.capture.rawValue
             } else {
                 call.status = .transcribed
             }
@@ -678,8 +703,13 @@ final class AppModel {
                 statusMessage = error.localizedDescription
                 return
             }
-            guard call.status == .transcribed else {
+            guard call.status == .transcribed || call.status == .uploaded else {
                 statusMessage = "Audio capture failed. The live transcript was kept without a recording."
+                return
+            }
+            if call.status == .uploaded {
+                statusMessage = "Capture ended with a partial recording. Processing it."
+                await processSavedRecording(call)
                 return
             }
             await generateInstantNotes(for: call, rawSegments: liveSegments)
@@ -715,14 +745,50 @@ final class AppModel {
         call.durationSec = max(0, Int(call.endedAt!.timeIntervalSince(call.startedAt).rounded(.down)))
         call.status = .failed
         call.error = message
-        call.errorStage = "capture"
+        call.errorStage = PipelineStage.capture.rawValue
+        if let surviving = survivingRecordingURL(for: call) {
+            _ = try? CAFHeaderRepair.repairIfNeeded(surviving)
+            call.audioPath = surviving.path
+            call.status = .uploaded
+            call.error = nil
+            call.errorStage = nil
+        }
         do {
             try await store.upsertCall(call)
         } catch {
             statusMessage = error.localizedDescription
             return
         }
+        if call.status == .uploaded {
+            statusMessage = "Capture stopped early. The partial recording was kept."
+            await processSavedRecording(call)
+            return
+        }
         statusMessage = "Audio capture could not start: \(message)"
+    }
+
+    func captureDidStart(callID: UUID, url: URL) async {
+        let injects = ConsentPolicy.resolved(
+            UserDefaults.standard.string(forKey: ConsentPolicy.defaultsKey)
+        ).injectsAnnouncement
+        if var call = instantCallAtHangUp {
+            call.audioPath = url.path
+            if injects { call.consentAnnounced = true }
+            instantCallAtHangUp = call
+            try? await store.upsertCall(call)
+            return
+        }
+        let call = Call(
+            id: callID,
+            source: .macFaceTime,
+            startedAt: Date(),
+            audioPath: url.path,
+            sttProvider: .appleSpeech,
+            status: .recording,
+            consentAnnounced: injects
+        )
+        try? await store.upsertCall(call)
+        logDiagnostic(category: "capture", event: "started", metadata: ["call": callID.uuidString])
     }
 
     func updateCounterpartyName(for callID: UUID, name: String) async {
@@ -1117,9 +1183,177 @@ final class AppModel {
                 try await refresh()
                 statusMessage = "Notes ready (\(deep.provider.rawValue))."
             } catch {
+                var failed = processed.call
+                failed.status = .failed
+                failed.error = error.localizedDescription
+                failed.errorStage = PipelineStage.notes.rawValue
+                try? await store.upsertCall(failed)
                 statusMessage = error.localizedDescription
             }
         }
+    }
+
+    func retryFailedStage() async {
+        guard let call = selectedCall else { return }
+        let hasAudio = survivingRecordingURL(for: call) != nil
+        let presentation = FailurePresentation.make(
+            error: call.error,
+            errorStage: call.errorStage,
+            hasAudio: hasAudio
+        )
+        switch presentation.action {
+        case .recoverPartial, .retranscribe:
+            await processSavedRecording(call)
+        case .regenerateNotes:
+            await regenerateNotes()
+        case .none:
+            statusMessage = presentation.detail
+        }
+    }
+
+    func sweepRetention() async -> RetentionSweepResult? {
+        let storedDays = UserDefaults.standard.object(forKey: RetentionPolicy.daysDefaultsKey) as? Int
+        let policy = RetentionPolicy.resolved(
+            mode: UserDefaults.standard.string(forKey: RetentionPolicy.modeDefaultsKey),
+            days: storedDays
+        )
+        do {
+            let result = try await RetentionSweeper(policy: policy).sweep(store: store)
+            if result.didReclaimDisk {
+                try await refresh()
+            }
+            logDiagnostic(category: "retention", event: "swept", metadata: [
+                "mode": policy.mode.rawValue,
+                "bytes": String(result.reclaimedBytes),
+            ])
+            return result
+        } catch {
+            statusMessage = error.localizedDescription
+            return nil
+        }
+    }
+
+    func backupDatabase(verify: Bool) async -> String {
+        guard let paths = PostgresBackup.dedicatedPaths() else {
+            return "Dedicated CallNotes Postgres was not found."
+        }
+        do {
+            let backups = try supportRoot().appendingPathComponent("backups", isDirectory: true)
+            let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+            let dumpURL = backups.appendingPathComponent("callnotes-\(stamp).dump")
+            try PostgresBackup.dump(to: dumpURL, paths: paths)
+            if verify {
+                _ = try PostgresBackup.verifyRestore(dumpURL: dumpURL, paths: paths)
+                _ = try? PostgresBackup.runProcess(
+                    paths.dropdb,
+                    ["--host", paths.socketDirectory, "--port", String(PostgresBackup.port), "--username", PostgresBackup.adminRole, "--if-exists", PostgresBackup.scratchDatabase]
+                )
+                return "Backup verified. Restore reproduced the live row counts. File: \(dumpURL.path)"
+            }
+            return "Wrote \(dumpURL.path)"
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    func exportDiagnostics(to directory: URL) async -> String {
+        do {
+            let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+            let bundleDir = directory.appendingPathComponent("CallNotes-diagnostics-\(stamp)", isDirectory: true)
+            let root = try supportRoot()
+            let snapshot = DiagnosticsSnapshot(
+                appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0",
+                osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+                storeBackend: storeBackendName,
+                engineDefault: UserDefaults.standard.string(forKey: "default_engine") ?? "local",
+                consentPolicy: UserDefaults.standard.string(forKey: ConsentPolicy.defaultsKey) ?? ConsentPolicy.announce.rawValue,
+                retention: RetentionPolicy.resolved(
+                    mode: UserDefaults.standard.string(forKey: RetentionPolicy.modeDefaultsKey),
+                    days: UserDefaults.standard.object(forKey: RetentionPolicy.daysDefaultsKey) as? Int
+                ).mode.rawValue,
+                dualInstanceMode: live.dualInstanceMode.rawValue,
+                health: [
+                    "postgres": storeBackendName,
+                    "speech": speech.dualInstanceMode.rawValue,
+                ],
+                logLines: (try? DiagnosticLog.recentLines(root: root)) ?? []
+            )
+            _ = try DiagnosticsBundle.export(snapshot, to: bundleDir)
+            if let forbidden = DiagnosticsBundle.containsForbiddenContent(in: bundleDir) {
+                return "Export blocked: \(forbidden)"
+            }
+            return "Exported \(bundleDir.path). Excludes \(DiagnosticsBundle.exclusions.joined(separator: ", "))."
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    private func processRecoveredRecordings(ids: [UUID]) async {
+        guard !ids.isEmpty else { return }
+        for id in ids {
+            guard let call = try? await store.fetchCall(id: id), call.status == .uploaded else { continue }
+            await processSavedRecording(call)
+        }
+    }
+
+    private func processSavedRecording(_ call: Call) async {
+        guard let url = survivingRecordingURL(for: call) else {
+            statusMessage = "No recording file was found to process."
+            return
+        }
+        _ = try? CAFHeaderRepair.repairIfNeeded(url)
+        statusMessage = "Processing saved recording..."
+        recordingState = .processing
+        defer {
+            if recordingState == .processing { recordingState = .idle }
+        }
+        do {
+            var working = call
+            working.audioPath = url.path
+            working.status = .transcribing
+            working.error = nil
+            working.errorStage = nil
+            try await store.upsertCall(working)
+            let processed = try await LocalTranscriptionSpine(
+                speech: speech,
+                diarizer: FluidDiarizer(),
+                store: store
+            ).process(
+                cafURL: url,
+                call: working,
+                profiles: try await store.fetchSpeakerProfiles()
+            )
+            turnsByCall[processed.call.id] = processed.turns
+            selectedCallID = processed.call.id
+            try await refresh()
+            await generateDeepNotes(for: processed)
+            statusMessage = "Processed saved recording."
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    private func survivingRecordingURL(for call: Call) -> URL? {
+        let candidates = [
+            call.audioPath.isEmpty ? nil : URL(fileURLWithPath: call.audioPath),
+            try? CallAudioPaths.cafURL(callID: call.id),
+        ].compactMap { $0 }
+        for url in candidates where PartialRecordingRecovery.hasProcessableAudio(path: url.path) {
+            return url.resolvingSymlinksInPath()
+        }
+        return nil
+    }
+
+    private func supportRoot() throws -> URL {
+        try CallAudioPaths.audioDirectory().deletingLastPathComponent()
+    }
+
+    private func logDiagnostic(category: String, event: String, metadata: [String: String] = [:]) {
+        guard let root = try? supportRoot() else { return }
+        try? DiagnosticLog.append(
+            DiagnosticEvent(category: category, event: event, metadata: metadata),
+            root: root
+        )
     }
 
     private func loadTurns(callID: UUID) async throws -> [AttributedTurn] {

@@ -1,3 +1,4 @@
+import AudioToolbox
 import AVFoundation
 import Foundation
 
@@ -8,13 +9,15 @@ public enum StereoCAFWriterError: Error, Equatable, Sendable {
 }
 
 /// Incrementally writes a 2-channel CAF: L = near, R = far, 16 kHz Int16.
+/// Packet count is persisted after every write so a SIGKILL still leaves a
+/// file `CAFHeaderRepair` and `AVAudioFile` can open.
 public final class StereoCAFWriter: @unchecked Sendable {
     public let url: URL
     public let sampleRate: Double
     public private(set) var framesWritten: Int = 0
 
-    private var file: AVAudioFile?
-    private let processingFormat: AVAudioFormat
+    private var fileID: AudioFileID?
+    private var asbd: AudioStreamBasicDescription
 
     public init(
         url: URL,
@@ -22,27 +25,40 @@ public final class StereoCAFWriter: @unchecked Sendable {
     ) throws {
         self.url = url
         self.sampleRate = sampleRate
-        guard let processingFormat = AVAudioFormat(
-            commonFormat: .pcmFormatInt16,
-            sampleRate: sampleRate,
-            channels: AVAudioChannelCount(AudioConstants.captureChannels),
-            interleaved: true
-        ) else {
-            throw StereoCAFWriterError.invalidFormat
-        }
-        self.processingFormat = processingFormat
-        var settings = processingFormat.settings
-        settings[AVFormatIDKey] = kAudioFormatLinearPCM
+        let bytesPerFrame = UInt32(AudioConstants.captureChannels * MemoryLayout<Int16>.size)
+        self.asbd = AudioStreamBasicDescription(
+            mSampleRate: sampleRate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsSignedInteger
+                | kAudioFormatFlagIsPacked
+                | kAudioFormatFlagsNativeEndian,
+            mBytesPerPacket: bytesPerFrame,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: bytesPerFrame,
+            mChannelsPerFrame: UInt32(AudioConstants.captureChannels),
+            mBitsPerChannel: UInt32(AudioConstants.captureBitDepth),
+            mReserved: 0
+        )
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        self.file = try AVAudioFile(
-            forWriting: url,
-            settings: settings,
-            commonFormat: .pcmFormatInt16,
-            interleaved: true
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+        var file: AudioFileID?
+        var format = asbd
+        let status = AudioFileCreateWithURL(
+            url as CFURL,
+            kAudioFileCAFType,
+            &format,
+            .eraseFile,
+            &file
         )
+        guard status == noErr, let file else {
+            throw StereoCAFWriterError.invalidFormat
+        }
+        self.fileID = file
     }
 
     public func write(near: [Int16], far: [Int16]) throws {
@@ -63,27 +79,54 @@ public final class StereoCAFWriter: @unchecked Sendable {
         let channels = AudioConstants.captureChannels
         let frames = interleaved.count / channels
         guard frames > 0 else { return }
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: processingFormat, frameCapacity: AVAudioFrameCount(frames)) else {
-            throw StereoCAFWriterError.invalidFormat
+        guard let fileID else { throw StereoCAFWriterError.closed }
+        var packetCount = UInt32(frames)
+        let byteCount = UInt32(interleaved.count * MemoryLayout<Int16>.size)
+        let start = Int64(framesWritten)
+        let status = interleaved.withUnsafeBytes { raw -> OSStatus in
+            guard let base = raw.baseAddress else { return kAudioFileUnspecifiedError }
+            return AudioFileWritePackets(
+                fileID,
+                false,
+                byteCount,
+                nil,
+                start,
+                &packetCount,
+                base
+            )
         }
-        buffer.frameLength = AVAudioFrameCount(frames)
-        guard let dest = buffer.int16ChannelData else {
-            throw StereoCAFWriterError.invalidFormat
-        }
-        guard let file else { throw StereoCAFWriterError.closed }
-        interleaved.withUnsafeBufferPointer { src in
-            dest[0].update(from: src.baseAddress!, count: frames * channels)
-        }
-        try file.write(from: buffer)
-        framesWritten += frames
+        guard status == noErr else { throw StereoCAFWriterError.invalidFormat }
+        framesWritten += Int(packetCount)
+        try persistPacketCount()
     }
 
-    /// Releases the AVAudioFile (which flushes the CAF header) and stamps the
+    /// Flushes the CAF `data` chunk size to disk. Called after every write so
+    /// a mid-call kill still leaves a processable file.
+    public func persistPacketCount() throws {
+        guard let fileID else { return }
+        var count = Int64(framesWritten)
+        let status = AudioFileSetProperty(
+            fileID,
+            kAudioFilePropertyAudioDataPacketCount,
+            UInt32(MemoryLayout<Int64>.size),
+            &count
+        )
+        guard status == noErr else { throw StereoCAFWriterError.invalidFormat }
+        try FileHandle(forWritingTo: url).synchronize()
+    }
+
+    /// Releases the AudioFile (which finalizes the CAF header) and stamps the
     /// near/far marker, so a later import can prove this file's channel layout.
     public func close() {
-        guard file != nil else { return }
-        file = nil
+        guard let fileID else { return }
+        AudioFileClose(fileID)
+        self.fileID = nil
         try? CaptureChannelMarker.stampNearFar(url)
+    }
+
+    /// Drops the file handle without `AudioFileClose`, matching a SIGKILL.
+    public func abandonWithoutClosing() {
+        fileID = nil
     }
 }
 

@@ -16,9 +16,12 @@ final class CaptureCoordinator {
     private let capture = AudioCapture()
     private let logger = Logger(subsystem: "com.thatdudealso.callnotes", category: "CaptureCoordinator")
     private var activeCallID: UUID?
+    private var pendingCallID: UUID?
     private var previousPhase: CallDetectionPhase = .idle
     private var captureTransition: Task<Void, Never>?
     private var captureFailureHandler: (@MainActor (String) async -> Void)?
+    private var captureStartedHandler: (@MainActor (UUID, URL) async -> Void)?
+    private let consentInjector = ConsentToneInjector()
 
     init() {
         Task { @MainActor in
@@ -47,6 +50,14 @@ final class CaptureCoordinator {
 
     func setCaptureFailureHandler(_ handler: @escaping @MainActor (String) async -> Void) {
         captureFailureHandler = handler
+    }
+
+    func attachCallID(_ id: UUID) {
+        pendingCallID = id
+    }
+
+    func setCaptureStartedHandler(_ handler: @escaping @MainActor (UUID, URL) async -> Void) {
+        captureStartedHandler = handler
     }
 
     func stopLiveCapture() async -> URL? {
@@ -107,7 +118,8 @@ final class CaptureCoordinator {
 
     private func startCapture(status: CallDetector.Status) async {
         do {
-            let callID = UUID()
+            let callID = pendingCallID ?? UUID()
+            pendingCallID = nil
             activeCallID = callID
             lastCaptureURL = nil
             let url = try CallAudioPaths.cafURL(callID: callID)
@@ -120,9 +132,14 @@ final class CaptureCoordinator {
                     enableVoiceProcessing: true
                 )
             )
+            let policy = ConsentPolicy.resolved(UserDefaults.standard.string(forKey: ConsentPolicy.defaultsKey))
+            if let pcm = consentInjector.play(policy) {
+                capture.enqueueConsentPCM(pcm)
+            }
             lastFarSource = capture.farSource
             lastError = nil
             logger.info("capture started \(url.path, privacy: .public) far=\(self.capture.farSource.rawValue, privacy: .public)")
+            await captureStartedHandler?(callID, url)
         } catch {
             let message = error.localizedDescription
             lastError = message

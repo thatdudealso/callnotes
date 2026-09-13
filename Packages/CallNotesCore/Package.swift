@@ -34,6 +34,11 @@ let package = Package(
                 .process("Notes/Schema"),
             ]
         ),
+        .executableTarget(
+            name: "CAFCrashWriter",
+            dependencies: ["CallNotesCore"],
+            path: "Tools/CAFCrashWriter"
+        ),
         .testTarget(
             name: "CallNotesCoreTests",
             dependencies: ["CallNotesCore"]

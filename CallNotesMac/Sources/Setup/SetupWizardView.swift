@@ -22,6 +22,7 @@
 import SwiftUI
 import AVFoundation
 import AppKit
+import CallNotesCore
 import CoreGraphics
 
 /// Local, self-contained permission state for the setup wizard.
@@ -439,7 +440,7 @@ struct SetupWizardView: View {
                 .font(.title)
                 .fontWeight(.bold)
 
-            Text("Choose how CallNotes lets the other party know a call is being recorded. Recording-consent laws vary by region — pick what fits yours.")
+            Text("Choose how CallNotes lets the other party know a call is being recorded. Recording-consent laws vary by region - pick what fits yours.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -447,15 +448,15 @@ struct SetupWizardView: View {
             VStack(spacing: 10) {
                 SetupChoiceRow(
                     title: "Announce verbally",
-                    subtitle: "CallNotes speaks a brief recording notice at the start of each call.",
+                    subtitle: ConsentPolicy.announce.guidance,
                     icon: "speaker.wave.2.fill",
                     isSelected: consentPolicy == "announce"
                 ) {
                     consentPolicy = "announce"
                 }
                 SetupChoiceRow(
-                    title: "Play tone",
-                    subtitle: "A short tone plays when recording starts.",
+                    title: "Play announcement on the call",
+                    subtitle: ConsentPolicy.tone.guidance,
                     icon: "bell.fill",
                     isSelected: consentPolicy == "tone"
                 ) {
@@ -471,6 +472,12 @@ struct SetupWizardView: View {
                 }
             }
             .padding(.top, 6)
+
+            Text(ConsentPolicy.farSideLimit)
+                .font(.caption)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

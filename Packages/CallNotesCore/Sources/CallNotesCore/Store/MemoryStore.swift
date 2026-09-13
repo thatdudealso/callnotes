@@ -125,7 +125,8 @@ public actor MemoryStore: CallStore {
         for call in calls.values where StrandedRecordingRepair.isStranded(call, liveCallID: liveCallID) {
             let closed = StrandedRecordingRepair.closed(
                 call,
-                lastSegmentEndSec: segments[call.id]?.map(\.endSec).max()
+                lastSegmentEndSec: segments[call.id]?.map(\.endSec).max(),
+                hasRecoverableAudio: PartialRecordingRecovery.hasProcessableAudio(path: call.audioPath)
             )
             calls[closed.id] = closed
             repaired.append(closed)
