@@ -36,6 +36,7 @@ public struct RetentionSweeper: Sendable {
         var deletedCalls: [UUID] = []
         var bytes = 0
         for call in calls {
+            guard isTerminal(call) else { continue }
             let ageAnchor = call.endedAt ?? call.startedAt
             guard ageAnchor < cutoff else { continue }
             if policy.deletesAudio {
@@ -58,6 +59,15 @@ public struct RetentionSweeper: Sendable {
             deletedCallIDs: deletedCalls,
             reclaimedBytes: bytes
         )
+    }
+
+    private func isTerminal(_ call: Call) -> Bool {
+        switch call.status {
+        case .notesReady, .failed:
+            true
+        case .recording, .uploaded, .transcribing, .transcribed:
+            false
+        }
     }
 
     private func deleteAudioFile(at path: String, fileManager: FileManager) throws -> Int {

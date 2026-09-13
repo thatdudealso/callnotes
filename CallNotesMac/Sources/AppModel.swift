@@ -453,6 +453,7 @@ final class AppModel {
             _ = try await notesSpine.generateInstant(transcript, call: call)
             _ = try await notesSpine.generateDeep(transcript, call: call)
         } catch {
+            await persistNotesFailure(callID: callID, error: error)
             job.stage = .failed
             job.error = error.localizedDescription
             upsertImportJob(job)
@@ -473,6 +474,14 @@ final class AppModel {
     private func removePhoneUploadStaging(_ audioURL: URL) {
         try? FileManager.default.removeItem(at: audioURL)
         try? FileManager.default.removeItem(at: CallUploadMetadata.sidecarURL(nextTo: audioURL))
+    }
+
+    private func persistNotesFailure(callID: UUID, error: Error) async {
+        guard var call = try? await store.fetchCall(id: callID) else { return }
+        call.status = .failed
+        call.error = error.localizedDescription
+        call.errorStage = PipelineStage.notes.rawValue
+        try? await store.upsertCall(call)
     }
 
     private func updateDashboardTicker() {
@@ -1194,10 +1203,17 @@ final class AppModel {
             speakerNames: ["near": "Me", "far": call.counterpartyName ?? "Speaker 2"],
             counterpartyName: call.counterpartyName
         )
+        let instant: NotesRecord
         do {
-            let instant = try await notesSpine.generateInstant(transcript, call: call)
-            notesByCall[call.id] = instant
-            selectedCallID = call.id
+            instant = try await notesSpine.generateInstant(transcript, call: call)
+        } catch {
+            await persistNotesFailure(callID: call.id, error: error)
+            statusMessage = error.localizedDescription
+            return
+        }
+        notesByCall[call.id] = instant
+        selectedCallID = call.id
+        do {
             try await refresh()
         } catch {
             statusMessage = error.localizedDescription
@@ -1219,17 +1235,19 @@ final class AppModel {
             defer {
                 if notesGeneratingCallID == callID { notesGeneratingCallID = nil }
             }
+            let deep: NotesRecord
             do {
-                let deep = try await notesSpine.generateDeep(transcript, call: processed.call)
-                notesByCall[callID] = deep
+                deep = try await notesSpine.generateDeep(transcript, call: processed.call)
+            } catch {
+                await persistNotesFailure(callID: callID, error: error)
+                statusMessage = error.localizedDescription
+                return
+            }
+            notesByCall[callID] = deep
+            do {
                 try await refresh()
                 statusMessage = "Notes ready (\(deep.provider.rawValue))."
             } catch {
-                var failed = processed.call
-                failed.status = .failed
-                failed.error = error.localizedDescription
-                failed.errorStage = PipelineStage.notes.rawValue
-                try? await store.upsertCall(failed)
                 statusMessage = error.localizedDescription
             }
         }

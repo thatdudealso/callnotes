@@ -54,6 +54,35 @@ import Testing
         #expect(FileManager.default.fileExists(atPath: call.audioPath))
     }
 
+    @Test func activeAndInProgressCallsAreNotSwept() async throws {
+        let root = try scratchRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MemoryStore()
+        let statuses: [CallStatus] = [.recording, .uploaded, .transcribing, .transcribed]
+        var calls: [Call] = []
+        for status in statuses {
+            let call = try await seededCall(
+                store: store,
+                root: root,
+                ageDays: 40,
+                bytes: 16,
+                status: status,
+                isActive: status == .recording
+            )
+            calls.append(call)
+        }
+
+        let result = try await RetentionSweeper(
+            policy: RetentionPolicy(mode: .deleteAll, days: 30)
+        ).sweep(store: store, now: Date())
+
+        #expect(result.deletedCallIDs.isEmpty)
+        for call in calls {
+            #expect(FileManager.default.fileExists(atPath: call.audioPath))
+            #expect(try await store.fetchCall(id: call.id) != nil)
+        }
+    }
+
     private func scratchRoot() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("callnotes-retention-\(UUID().uuidString)", isDirectory: true)
@@ -65,7 +94,9 @@ import Testing
         store: MemoryStore,
         root: URL,
         ageDays: Int,
-        bytes: Int
+        bytes: Int,
+        status: CallStatus = .notesReady,
+        isActive: Bool = false
     ) async throws -> Call {
         let audio = root.appendingPathComponent("\(UUID().uuidString).caf")
         try Data(repeating: 1, count: bytes).write(to: audio)
@@ -73,11 +104,11 @@ import Testing
         var call = Call(
             source: .macManual,
             startedAt: started,
-            endedAt: started.addingTimeInterval(30),
+            endedAt: isActive ? nil : started.addingTimeInterval(30),
             durationSec: 30,
             audioPath: audio.path,
             sttProvider: .appleSpeech,
-            status: .notesReady
+            status: status
         )
         try await store.upsertCall(call)
         try await store.replaceSegments(
