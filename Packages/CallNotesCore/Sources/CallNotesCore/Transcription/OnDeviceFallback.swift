@@ -7,10 +7,9 @@ public enum OnDeviceFallback: Sendable {
 
     public static func shouldTranscribe(
         isEnabled: Bool,
-        isMacReachable: Bool,
-        alreadyHasTranscript: Bool
+        isMacReachable: Bool
     ) -> Bool {
-        isEnabled && !isMacReachable && !alreadyHasTranscript
+        isEnabled && !isMacReachable
     }
 
     /// Transport failures mean the Mac never saw the audio. HTTP 4xx from a
@@ -43,64 +42,6 @@ public struct OnDeviceFallbackTranscript: Codable, Sendable, Equatable {
         self.startedAt = startedAt
         self.segments = segments
         self.provider = provider
-    }
-}
-
-public enum OnDeviceFallbackStore: Sendable {
-    public static func sidecarURL(for audioURL: URL) -> URL {
-        audioURL.deletingPathExtension().appendingPathExtension("transcript.json")
-    }
-
-    public static func write(_ transcript: OnDeviceFallbackTranscript, nextTo audioURL: URL) throws {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.sortedKeys]
-        let data = try encoder.encode(FallbackSidecar(from: transcript))
-        try data.write(to: sidecarURL(for: audioURL), options: .atomic)
-    }
-
-    public static func load(nextTo audioURL: URL) throws -> OnDeviceFallbackTranscript? {
-        let url = sidecarURL(for: audioURL)
-        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        let data = try Data(contentsOf: url)
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let sidecar = try decoder.decode(FallbackSidecar.self, from: data)
-        return sidecar.transcript
-    }
-}
-
-private struct FallbackSidecar: Codable, Sendable {
-    struct Line: Codable, Sendable {
-        var start: TimeInterval
-        var end: TimeInterval
-        var text: String
-        var channel: SegmentChannel?
-    }
-
-    var callID: UUID
-    var startedAt: Date
-    var provider: STTProviderID
-    var segments: [Line]
-
-    init(from transcript: OnDeviceFallbackTranscript) {
-        callID = transcript.callID
-        startedAt = transcript.startedAt
-        provider = transcript.provider
-        segments = transcript.segments.map {
-            Line(start: $0.start, end: $0.end, text: $0.text, channel: $0.channel)
-        }
-    }
-
-    var transcript: OnDeviceFallbackTranscript {
-        OnDeviceFallbackTranscript(
-            callID: callID,
-            startedAt: startedAt,
-            segments: segments.map {
-                RawSegment(start: $0.start, end: $0.end, text: $0.text, channel: $0.channel)
-            },
-            provider: provider
-        )
     }
 }
 

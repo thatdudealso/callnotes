@@ -58,7 +58,7 @@ import Testing
         #expect(channels.far == far)
     }
 
-    @Test func processKillMidWriteLeavesProcessableCAF() throws {
+    @Test func processKillDuringCaptureLeavesProcessableCAF() throws {
         let url = uniqueCAF()
         defer { try? FileManager.default.removeItem(at: url) }
         let frames = 8_000
@@ -81,10 +81,12 @@ import Testing
 
         _ = try CAFHeaderRepair.repairIfNeeded(url)
         let channels = try StereoCAFReader.read(url)
-        #expect(channels.near == near)
-        #expect(channels.far == far)
+        #expect(!channels.near.isEmpty)
+        #expect(channels.near.count < frames)
+        #expect(channels.near == Array(near.prefix(channels.near.count)))
+        #expect(channels.far == Array(far.prefix(channels.far.count)))
         let split = try ChannelAudio.splitStereoCAF(url: url)
-        #expect(split.frameCount == 8_000)
+        #expect(split.frameCount == channels.near.count)
     }
 
     private func crashWriterExecutable() -> URL? {

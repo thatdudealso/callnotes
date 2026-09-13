@@ -360,8 +360,7 @@ final class PhoneAppModel {
             let reachable = await probeMacReachable()
             if OnDeviceFallback.shouldTranscribe(
                 isEnabled: onDeviceFallback,
-                isMacReachable: reachable,
-                alreadyHasTranscript: (try? OnDeviceFallbackStore.load(nextTo: capture.url)) != nil
+                isMacReachable: reachable
             ) {
                 do {
                     let transcript = try await OnDeviceFallbackTranscriber(speech: AppleSpeechProvider()).transcribe(
@@ -369,7 +368,6 @@ final class PhoneAppModel {
                         callID: UUID(),
                         startedAt: capture.startedAt
                     )
-                    try OnDeviceFallbackStore.write(transcript, nextTo: capture.url)
                     fallbackTranscript = transcript
                     uploadStatus = "Mac unreachable. Transcribed on this iPhone (\(transcript.segments.count) segments)."
                 } catch {

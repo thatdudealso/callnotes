@@ -8,29 +8,19 @@ import Testing
         #expect(
             OnDeviceFallback.shouldTranscribe(
                 isEnabled: true,
-                isMacReachable: false,
-                alreadyHasTranscript: false
+                isMacReachable: false
             )
         )
         #expect(
             !OnDeviceFallback.shouldTranscribe(
                 isEnabled: false,
-                isMacReachable: false,
-                alreadyHasTranscript: false
+                isMacReachable: false
             )
         )
         #expect(
             !OnDeviceFallback.shouldTranscribe(
                 isEnabled: true,
-                isMacReachable: true,
-                alreadyHasTranscript: false
-            )
-        )
-        #expect(
-            !OnDeviceFallback.shouldTranscribe(
-                isEnabled: true,
-                isMacReachable: false,
-                alreadyHasTranscript: true
+                isMacReachable: true
             )
         )
     }
@@ -60,8 +50,5 @@ import Testing
         #expect(result.callID == callID)
         #expect(result.segments.map(\.text) == ["on device"])
         #expect(result.provider == .appleSpeech)
-        try OnDeviceFallbackStore.write(result, nextTo: url)
-        let loaded = try OnDeviceFallbackStore.load(nextTo: url)
-        #expect(loaded?.segments.map(\.text) == ["on device"])
     }
 }
