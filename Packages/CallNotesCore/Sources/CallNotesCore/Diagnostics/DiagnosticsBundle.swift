@@ -57,10 +57,18 @@ public enum DiagnosticsBundle: Sendable {
     public static let exclusionsFileName = "EXCLUSIONS.txt"
 
     static func isExportableLogEvent(_ event: DiagnosticEvent) -> Bool {
-        let transcriptFields: Set<String> = [
-            "text", "start", "startsec", "end", "endsec", "channel", "clusterkey", "words",
-        ]
-        return event.metadata.keys.allSatisfy { !transcriptFields.contains($0.lowercased()) }
+        let allowedMetadata: Set<String>
+        switch (event.category, event.event) {
+        case ("bootstrap", "store_ready"):
+            allowedMetadata = ["backend", "recovered"]
+        case ("capture", "started"):
+            allowedMetadata = ["call"]
+        case ("retention", "swept"):
+            allowedMetadata = ["mode", "bytes"]
+        default:
+            return false
+        }
+        return event.metadata.keys.allSatisfy { allowedMetadata.contains($0.lowercased()) }
     }
 
     public static func export(_ snapshot: DiagnosticsSnapshot, to directory: URL) throws -> URL {

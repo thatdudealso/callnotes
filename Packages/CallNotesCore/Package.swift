@@ -39,6 +39,11 @@ let package = Package(
             dependencies: ["CallNotesCore"],
             path: "Tools/CAFCrashWriter"
         ),
+        .executableTarget(
+            name: "CallNotesBackup",
+            dependencies: ["CallNotesCore"],
+            path: "Tools/CallNotesBackup"
+        ),
         .testTarget(
             name: "CallNotesCoreTests",
             dependencies: ["CallNotesCore"]

@@ -30,7 +30,8 @@ import Testing
             binDirectory: "/opt/homebrew/opt/postgresql@18/bin"
         )
         let dump = FileManager.default.temporaryDirectory.appendingPathComponent("dummy.dump")
-        let counts = try PostgresBackup.verifyRestore(dumpURL: dump, paths: paths, run: run)
+        let backup = try PostgresBackup.backup(to: dump, paths: paths, verify: true, run: run)
+        let counts = try #require(backup)
         #expect(counts["calls"] == 3)
         #expect(commands.contains { $0.contains(PostgresBackup.scratchDatabase) })
         #expect(commands.allSatisfy { !$0.contains("5432") })

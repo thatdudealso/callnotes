@@ -241,7 +241,7 @@ final class AppModel {
     private func startSyncServer(store: any CallStore) {
         guard syncServerTask == nil else { return }
         do {
-            let support = try FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent(CallAudioPaths.applicationSupportFolder, isDirectory: true)
             let syncDirectory = support.appendingPathComponent("Sync", isDirectory: true)
             let identity = try MacTLSIdentity(storageDirectory: syncDirectory)
@@ -1303,15 +1303,11 @@ final class AppModel {
             let backups = try supportRoot().appendingPathComponent("backups", isDirectory: true)
             let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
             let dumpURL = backups.appendingPathComponent("callnotes-\(stamp).dump")
-            try PostgresBackup.dump(to: dumpURL, paths: paths)
             if verify {
-                _ = try PostgresBackup.verifyRestore(dumpURL: dumpURL, paths: paths)
-                _ = try? PostgresBackup.runProcess(
-                    paths.dropdb,
-                    ["--host", paths.socketDirectory, "--port", String(PostgresBackup.port), "--username", PostgresBackup.adminRole, "--if-exists", PostgresBackup.scratchDatabase]
-                )
+                _ = try PostgresBackup.backup(to: dumpURL, paths: paths, verify: true)
                 return "Backup verified. Restore reproduced the live row counts. File: \(dumpURL.path)"
             }
+            _ = try PostgresBackup.backup(to: dumpURL, paths: paths, verify: false)
             return "Wrote \(dumpURL.path)"
         } catch {
             return error.localizedDescription

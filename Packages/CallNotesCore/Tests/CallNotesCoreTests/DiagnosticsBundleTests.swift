@@ -62,12 +62,7 @@ import Testing
             logLines: [
                 DiagnosticEvent(
                     category: "transcription",
-                    event: "segment",
-                    metadata: [
-                        "text": "Private call transcript content",
-                        "startSec": "0",
-                        "endSec": "1",
-                    ]
+                    event: "private call words"
                 )
             ]
         )

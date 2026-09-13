@@ -76,6 +76,23 @@ public enum PostgresBackup: Sendable {
         ])
     }
 
+    @discardableResult
+    public static func backup(
+        to dumpURL: URL,
+        paths: Paths,
+        verify: Bool,
+        keepScratch: Bool = false,
+        run: (String, [String]) throws -> String = runProcess
+    ) throws -> [String: Int]? {
+        try dump(to: dumpURL, paths: paths, run: run)
+        guard verify else { return nil }
+        let counts = try verifyRestore(dumpURL: dumpURL, paths: paths, run: run)
+        if !keepScratch {
+            removeScratch(paths: paths, run: run)
+        }
+        return counts
+    }
+
     public static func restoreScratch(
         from dumpURL: URL,
         paths: Paths,
@@ -146,6 +163,14 @@ public enum PostgresBackup: Sendable {
             }
         }
         return after
+    }
+
+    public static func removeScratch(
+        paths: Paths,
+        scratchDatabase: String = scratchDatabase,
+        run: (String, [String]) throws -> String = runProcess
+    ) {
+        _ = try? run(paths.dropdb, hostArgs(paths, username: adminRole) + ["--if-exists", scratchDatabase])
     }
 
     public static func runProcess(_ executable: String, _ arguments: [String]) throws -> String {
