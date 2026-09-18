@@ -37,6 +37,7 @@ final class AppModel {
     private var liveSession: (any STTSession)?
     private var liveResultsTask: Task<Void, Never>?
     private var liveSegments: [RawSegment] = []
+    private var liveTranscriptionFailure: String?
     private var instantCallAtHangUp: Call?
     private var captureStopHandler: (@MainActor () async -> URL?)?
     private var isStartingLiveSession = false
@@ -83,6 +84,8 @@ final class AppModel {
     var pairingQRPayload: String?
     var pairedDevices: [PairedDevice] = []
     var unsavedRevocations: [UUID: String] = [:]
+
+    var liveCallID: UUID? { instantCallAtHangUp?.id }
 
     var selectedCall: Call? {
         calls.first { $0.id == selectedCallID }
@@ -164,7 +167,14 @@ final class AppModel {
         // `postgres` becomes the published store: a call started while it is in
         // flight would otherwise land in the table it is about to close out.
         var repairFailure: String?
+        var recovered: [RecoveredRecording] = []
         do {
+            if let audioDir = try? CallAudioPaths.audioDirectory() {
+                recovered = try await PartialRecordingRecovery.recover(
+                    audioDirectory: audioDir,
+                    store: postgres
+                )
+            }
             _ = try await postgres.closeStrandedRecordings(excluding: instantCallAtHangUp?.id)
         } catch {
             repairFailure = error.localizedDescription
@@ -177,6 +187,13 @@ final class AppModel {
         startSyncServer(store: postgres)
         statusMessage = repairFailure
         startInboxWatcher()
+        let recoveredIDs = recovered.map(\.call.id)
+        Task { await self.processRecoveredRecordings(ids: recoveredIDs) }
+        Task { _ = await self.sweepRetention() }
+        logDiagnostic(category: "bootstrap", event: "store_ready", metadata: [
+            "backend": "postgres",
+            "recovered": String(recovered.count),
+        ])
     }
 
     func refresh() async throws {
@@ -224,7 +241,7 @@ final class AppModel {
     private func startSyncServer(store: any CallStore) {
         guard syncServerTask == nil else { return }
         do {
-            let support = try FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent(CallAudioPaths.applicationSupportFolder, isDirectory: true)
             let syncDirectory = support.appendingPathComponent("Sync", isDirectory: true)
             let identity = try MacTLSIdentity(storageDirectory: syncDirectory)
@@ -344,6 +361,15 @@ final class AppModel {
 
     func processPhoneUpload(callID: UUID, audioURL: URL, metadata: CallUploadMetadata) async throws {
         guard isStoreInitialized else { return }
+        if let fallbackTranscript = metadata.fallbackTranscript {
+            try await persistFallbackTranscript(fallbackTranscript, for: callID)
+            if try await resumeNotes(callID: callID, audioURL: audioURL) {
+                removePhoneUploadStaging(audioURL)
+                try await refresh()
+                statusMessage = "Imported iPhone fallback transcript."
+                return
+            }
+        }
         if try await resumeNotes(callID: callID, audioURL: audioURL) { return }
         var job = ImportJob(fileName: audioURL.lastPathComponent, sourceURL: audioURL, stage: .settling, callID: callID)
         upsertImportJob(job)
@@ -381,6 +407,29 @@ final class AppModel {
         }
     }
 
+    private func persistFallbackTranscript(_ transcript: OnDeviceFallbackTranscript, for callID: UUID) async throws {
+        guard var call = try await store.fetchCall(id: callID) else { return }
+        let segments = transcript.segments.enumerated().map { index, raw in
+            Segment(
+                callID: callID,
+                seq: index,
+                startSec: raw.start,
+                endSec: raw.end,
+                channel: raw.channel ?? .mixed,
+                clusterKey: raw.channel?.rawValue,
+                text: raw.text,
+                provider: transcript.provider
+            )
+        }
+        guard !segments.isEmpty else { return }
+        try await store.replaceSegments(callID: callID, provider: transcript.provider, segments)
+        call.sttProvider = transcript.provider
+        call.status = .transcribed
+        call.error = nil
+        call.errorStage = nil
+        try await store.upsertCall(call)
+    }
+
     /// A retried upload whose transcript already landed only needs its notes.
     /// Re-importing the same bytes would fingerprint the recording as a
     /// duplicate of itself and delete the call this retry exists to finish.
@@ -404,6 +453,7 @@ final class AppModel {
             _ = try await notesSpine.generateInstant(transcript, call: call)
             _ = try await notesSpine.generateDeep(transcript, call: call)
         } catch {
+            await persistNotesFailure(callID: callID, error: error)
             job.stage = .failed
             job.error = error.localizedDescription
             upsertImportJob(job)
@@ -424,6 +474,14 @@ final class AppModel {
     private func removePhoneUploadStaging(_ audioURL: URL) {
         try? FileManager.default.removeItem(at: audioURL)
         try? FileManager.default.removeItem(at: CallUploadMetadata.sidecarURL(nextTo: audioURL))
+    }
+
+    private func persistNotesFailure(callID: UUID, error: Error) async {
+        guard var call = try? await store.fetchCall(id: callID) else { return }
+        call.status = .failed
+        call.error = error.localizedDescription
+        call.errorStage = PipelineStage.notes.rawValue
+        try? await store.upsertCall(call)
     }
 
     private func updateDashboardTicker() {
@@ -575,16 +633,21 @@ final class AppModel {
             let engine = session is AppleSpeechSession ? STTProviderID.appleSpeech : provider.requestedID
             liveSession = session
             liveSegments = []
+            liveTranscriptionFailure = nil
             live.engine = engine
             live.isOffDevice = engine == .metaMuse
             if !forSamplePlayback {
                 let counterpartyName = await suggestedCounterpartyName()
+                let callID = UUID()
+                let audioPath = (try? CallAudioPaths.cafURL(callID: callID).path) ?? ""
                 let call = Call(
+                    id: callID,
                     source: .macManual,
                     startedAt: Date(),
                     counterpartyName: counterpartyName,
-                    audioPath: "",
-                    sttProvider: engine
+                    audioPath: audioPath,
+                    sttProvider: engine,
+                    status: .recording
                 )
                 try await store.upsertCall(call)
                 instantCallAtHangUp = call
@@ -609,7 +672,8 @@ final class AppModel {
                     }
                 } catch {
                     guard let self, !Task.isCancelled else { return }
-                    statusMessage = error.localizedDescription
+                    liveTranscriptionFailure = error.localizedDescription
+                    statusMessage = liveTranscriptionFailure
                 }
             }
             isStartingLiveSession = false
@@ -637,7 +701,8 @@ final class AppModel {
             await liveResultsTask?.value
         } catch {
             liveResultsTask?.cancel()
-            statusMessage = error.localizedDescription
+            liveTranscriptionFailure = error.localizedDescription
+            statusMessage = liveTranscriptionFailure
         }
         if var call = instantCallAtHangUp {
             instantCallAtHangUp = nil
@@ -646,12 +711,24 @@ final class AppModel {
             call.endedAt = Date()
             call.durationSec = max(0, Int(call.endedAt!.timeIntervalSince(call.startedAt).rounded(.down)))
             if let captureURL {
+                _ = try? CAFHeaderRepair.repairIfNeeded(captureURL)
                 call.audioPath = captureURL.path
+            } else if let surviving = survivingRecordingURL(for: call) {
+                _ = try? CAFHeaderRepair.repairIfNeeded(surviving)
+                call.audioPath = surviving.path
+            }
+            if let liveTranscriptionFailure {
+                call.status = .failed
+                call.error = liveTranscriptionFailure
+                call.errorStage = PipelineStage.transcription.rawValue
+            } else if captureURL != nil {
                 call.status = .transcribed
+            } else if survivingRecordingURL(for: call) != nil {
+                call.status = .uploaded
             } else if call.source == .macManual {
                 call.status = .failed
                 call.error = "Audio capture did not produce a recording"
-                call.errorStage = "capture"
+                call.errorStage = PipelineStage.capture.rawValue
             } else {
                 call.status = .transcribed
             }
@@ -678,8 +755,17 @@ final class AppModel {
                 statusMessage = error.localizedDescription
                 return
             }
-            guard call.status == .transcribed else {
+            if call.status == .failed, call.errorStage == PipelineStage.transcription.rawValue {
+                statusMessage = call.error
+                return
+            }
+            guard call.status == .transcribed || call.status == .uploaded else {
                 statusMessage = "Audio capture failed. The live transcript was kept without a recording."
+                return
+            }
+            if call.status == .uploaded {
+                statusMessage = "Capture ended with a partial recording. Processing it."
+                await processSavedRecording(call)
                 return
             }
             await generateInstantNotes(for: call, rawSegments: liveSegments)
@@ -715,14 +801,45 @@ final class AppModel {
         call.durationSec = max(0, Int(call.endedAt!.timeIntervalSince(call.startedAt).rounded(.down)))
         call.status = .failed
         call.error = message
-        call.errorStage = "capture"
+        call.errorStage = PipelineStage.capture.rawValue
+        if let surviving = survivingRecordingURL(for: call) {
+            _ = try? CAFHeaderRepair.repairIfNeeded(surviving)
+            call.audioPath = surviving.path
+            call.status = .uploaded
+            call.error = nil
+            call.errorStage = nil
+        }
         do {
             try await store.upsertCall(call)
         } catch {
             statusMessage = error.localizedDescription
             return
         }
+        if call.status == .uploaded {
+            statusMessage = "Capture stopped early. The partial recording was kept."
+            await processSavedRecording(call)
+            return
+        }
         statusMessage = "Audio capture could not start: \(message)"
+    }
+
+    func captureDidStart(callID: UUID, url: URL) async {
+        if var call = instantCallAtHangUp {
+            call.audioPath = url.path
+            instantCallAtHangUp = call
+            try? await store.upsertCall(call)
+            return
+        }
+        let call = Call(
+            id: callID,
+            source: .macFaceTime,
+            startedAt: Date(),
+            audioPath: url.path,
+            sttProvider: .appleSpeech,
+            status: .recording
+        )
+        try? await store.upsertCall(call)
+        logDiagnostic(category: "capture", event: "started", metadata: ["call": callID.uuidString])
     }
 
     func updateCounterpartyName(for callID: UUID, name: String) async {
@@ -1086,10 +1203,17 @@ final class AppModel {
             speakerNames: ["near": "Me", "far": call.counterpartyName ?? "Speaker 2"],
             counterpartyName: call.counterpartyName
         )
+        let instant: NotesRecord
         do {
-            let instant = try await notesSpine.generateInstant(transcript, call: call)
-            notesByCall[call.id] = instant
-            selectedCallID = call.id
+            instant = try await notesSpine.generateInstant(transcript, call: call)
+        } catch {
+            await persistNotesFailure(callID: call.id, error: error)
+            statusMessage = error.localizedDescription
+            return
+        }
+        notesByCall[call.id] = instant
+        selectedCallID = call.id
+        do {
             try await refresh()
         } catch {
             statusMessage = error.localizedDescription
@@ -1111,15 +1235,187 @@ final class AppModel {
             defer {
                 if notesGeneratingCallID == callID { notesGeneratingCallID = nil }
             }
+            let deep: NotesRecord
             do {
-                let deep = try await notesSpine.generateDeep(transcript, call: processed.call)
-                notesByCall[callID] = deep
+                deep = try await notesSpine.generateDeep(transcript, call: processed.call)
+            } catch {
+                await persistNotesFailure(callID: callID, error: error)
+                statusMessage = error.localizedDescription
+                return
+            }
+            notesByCall[callID] = deep
+            do {
                 try await refresh()
                 statusMessage = "Notes ready (\(deep.provider.rawValue))."
             } catch {
                 statusMessage = error.localizedDescription
             }
         }
+    }
+
+    func retryFailedStage() async {
+        guard let call = selectedCall else { return }
+        let hasAudio = survivingRecordingURL(for: call) != nil
+        let presentation = FailurePresentation.make(
+            error: call.error,
+            errorStage: call.errorStage,
+            hasAudio: hasAudio
+        )
+        switch presentation.action {
+        case .recoverPartial, .retranscribe:
+            await processSavedRecording(call)
+        case .retryPersistence:
+            await retryPersistence(for: call)
+        case .regenerateNotes:
+            await regenerateNotes()
+        case .none:
+            statusMessage = presentation.detail
+        }
+    }
+
+    func sweepRetention() async -> RetentionSweepResult? {
+        let storedDays = UserDefaults.standard.object(forKey: RetentionPolicy.daysDefaultsKey) as? Int
+        let policy = RetentionPolicy.resolved(
+            mode: UserDefaults.standard.string(forKey: RetentionPolicy.modeDefaultsKey),
+            days: storedDays
+        )
+        do {
+            let result = try await RetentionSweeper(policy: policy).sweep(store: store)
+            if result.didReclaimDisk {
+                try await refresh()
+            }
+            logDiagnostic(category: "retention", event: "swept", metadata: [
+                "mode": policy.mode.rawValue,
+                "bytes": String(result.reclaimedBytes),
+            ])
+            return result
+        } catch {
+            statusMessage = error.localizedDescription
+            return nil
+        }
+    }
+
+    func backupDatabase(verify: Bool) async -> String {
+        guard let paths = PostgresBackup.dedicatedPaths() else {
+            return "Dedicated CallNotes Postgres was not found."
+        }
+        do {
+            let backups = try supportRoot().appendingPathComponent("backups", isDirectory: true)
+            let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+            let dumpURL = backups.appendingPathComponent("callnotes-\(stamp).dump")
+            if verify {
+                _ = try PostgresBackup.backup(to: dumpURL, paths: paths, verify: true)
+                return "Backup verified. Restore reproduced the live row counts. File: \(dumpURL.path)"
+            }
+            _ = try PostgresBackup.backup(to: dumpURL, paths: paths, verify: false)
+            return "Wrote \(dumpURL.path)"
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    func exportDiagnostics(to directory: URL) async -> String {
+        do {
+            let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+            let bundleDir = directory.appendingPathComponent("CallNotes-diagnostics-\(stamp)", isDirectory: true)
+            let root = try supportRoot()
+            let snapshot = DiagnosticsSnapshot(
+                appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0",
+                osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+                storeBackend: storeBackendName,
+                engineDefault: UserDefaults.standard.string(forKey: "default_engine") ?? "local",
+                consentPolicy: UserDefaults.standard.string(forKey: ConsentPolicy.defaultsKey) ?? ConsentPolicy.announce.rawValue,
+                retention: RetentionPolicy.resolved(
+                    mode: UserDefaults.standard.string(forKey: RetentionPolicy.modeDefaultsKey),
+                    days: UserDefaults.standard.object(forKey: RetentionPolicy.daysDefaultsKey) as? Int
+                ).mode.rawValue,
+                dualInstanceMode: live.dualInstanceMode.rawValue,
+                health: [
+                    "postgres": storeBackendName,
+                    "speech": speech.dualInstanceMode.rawValue,
+                ],
+                logLines: (try? DiagnosticLog.recentEvents(root: root)) ?? []
+            )
+            _ = try DiagnosticsBundle.export(snapshot, to: bundleDir)
+            if let forbidden = DiagnosticsBundle.containsForbiddenContent(in: bundleDir) {
+                return "Export blocked: \(forbidden)"
+            }
+            return "Exported \(bundleDir.path). Excludes \(DiagnosticsBundle.exclusions.joined(separator: ", "))."
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    private func processRecoveredRecordings(ids: [UUID]) async {
+        guard !ids.isEmpty else { return }
+        for id in ids {
+            guard let call = try? await store.fetchCall(id: id), call.status == .uploaded else { continue }
+            await processSavedRecording(call)
+        }
+    }
+
+    private func processSavedRecording(_ call: Call) async {
+        guard let url = survivingRecordingURL(for: call) else {
+            statusMessage = "No recording file was found to process."
+            return
+        }
+        _ = try? CAFHeaderRepair.repairIfNeeded(url)
+        statusMessage = "Processing saved recording..."
+        recordingState = .processing
+        defer {
+            if recordingState == .processing { recordingState = .idle }
+        }
+        do {
+            var working = call
+            working.audioPath = url.path
+            working.status = .transcribing
+            working.error = nil
+            working.errorStage = nil
+            try await store.upsertCall(working)
+            let processed = try await LocalTranscriptionSpine(
+                speech: speech,
+                diarizer: FluidDiarizer(),
+                store: store
+            ).process(
+                cafURL: url,
+                call: working,
+                profiles: try await store.fetchSpeakerProfiles()
+            )
+            turnsByCall[processed.call.id] = processed.turns
+            selectedCallID = processed.call.id
+            try await refresh()
+            await generateDeepNotes(for: processed)
+            statusMessage = "Processed saved recording."
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    private func retryPersistence(for failedCall: Call) async {
+        await processSavedRecording(failedCall)
+    }
+
+    private func survivingRecordingURL(for call: Call) -> URL? {
+        let candidates = [
+            call.audioPath.isEmpty ? nil : URL(fileURLWithPath: call.audioPath),
+            try? CallAudioPaths.cafURL(callID: call.id),
+        ].compactMap { $0 }
+        for url in candidates where PartialRecordingRecovery.hasProcessableAudio(path: url.path) {
+            return url.resolvingSymlinksInPath()
+        }
+        return nil
+    }
+
+    private func supportRoot() throws -> URL {
+        try CallAudioPaths.audioDirectory().deletingLastPathComponent()
+    }
+
+    private func logDiagnostic(category: String, event: String, metadata: [String: String] = [:]) {
+        guard let root = try? supportRoot() else { return }
+        try? DiagnosticLog.append(
+            DiagnosticEvent(category: category, event: event, metadata: metadata),
+            root: root
+        )
     }
 
     private func loadTurns(callID: UUID) async throws -> [AttributedTurn] {

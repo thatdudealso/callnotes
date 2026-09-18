@@ -25,7 +25,7 @@ public struct STTSessionConfig: Sendable {
 }
 
 /// A provider-native transcript segment before diarization and identity.
-public struct RawSegment: Sendable, Equatable {
+public struct RawSegment: Codable, Sendable, Equatable {
     public var start: TimeInterval
     public var end: TimeInterval
     public var text: String

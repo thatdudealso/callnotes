@@ -78,6 +78,7 @@ final class AudioCapture: @unchecked Sendable {
 
     private var writer: StereoCAFWriter?
     private var writing = false
+    private let consentMix = Mutex<(tone: [Int16], consumed: Int)?>(nil)
     private(set) var isRunning = false
     private(set) var farSource: FarSource = .none
     private(set) var outputURL: URL?
@@ -107,6 +108,7 @@ final class AudioCapture: @unchecked Sendable {
         outputURL = configuration.outputURL
         writer = try StereoCAFWriter(url: configuration.outputURL)
         writing = false
+        consentMix.withLock { $0 = nil }
         ioLatency = DeviceIOLatency.measure()
         latency.withLock {
             $0 = CaptureAlignment.LatencyCompensation(
@@ -181,6 +183,19 @@ final class AudioCapture: @unchecked Sendable {
         isRunning = true
     }
 
+    /// Mixes consent-tone PCM onto the near channel in the saved recording.
+    func enqueueConsentPCM(_ pcm: [Int16]) {
+        guard !pcm.isEmpty else { return }
+        consentMix.withLock { state in
+            if var current = state {
+                current.tone.append(contentsOf: pcm)
+                state = current
+            } else {
+                state = (pcm, 0)
+            }
+        }
+    }
+
     /// Begin committing the ring + live samples to the CAF. Call this when
     /// debounce promotes pendingStart to recording so the debounce window is kept.
     func beginCommittedWrite() {
@@ -249,11 +264,19 @@ final class AudioCapture: @unchecked Sendable {
     }
 
     private func mix(channel: Channel, samples: [Int16], hostTime: UInt64, sampleRate: Double) {
+        var mixed = samples
+        if channel == .near {
+            consentMix.withLock { state in
+                guard var current = state else { return }
+                ConsentAnnouncement.mix(current.tone, into: &mixed, consumed: &current.consumed)
+                state = current.consumed >= current.tone.count ? nil : current
+            }
+        }
         mixer.withLock { state in
             switch channel {
             case .near:
                 if state.nearHost == nil { state.nearHost = hostTime }
-                state.near.append(contentsOf: samples)
+                state.near.append(contentsOf: mixed)
             case .far:
                 if state.farHost == nil { state.farHost = hostTime }
                 state.far.append(contentsOf: samples)

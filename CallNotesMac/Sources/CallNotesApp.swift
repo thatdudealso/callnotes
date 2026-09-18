@@ -33,6 +33,10 @@ struct CallNotesApp: App {
             TabView {
                 MetaEngineSettingsView(appModel: model)
                     .tabItem { Label("Engines", systemImage: "cpu") }
+                RecordingSettingsView()
+                    .tabItem { Label("Recording", systemImage: "mic") }
+                StorageSettingsView(appModel: model)
+                    .tabItem { Label("Storage", systemImage: "externaldrive") }
                 DevicesSettingsView(appModel: model)
                     .tabItem { Label("Devices", systemImage: "iphone") }
             }
@@ -63,6 +67,9 @@ struct MenuBarContentView: View {
                             default: nil
                             }
                             try await model.startLiveSession(override: override)
+                            if let liveCallID = model.liveCallID {
+                                coordinator.attachCallID(liveCallID)
+                            }
                             coordinator.toggleManual()
                         } catch {
                             model.statusMessage = error.localizedDescription
@@ -117,6 +124,9 @@ struct MenuBarContentView: View {
             }
             coordinator.setCaptureFailureHandler { message in
                 await model.failLiveSessionForCapture(message)
+            }
+            coordinator.setCaptureStartedHandler { callID, url in
+                await model.captureDidStart(callID: callID, url: url)
             }
             coordinator.start()
         }

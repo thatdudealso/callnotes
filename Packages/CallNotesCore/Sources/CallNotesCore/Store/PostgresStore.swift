@@ -429,7 +429,8 @@ public actor PostgresStore: CallStore {
         for call in stranded {
             let closed = StrandedRecordingRepair.closed(
                 call,
-                lastSegmentEndSec: try await lastSegmentEnd(callID: call.id)
+                lastSegmentEndSec: try await lastSegmentEnd(callID: call.id),
+                hasRecoverableAudio: PartialRecordingRecovery.hasProcessableAudio(path: call.audioPath)
             )
             try await upsertCall(closed)
             repaired.append(closed)

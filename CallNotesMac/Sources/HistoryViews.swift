@@ -182,6 +182,9 @@ struct CallDetailView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             header
+            if let call = model.selectedCall, call.status == .failed {
+                FailureRecoveryCard(model: model, call: call)
+            }
             notes
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
@@ -378,5 +381,40 @@ struct CallDetailView: View {
     private func timestamp(_ time: TimeInterval) -> String {
         let seconds = Int(time)
         return String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
+}
+
+private struct FailureRecoveryCard: View {
+    var model: AppModel
+    var call: Call
+
+    var body: some View {
+        let presentation = FailurePresentation.make(
+            error: call.error,
+            errorStage: call.errorStage,
+            hasAudio: PartialRecordingRecovery.hasProcessableAudio(path: call.audioPath)
+        )
+        VStack(alignment: .leading, spacing: 8) {
+            Label(presentation.headline, systemImage: "exclamationmark.triangle.fill")
+                .font(.headline)
+                .foregroundStyle(.primary)
+            Text(presentation.detail)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let title = presentation.actionTitle, presentation.action != .none {
+                Button(title) {
+                    Task { await model.retryFailedStage() }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(CallNotesStyle.primary)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(presentation.headline)
+        .accessibilityHint(presentation.detail)
     }
 }

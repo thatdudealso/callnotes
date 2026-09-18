@@ -267,6 +267,9 @@ final class PhoneAppModel {
     var isPaired = false
     var pairedMacName = "Your Mac"
     var uploadStatus: String?
+    var onDeviceFallback: Bool = UserDefaults.standard.bool(forKey: OnDeviceFallback.defaultsKey) {
+        didSet { UserDefaults.standard.set(onDeviceFallback, forKey: OnDeviceFallback.defaultsKey) }
+    }
     var storeMessage: String?
     var recorder = InPersonRecorder()
     @ObservationIgnored nonisolated(unsafe) private var pairingInvalidatedObserver: NSObjectProtocol?
@@ -353,12 +356,50 @@ final class PhoneAppModel {
         defer { recorder.releaseRecordingFile() }
         do {
             let capture = try recorder.stop()
+            var fallbackTranscript: OnDeviceFallbackTranscript?
+            let reachable = await probeMacReachable()
+            if OnDeviceFallback.shouldTranscribe(
+                isEnabled: onDeviceFallback,
+                isMacReachable: reachable
+            ) {
+                do {
+                    let transcript = try await OnDeviceFallbackTranscriber(speech: AppleSpeechProvider()).transcribe(
+                        fileURL: capture.url,
+                        callID: UUID(),
+                        startedAt: capture.startedAt
+                    )
+                    fallbackTranscript = transcript
+                    uploadStatus = "Mac unreachable. Transcribed on this iPhone (\(transcript.segments.count) segments)."
+                } catch {
+                    uploadStatus = "On-device transcription failed: \(error.localizedDescription)"
+                }
+            }
             try await BackgroundUploadCoordinator.shared.enqueue(
                 audioAt: capture.url,
-                metadata: .init(source: .iphoneMeeting, startedAt: capture.startedAt)
+                metadata: .init(
+                    source: .iphoneMeeting,
+                    startedAt: capture.startedAt,
+                    fallbackTranscript: fallbackTranscript
+                )
             )
-            uploadStatus = await BackgroundUploadCoordinator.shared.resume(userInitiated: true)
+            let resume = await BackgroundUploadCoordinator.shared.resume(userInitiated: true)
+            if uploadStatus == nil || uploadStatus?.contains("Transcribed on this iPhone") != true {
+                uploadStatus = resume
+            }
         } catch { uploadStatus = error.localizedDescription }
+    }
+
+    private func probeMacReachable() async -> Bool {
+        guard let configuration = PhonePairingStore.loadConfiguration() else { return false }
+        var request = URLRequest(url: configuration.serverURL.appendingPathComponent("health"))
+        request.timeoutInterval = 3
+        request.httpMethod = "GET"
+        do {
+            _ = try await URLSession.shared.data(for: request)
+            return true
+        } catch {
+            return !OnDeviceFallback.isMacUnreachable(error.localizedDescription)
+        }
     }
 }
 
@@ -478,8 +519,10 @@ struct PhoneSettingsView: View {
                     }
                 }
                 Section("Processing") {
-                    Toggle("Use on-device fallback", isOn: .constant(false)).disabled(true)
-                    Text("Your recordings upload to your paired Mac for processing.").font(.footnote).foregroundStyle(.secondary)
+                    Toggle("Use on-device fallback", isOn: $model.onDeviceFallback)
+                    Text("When your Mac cannot be reached, CallNotes transcribes on this iPhone with SpeechAnalyzer. The recording still uploads when the Mac is back.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
                 Section("Retention") { LabeledContent("Shared recording files", value: "Until uploaded") }
                 if let status = model.uploadStatus { Section("Uploads") { Text(status).foregroundStyle(.secondary) } }

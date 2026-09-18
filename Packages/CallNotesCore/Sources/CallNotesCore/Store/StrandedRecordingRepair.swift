@@ -8,7 +8,11 @@ public enum StrandedRecordingRepair {
         call.status == .recording && call.id != liveCallID
     }
 
-    public static func closed(_ call: Call, lastSegmentEndSec: TimeInterval?) -> Call {
+    public static func closed(
+        _ call: Call,
+        lastSegmentEndSec: TimeInterval?,
+        hasRecoverableAudio: Bool = false
+    ) -> Call {
         var repaired = call
         let knownEnds = [
             lastSegmentEndSec,
@@ -18,12 +22,16 @@ public enum StrandedRecordingRepair {
         let elapsed = knownEnds.max() ?? 0
         repaired.endedAt = call.startedAt.addingTimeInterval(elapsed)
         repaired.durationSec = Int(elapsed.rounded(.down))
-        if knownEnds.isEmpty {
+        if !knownEnds.isEmpty {
+            repaired.status = .transcribed
+        } else if hasRecoverableAudio {
+            repaired.status = .uploaded
+            repaired.error = nil
+            repaired.errorStage = nil
+        } else {
             repaired.status = .failed
             repaired.error = "Recording did not finish."
-            repaired.errorStage = "capture"
-        } else {
-            repaired.status = .transcribed
+            repaired.errorStage = PipelineStage.capture.rawValue
         }
         return repaired
     }

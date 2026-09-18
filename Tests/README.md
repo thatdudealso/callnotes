@@ -19,7 +19,12 @@ Cross-target test harnesses land here as the phases that need them arrive
   `CallNotesIOS/UITests/PhoneSyncUITests.swift`. It drives the shipping app
   against a Mac that is serving, so it is skipped unless
   `CALLNOTES_SYNC_TICKET` carries that Mac's QR pairing payload,
-- backup/restore and failure-injection scenarios (Phase 7).
+- backup, retention, crash-CAF, diagnostics, consent, on-device fallback,
+  and failure-recovery tests (Phase 7) live in the package instead, as
+  `Packages/CallNotesCore/Tests/CallNotesCoreTests`. Mid-write CAF kill uses
+  `Packages/CallNotesCore/Tools/CAFCrashWriter`. Operator backup is
+  `Scripts/postgres-backup.sh` (thin wrapper around `CallNotesBackup`). See
+  `AGENTS.md` for the dedicated Postgres socket and diagnostics exclusions.
 
 Unit tests for pure logic live inside the package:
 `Packages/CallNotesCore/Tests/CallNotesCoreTests` (run with
